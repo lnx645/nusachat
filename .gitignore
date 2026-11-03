@@ -1,0 +1,30 @@
+# Env & secrets
+backend/.env
+backend/storage/*.sqlite
+backend/storage/*.sqlite-wal
+backend/storage/*.sqlite-shm
+backend/storage/uploads/*
+!backend/storage/uploads/.gitkeep
+backend/storage/fcm-service-account.json
+backend/storage/fcm-oauth-cache.json
+
+# Android
+mobile/.gradle/
+mobile/build/
+mobile/app/build/
+mobile/app/release/
+mobile/.idea/
+*.iml
+local.properties
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+backend/application/logs/*
+!backend/application/logs/.gitkeep
+
+# Temp
+/tmp/

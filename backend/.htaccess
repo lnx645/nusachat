@@ -1,0 +1,15 @@
+RewriteEngine On
+
+# Keep the storage folder and framework internals private.
+RewriteRule ^(system|application|database|tools)/ - [F,L]
+RewriteRule ^storage/.*\.(sqlite|sqlite-wal|sqlite-shm|log)$ - [F,L]
+
+# Serve uploaded media directly when the file exists.
+RewriteCond %{REQUEST_URI} ^/uploads/
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+# Everything else goes to the API front controller.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]

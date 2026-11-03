@@ -1,0 +1,69 @@
+{
+  "project_info": {
+    "project_number": "719918438607",
+    "firebase_url": "https://dachat-6fd87-default-rtdb.firebaseio.com",
+    "project_id": "dachat-6fd87",
+    "storage_bucket": "dachat-6fd87.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:719918438607:android:cd00424e1a4a07d6bf7fba",
+        "android_client_info": {
+          "package_name": "com.d03x.dapay.dapay"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "719918438607-78oq27jv419pkp266l0o1cjgi3hc8mls.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCGpWEs2IcJvo9yfwu_ASQXHf5-uCGvxs0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "719918438607-78oq27jv419pkp266l0o1cjgi3hc8mls.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:719918438607:android:ae6277f812e8df88bf7fba",
+        "android_client_info": {
+          "package_name": "id.nusachat.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "719918438607-78oq27jv419pkp266l0o1cjgi3hc8mls.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCGpWEs2IcJvo9yfwu_ASQXHf5-uCGvxs0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "719918438607-78oq27jv419pkp266l0o1cjgi3hc8mls.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

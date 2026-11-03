@@ -1,0 +1,55 @@
+<?php
+defined('BASEPATH') OR exit('No direct script access allowed');
+
+$scheme = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+$host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+$base = $scheme . '://' . $host . '/';
+
+$config['base_url'] = getenv('APP_URL') ?: $base;
+$config['index_page'] = '';
+$config['uri_protocol'] = 'REQUEST_URI';
+$config['url_suffix'] = '';
+$config['language'] = 'english';
+$config['charset'] = 'UTF-8';
+$config['enable_hooks'] = false;
+$config['subclass_prefix'] = 'MY_';
+$config['composer_autoload'] = false;
+$config['permitted_uri_chars'] = 'a-z 0-9~%.:_\-';
+$config['allow_get_array'] = true;
+$config['enable_query_strings'] = false;
+$config['controller_trigger'] = 'c';
+$config['function_trigger'] = 'm';
+$config['directory_trigger'] = 'd';
+$config['log_threshold'] = 1;
+$config['log_path'] = APPPATH . 'logs/';
+$config['log_file_extension'] = '';
+$config['log_file_permissions'] = 0644;
+$config['log_date_format'] = 'Y-m-d H:i:s';
+$config['error_views_path'] = '';
+$config['cache_path'] = APPPATH . 'cache/';
+$config['cache_query_string'] = false;
+$config['encryption_key'] = getenv('APP_SECRET') ?: 'dev-secret-change-me';
+$config['sess_driver'] = 'files';
+$config['sess_cookie_name'] = 'nusachat_session';
+$config['sess_expiration'] = 7200;
+$config['sess_save_path'] = sys_get_temp_dir();
+$config['sess_match_ip'] = false;
+$config['sess_time_to_update'] = 300;
+$config['sess_regenerate_destroy'] = false;
+$config['cookie_prefix'] = '';
+$config['cookie_domain'] = '';
+$config['cookie_path'] = '/';
+$config['cookie_secure'] = false;
+$config['cookie_httponly'] = true;
+$config['standardize_newlines'] = false;
+$config['global_xss_filtering'] = false;
+$config['csrf_protection'] = false; // Bearer-token API, no cookies.
+$config['csrf_token_name'] = 'csrf_test_name';
+$config['csrf_cookie_name'] = 'csrf_cookie_name';
+$config['csrf_expire'] = 7200;
+$config['csrf_regenerate'] = true;
+$config['csrf_exclude_uris'] = [];
+$config['compress_output'] = false;
+$config['time_reference'] = 'UTC';
+$config['rewrite_short_tags'] = false;
+$config['proxy_ips'] = '';
