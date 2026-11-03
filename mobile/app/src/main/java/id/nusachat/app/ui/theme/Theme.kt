@@ -20,6 +20,11 @@ val NusaGreen = Color(0xFF06C755)
 val NusaGreenDark = Color(0xFF00B900)
 val NusaMint = Color(0xFF4FD080)
 
+// Background aplikasi ala LINE (satu-satunya sumber warna latar):
+// daftar/umum mengikuti background scheme, ruang chat biru khas LINE.
+val NusaChatBackgroundLight = Color(0xFF8DB4D6)
+val NusaChatBackgroundDark = Color(0xFF1B2837)
+
 private val LightColors = lightColorScheme(
     primary = NusaGreen, // LINE green
     onPrimary = Color.White,
@@ -31,7 +36,7 @@ private val LightColors = lightColorScheme(
     onSecondaryContainer = Color(0xFF222222),
     tertiary = Color(0xFF2C5DB0),
     onTertiary = Color.White,
-    background = Color(0xFFF5F5F5), // LINE list bg
+    background = Color(0xFFF5F7F8), // LINE app bg
     onBackground = Color(0xFF111111),
     surface = Color.White, // LINE card bg
     onSurface = Color(0xFF111111),
@@ -54,7 +59,7 @@ private val DarkColors = darkColorScheme(
     onSecondaryContainer = Color(0xFFE0E0E0),
     tertiary = Color(0xFF8AB4F8),
     onTertiary = Color(0xFF0B1A33),
-    background = Color(0xFF0F0F0F),
+    background = Color(0xFF121212), // LINE dark app bg
     onBackground = Color(0xFFEFEFEF),
     surface = Color(0xFF1A1A1A),
     onSurface = Color(0xFFEFEFEF),
@@ -68,8 +73,14 @@ private val DarkColors = darkColorScheme(
 
 // LINE — ukuran diekstrak dari layout chat_ui_row_* dan values/dimens
 // Header Obrolan 24sp extraBold, title 19sp, body pesan 15sp, timestamp 11sp, label chip 13sp
+// Semua slot Material diisi supaya komponen bawaan tidak lari ke ukuran default.
 private val LineTypography = Typography(
+    displayLarge = TextStyle(fontSize = 28.sp, lineHeight = 34.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp),
+    displayMedium = TextStyle(fontSize = 26.sp, lineHeight = 32.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp),
     displaySmall = TextStyle(fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp),
+    headlineLarge = TextStyle(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold),
+    headlineMedium = TextStyle(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.Bold),
+    headlineSmall = TextStyle(fontSize = 19.sp, lineHeight = 24.sp, fontWeight = FontWeight.Bold),
     titleLarge = TextStyle(fontSize = 19.sp, lineHeight = 24.sp, fontWeight = FontWeight.Bold),
     titleMedium = TextStyle(fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold),
     titleSmall = TextStyle(fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),

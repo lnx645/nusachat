@@ -47,7 +47,7 @@ import id.nusachat.app.ui.theme.NusaIcons
  * Aturan ekor: HANYA text murni yang berekor, dan cuma pesan pertama dalam
  * rentetan pengirim yang sama ([compactTop] = false). Maps/location, image,
  * video, voice(audio) & file selalu kartu rounded penuh tanpa ekor.
- * Tanpa avatar — avatar cuma muncul di app bar.
+ * Di grup, bubble lawan menampilkan avatar + nama pengirim.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -70,7 +70,7 @@ fun MessageBubble(
     onImageClick: (String) -> Unit = {},
 ) {
     // Gaya LINE: mine hijau segar, other putih/abu, tanpa gembok.
-    val bubbleColor = if (mine) Color(0xFF06C755) else MaterialTheme.colorScheme.surface
+    val bubbleColor = if (mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
     val textColor = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
     val isTextBubble = (message.type == "text" || message.type.isBlank()) &&
         message.attachmentUrl.isNullOrBlank()
@@ -86,13 +86,30 @@ fun MessageBubble(
     }
     val verticalPad = if (compactTop || compactBottom) 1.dp else 3.dp
 
+    val showAvatar = isGroup && !mine
+    val avatarVisible = showAvatar && !compactBottom
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 10.dp, vertical = verticalPad),
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
-        verticalAlignment = Alignment.Bottom,
+        verticalAlignment = Alignment.Top,
     ) {
+        if (showAvatar) {
+            if (avatarVisible) {
+                id.nusachat.app.ui.components.NusaAvatar(
+                    name = message.sender?.displayName ?: "?",
+                    url = message.sender?.avatarUrl,
+                    gender = message.sender?.gender,
+                    seed = message.sender?.id,
+                    size = 32.dp,
+                )
+            } else {
+                Spacer(modifier = Modifier.size(32.dp))
+            }
+            Spacer(Modifier.width(7.dp))
+        }
+
         Column(
             horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
             modifier = Modifier.widthIn(max = 280.dp),
@@ -102,6 +119,9 @@ fun MessageBubble(
                     text = message.sender.displayName,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
                 )
             }
@@ -183,13 +203,13 @@ fun MessageBubble(
                 Text(
                     text = formatClockTime(message.createdAt),
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                    // Jam SELALU di luar bubble (di atas background chat),
-                    // jadi warnanya abu-abu netral — putih di atas bg terang = hilang.
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // Jam di atas background chat biru LINE — pakai token kontras
+                    // (inverseOnSurface) agar terbaca di light & dark.
+                    color = MaterialTheme.colorScheme.inverseOnSurface,
                 )
                 if (mine) {
                     Spacer(Modifier.width(3.dp))
-                    MessageStatus(status = message.status, pending = message.pending, light = false)
+                    MessageStatus(status = message.status, pending = message.pending, light = true)
                 }
             }
         }
@@ -232,7 +252,11 @@ private fun BubbleContent(
                 // LINE: kotak reply dengan garis hijau tebal di kiri
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = if (mine) Color(0xFF04A94A) else Color(0xFFF5F5F5),
+                    color = if (mine) {
+                        MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.18f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Row {
@@ -240,20 +264,32 @@ private fun BubbleContent(
                             modifier = Modifier
                                 .width(3.dp)
                                 .height(48.dp)
-                                .background(if (mine) Color.White else Color(0xFF06C755), RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp))
+                                .background(
+                                    if (mine) MaterialTheme.colorScheme.onPrimary
+                                    else MaterialTheme.colorScheme.primary,
+                                    RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp),
+                                )
                         )
                         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp).weight(1f)) {
                             Text(
                                 text = quoted.sender?.displayName ?: "Pesan",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
-                                color = if (mine) Color.White else Color(0xFF06C755),
+                                color = if (mine) {
+                                    MaterialTheme.colorScheme.onPrimary
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                },
                                 maxLines = 1,
                             )
                             Text(
                                 text = quoted.body?.take(90).orEmpty().ifBlank { "[${quoted.type}]" },
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (mine) Color.White.copy(alpha = 0.9f) else Color(0xFF555555),
+                                color = if (mine) {
+                                    MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.9f)
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )

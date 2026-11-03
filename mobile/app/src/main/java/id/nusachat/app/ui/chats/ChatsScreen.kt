@@ -228,7 +228,7 @@ private fun ConversationRow(
         Box {
             NusaAvatar(
                 name = conversation.displayTitle,
-                url = conversation.avatarUrl ?: conversation.peer?.avatarUrl,
+                url = conversation.avatarUrl ?: conversation.peer?.avatarUrl, gender = conversation.peer?.gender, seed = conversation.peer?.id,
                 size = 50.dp,
             )
             if (peerOnline) {
@@ -286,6 +286,7 @@ private fun ConversationRow(
 private fun conversationPreview(conversation: Conversation, currentUserId: Long?): String {
     val message = conversation.lastMessage ?: return "Belum ada pesan"
     if (message.revoked) return "Pesan telah ditarik"
+    if (message.type == "system") return message.body?.take(60) ?: "Aktivitas grup"
     val raw = when (message.type) {
         "image" -> "[Foto]"
         "video" -> "[Video]"

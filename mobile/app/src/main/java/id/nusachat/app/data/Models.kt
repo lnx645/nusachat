@@ -54,6 +54,12 @@ data class Conversation(
     val createdBy: Long = 0L,
     val myRole: String = "member",
     val muted: Boolean = false,
+    val onlyAdminsCanSend: Boolean = false,
+    val onlyAdminsCanEdit: Boolean = false,
+    val onlyAdminsCanAdd: Boolean = false,
+    val inviteLinkEnabled: Boolean = true,
+    val approveNewMembers: Boolean = false,
+    val disappearingDays: Int = 0,
 ) {
     val isGroup: Boolean get() = type == "group"
     val displayTitle: String get() = title.ifBlank { if (isGroup) "Grup" else "Pengguna" }
@@ -182,6 +188,12 @@ internal fun JSONObject.toConversation(): Conversation {
         createdBy = optLong("created_by"),
         myRole = optString("role", "member"),
         muted = optBoolean("muted", false),
+        onlyAdminsCanSend = optBoolean("only_admins_can_send", false),
+        onlyAdminsCanEdit = optBoolean("only_admins_can_edit", false),
+        onlyAdminsCanAdd = optBoolean("only_admins_can_add", false),
+        inviteLinkEnabled = optBoolean("invite_link_enabled", true),
+        approveNewMembers = optBoolean("approve_new_members", false),
+        disappearingDays = optInt("disappearing_days", 0),
     )
 }
 

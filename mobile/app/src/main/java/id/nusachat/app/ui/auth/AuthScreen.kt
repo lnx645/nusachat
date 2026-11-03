@@ -1,4 +1,5 @@
 package id.nusachat.app.ui.auth
+import id.nusachat.app.ui.components.NusaCard
 import id.nusachat.app.ui.components.NusaButton
 import id.nusachat.app.ui.components.NusaIconButton
 import id.nusachat.app.ui.components.NusaProgress
@@ -156,12 +157,8 @@ fun AuthScreen(vm: AppViewModel) {
             }
             Spacer(Modifier.height(16.dp))
 
-            Surface(
+            NusaCard(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(24.dp),
-                color = colors.surface,
-                tonalElevation = 1.dp,
-                shadowElevation = 2.dp,
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(

@@ -194,6 +194,25 @@ class ChatRepository(
         return data.optBoolean("muted", muted)
     }
 
+    suspend fun updateGroupInfo(conversationId: Long, title: String? = null, avatarUrl: String? = null): Conversation {
+        val body = JSONObject().put("id", conversationId)
+        if (title != null) body.put("title", title)
+        if (avatarUrl != null) body.put("avatar_url", avatarUrl)
+        return api.post("/conversations/update_group", body).getJSONObject("conversation").toConversation()
+    }
+
+    suspend fun groupSettings(conversationId: Long): JSONObject {
+        return api.get("/conversations/group_settings", mapOf("id" to conversationId.toString()))
+            .optJSONObject("settings") ?: JSONObject()
+    }
+
+    suspend fun updateGroupSettings(conversationId: Long, fields: Map<String, Any>): JSONObject {
+        val body = JSONObject().put("id", conversationId)
+        fields.forEach { (k, v) -> body.put(k, v) }
+        return api.post("/conversations/update_group_settings", body)
+            .optJSONObject("settings") ?: JSONObject()
+    }
+
     suspend fun markRead(conversationId: Long, messageId: Long) {
         api.post(
             "/conversations/read",

@@ -1,4 +1,5 @@
 package id.nusachat.app.ui
+import id.nusachat.app.ui.components.NusaCard
 import id.nusachat.app.ui.components.NusaBottomSheet
 
 import androidx.compose.foundation.background
@@ -86,7 +87,7 @@ fun DiscoverScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     NusaAvatar(
                         name = user?.displayName ?: "NusaChat",
-                        url = user?.avatarUrl,
+                        url = user?.avatarUrl, gender = user?.gender, seed = user?.id,
                         size = 52.dp,
                     )
                     Column(
@@ -182,13 +183,10 @@ fun DiscoverScreen(
 
 @Composable
 private fun SurfaceGroup(content: @Composable () -> Unit) {
-    androidx.compose.material3.Surface(
+    NusaCard(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
     ) {
         Column { content() }
     }

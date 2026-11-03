@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -58,12 +59,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import id.nusachat.app.data.User
 import id.nusachat.app.ui.AppViewModel
+import kotlinx.coroutines.launch
 import id.nusachat.app.ui.theme.NusaIcons
 import id.nusachat.app.ui.components.EmptyState
-import id.nusachat.app.ui.components.SkeletonList
 import id.nusachat.app.ui.components.NusaConfirmSheet
 import id.nusachat.app.ui.components.NusaSearchField
 import id.nusachat.app.ui.components.SectionLabel
+import id.nusachat.app.ui.components.SkeletonList
 import id.nusachat.app.ui.components.UnreadBadge
 import id.nusachat.app.ui.components.UserRow
 
@@ -72,7 +74,10 @@ fun ContactsScreen(
     vm: AppViewModel,
     onOpenFriends: () -> Unit,
     onOpenChatWith: (User) -> Unit,
+    onOpenProfile: () -> Unit = {},
 ) {
+    val session by vm.sessionState.collectAsStateWithLifecycle()
+    val me = session.user
     val friends by vm.friends.collectAsStateWithLifecycle()
     val requests by vm.requests.collectAsStateWithLifecycle()
     val searchResults by vm.searchResults.collectAsStateWithLifecycle()
@@ -106,7 +111,13 @@ fun ContactsScreen(
             it.username.contains(query, ignoreCase = true)
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    // Header sebaris (bukan TopAppBar) — halaman ini di dalam Scaffold utama,
+    // TopAppBar bersarang bikin app bar dobel / ruang kosong di atas.
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -115,12 +126,13 @@ fun ContactsScreen(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Kontak",
-                    fontSize = 25.sp,
-                    fontWeight = FontWeight.Bold,
+                    text = "Teman",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.onBackground,
                 )
                 Text(
-                    text = "${friends.size} teman • ${requests.incoming.size} permintaan",
+                    text = "${friends.size} teman",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -129,151 +141,246 @@ fun ContactsScreen(
                 Icon(painter = painterResource(id = NusaIcons.GroupAdd), contentDescription = "Grup baru")
             }
         }
-
         NusaSearchField(
-            value = query,
-            onValueChange = {
-                query = it
-                if (it.trim().length < 2) vm.clearSearch()
-            },
-            placeholder = "Cari teman atau pengguna",
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-            onSearch = { vm.searchUsers(query) },
-        )
-
-        if (query.trim().length >= 2) {
-            SearchResults(
-                vm = vm,
-                query = query,
-                results = searchResults,
-                loading = searchLoading,
-                onOpenChatWith = onOpenChatWith,
+                value = query,
+                onValueChange = {
+                    query = it
+                    if (it.trim().length < 2) vm.clearSearch()
+                },
+                placeholder = "Cari teman",
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                onSearch = { vm.searchUsers(query) },
             )
-        } else {
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                item(key = "new-friends") {
-                    FunctionRow(
-                        icon = NusaIcons.PersonAdd,
-                        iconTint = Color(0xFFE39B1D),
-                        iconBackground = Color(0xFFFFF2D9),
-                        title = "Teman Baru",
-                        subtitle = if (requests.incoming.isEmpty()) {
-                            "Kelola permintaan pertemanan"
-                        } else {
-                            "${requests.incoming.size} permintaan menunggu"
-                        },
-                        badge = requests.incoming.size,
-                        onClick = onOpenFriends,
+
+            // Profil diri ala LINE Home.
+            if (me != null && query.isBlank()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenProfile)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    id.nusachat.app.ui.components.NusaAvatar(
+                        name = me.displayName,
+                        url = me.avatarUrl, gender = me.gender, seed = me.id,
+                        size = 54.dp,
+                    )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 12.dp),
+                    ) {
+                        Text(
+                            text = me.displayName,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                        )
+                        Text(
+                            text = me.bio?.takeIf { it.isNotBlank() } ?: "@${me.username}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                    Icon(
+                        painter = painterResource(id = NusaIcons.Next),
+                        contentDescription = "Profil saya",
+                        tint = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.size(20.dp),
                     )
                 }
-                item(key = "new-group") {
-                    FunctionRow(
-                        icon = NusaIcons.GroupAdd,
-                        iconTint = MaterialTheme.colorScheme.primary,
-                        iconBackground = MaterialTheme.colorScheme.primaryContainer,
-                        title = "Grup Baru",
-                        subtitle = "Ngobrol bareng beberapa teman",
-                        badge = 0,
-                        onClick = { showCreateGroup = true },
-                    )
+                androidx.compose.material3.HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                    thickness = 0.7.dp,
+                )
+            }
+
+            if (query.trim().length >= 2) {
+                SearchResults(
+                    vm = vm,
+                    query = query,
+                    results = searchResults,
+                    loading = searchLoading,
+                    onOpenChatWith = onOpenChatWith,
+                )
+            } else {
+                val grouped = remember(filteredFriends) {
+                    filteredFriends.groupBy {
+                        val c = it.displayName.trim().firstOrNull()?.uppercaseChar()
+                        when {
+                            c == null -> "#"
+                            c.isLetter() -> c.toString()
+                            else -> "#"
+                        }
+                    }.toSortedMap(compareBy { if (it == "#") "ZZZ" else it })
                 }
-                item(key = "sync") {
-                    FunctionRow(
-                        icon = NusaIcons.Refresh,
-                        iconTint = Color(0xFF0B6B52),
-                        iconBackground = Color(0xFFDFF3EA),
-                        title = if (syncing) "Menyinkronkan..." else "Sinkronkan Kontak HP",
-                        subtitle = if (matched.isEmpty()) {
-                            "Cari teman dari nomor HP"
-                        } else {
-                            "${matched.size} kontak memakai NusaChat"
-                        },
-                        badge = 0,
-                        onClick = { requestSync() },
-                    )
+                val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+                val scope = androidx.compose.runtime.rememberCoroutineScope()
+                val headerIndices = remember(grouped, syncing, matched.size) {
+                    val map = mutableMapOf<String, Int>()
+                    var i = 1 // kartu fungsi
+                    if (syncing) i++
+                    if (matched.isNotEmpty()) i += 1 + matched.size
+                    grouped.forEach { (initial, list) ->
+                        map[initial] = i
+                        i += 1 + list.size
+                    }
+                    map
                 }
-                if (syncing) {
-                    item(key = "syncing") {
+                Box(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 12.dp, end = 14.dp),
+                ) {
+                    item(key = "functions") {
+                        // Section flat full-width seperti info grup — tanpa kartu.
                         Box(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .background(MaterialTheme.colorScheme.surface),
                         ) {
-                            NusaProgress(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                            Column {
+                                FunctionRow(
+                                    icon = NusaIcons.PersonAdd,
+                                    title = "Teman Baru",
+                                    subtitle = if (requests.incoming.isEmpty()) "Kelola permintaan" else "${requests.incoming.size} permintaan",
+                                    badge = requests.incoming.size,
+                                    onClick = onOpenFriends,
+                                )
+                                androidx.compose.material3.HorizontalDivider(
+                                    modifier = Modifier.padding(start = 56.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant,
+                                    thickness = 0.7.dp,
+                                )
+                                FunctionRow(
+                                    icon = NusaIcons.GroupAdd,
+                                    title = "Grup Baru",
+                                    subtitle = "Buat grup dengan teman",
+                                    badge = 0,
+                                    onClick = { showCreateGroup = true },
+                                )
+                                androidx.compose.material3.HorizontalDivider(
+                                    modifier = Modifier.padding(start = 56.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant,
+                                    thickness = 0.7.dp,
+                                )
+                                FunctionRow(
+                                    icon = NusaIcons.Refresh,
+                                    title = if (syncing) "Menyinkronkan..." else "Sinkronkan Kontak",
+                                    subtitle = if (matched.isEmpty()) "Cari teman dari HP" else "${matched.size} kontak ditemukan",
+                                    badge = 0,
+                                    onClick = { requestSync() },
+                                )
+                            }
+                        }
+                    }
+                    if (syncing) {
+                        item(key = "syncing") {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                NusaProgress(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            }
+                        }
+                    }
+                    if (matched.isNotEmpty()) {
+                        item(key = "matched-label") { SectionLabel("Dari kontak HP • ${matched.size}") }
+                        items(matched, key = { "matched-${it.id}" }) { user ->
+                            val status = user.friendStatus ?: "none"
+                            UserRow(
+                                user = user,
+                                subtitle = user.bio?.takeIf { it.isNotBlank() } ?: "@${user.username}",
+                                onClick = {
+                                    if (status == "accepted") onOpenChatWith(user)
+                                },
+                                trailing = {
+                                    when (status) {
+                                        "accepted" -> NusaIconButton(onClick = { onOpenChatWith(user) }) {
+                                            Icon(painter = painterResource(id = NusaIcons.Chat), contentDescription = "Chat", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                        }
+                                        "pending", "outgoing" -> Icon(painter = painterResource(id = NusaIcons.Time), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                                        else -> NusaIconButton(onClick = { vm.sendFriendRequest(user) }) {
+                                            Icon(painter = painterResource(id = NusaIcons.PersonAdd), contentDescription = "Tambah", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                    if (filteredFriends.isEmpty()) {
+                        item(key = "empty") {
+                            EmptyState(
+                                icon = NusaIcons.PersonAdd,
+                                title = if (friends.isEmpty()) "Belum ada teman" else "Tidak ditemukan",
+                                subtitle = if (friends.isEmpty()) "Cari pengguna lewat pencarian di atas." else "Coba kata kunci lain.",
+                            )
+                        }
+                    } else {
+                        grouped.forEach { (initial, list) ->
+                            stickyHeader(key = "header-$initial") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.background)
+                                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                                ) {
+                                    Text(
+                                        text = initial,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            items(list, key = { it.id }) { friend ->
+                                ContactFriendRow(
+                                    user = friend,
+                                    onClick = { onOpenChatWith(friend) },
+                                )
+                            }
                         }
                     }
                 }
-                if (matched.isNotEmpty()) {
-                    item(key = "matched-label") { SectionLabel("Dari kontak HP (${matched.size})") }
-                    items(matched, key = { "matched-${it.id}" }) { user ->
-                        UserRow(
-                            user = user,
-                            subtitle = "@${user.username}",
-                            onClick = {
-                                if ((user.friendStatus ?: "none") == "accepted") onOpenChatWith(user)
-                            },
-                            trailing = {
-                                val status = user.friendStatus ?: "none"
-                                when (status) {
-                                    "accepted" -> NusaIconButton(onClick = { onOpenChatWith(user) }) {
-                                        Icon(painter = painterResource(id = NusaIcons.Chat), contentDescription = "Chat")
-                                    }
-                                    "pending", "outgoing" -> Icon(painter = painterResource(id = NusaIcons.Time), contentDescription = null)
-                                    else -> NusaIconButton(onClick = { vm.sendFriendRequest(user) }) {
-                                        Icon(painter = painterResource(id = NusaIcons.PersonAdd), contentDescription = "Tambah")
-                                    }
-                                }
-                            },
-                        )
+                // Indeks alfabet ala LINE di tepi kanan.
+                if (grouped.size > 1) {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        grouped.keys.forEach { letter ->
+                            Box(
+                                modifier = Modifier
+                                    .size(width = 18.dp, height = 18.dp)
+                                    .clickable {
+                                        scope.launch {
+                                            headerIndices[letter]?.let {
+                                                listState.animateScrollToItem(it)
+                                            }
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = letter,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
                     }
                 }
-                item(key = "friends-label") {
-                    SectionLabel("Teman (${filteredFriends.size})")
                 }
-                if (filteredFriends.isEmpty()) {
-                    item(key = "empty") {
-                        EmptyState(
-                            icon = NusaIcons.PersonAdd,
-                            title = if (friends.isEmpty()) "Belum ada teman" else "Tidak ditemukan",
-                            subtitle = if (friends.isEmpty()) {
-                                "Cari pengguna lewat kolom pencarian, lalu kirim permintaan pertemanan."
-                            } else {
-                                "Coba kata kunci lain."
-                            },
-                        )
-                    }
-                } else {
-                    items(filteredFriends, key = { it.id }) { friend ->
-                        UserRow(
-                            user = friend,
-                            subtitle = if (friend.online) "Online" else "@${friend.username}",
-                            onClick = { onOpenChatWith(friend) },
-                            trailing = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    NusaIconButton(onClick = { onOpenChatWith(friend) }) {
-                                        Icon(
-                                            painter = painterResource(id = NusaIcons.Chat),
-                                            contentDescription = "Chat",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(21.dp),
-                                        )
-                                    }
-                                    NusaIconButton(onClick = { removeTarget = friend }) {
-                                        Icon(
-                                            painter = painterResource(id = NusaIcons.Delete),
-                                            contentDescription = "Hapus teman",
-                                            tint = MaterialTheme.colorScheme.error,
-                                            modifier = Modifier.size(20.dp),
-                                        )
-                                    }
-                                }
-                            },
-                        )
-                    }
-                }
-                item { Spacer(Modifier.height(12.dp)) }
             }
         }
-    }
 
     if (showCreateGroup) {
         CreateGroupDialog(
@@ -364,11 +471,75 @@ private fun SearchResults(
     }
 }
 
+/** Baris teman ala LINE: avatar, nama, @username, status message bubble di kanan. */
+@Composable
+private fun ContactFriendRow(user: User, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box {
+            id.nusachat.app.ui.components.NusaAvatar(
+                name = user.displayName,
+                url = user.avatarUrl, gender = user.gender, seed = user.id,
+                size = 50.dp,
+            )
+            if (user.online) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(13.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(2.dp)
+                        .clip(CircleShape)
+                        .background(id.nusachat.app.ui.components.NusaOnlineGreen),
+                )
+            }
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 12.dp),
+        ) {
+            Text(
+                text = user.displayName,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+            Text(
+                text = "@${user.username}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+        }
+        user.bio?.takeIf { it.isNotBlank() }?.let { bio ->
+            Box(
+                modifier = Modifier
+                    .widthIn(max = 108.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            ) {
+                Text(
+                    text = bio,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun FunctionRow(
     icon: Int,
-    iconTint: Color,
-    iconBackground: Color,
     title: String,
     subtitle: String,
     badge: Int,
@@ -378,21 +549,21 @@ private fun FunctionRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(horizontal = 16.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(iconBackground),
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 painter = painterResource(id = icon),
                 contentDescription = null,
-                tint = iconTint,
-                modifier = Modifier.size(24.dp),
+                tint = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.size(20.dp),
             )
         }
         Column(
@@ -402,13 +573,14 @@ private fun FunctionRow(
         ) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
             )
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
             )
         }
         if (badge > 0) {
@@ -419,6 +591,7 @@ private fun FunctionRow(
             painter = painterResource(id = NusaIcons.Next),
             contentDescription = null,
             tint = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.size(18.dp),
         )
     }
 }

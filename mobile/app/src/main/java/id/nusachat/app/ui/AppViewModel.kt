@@ -850,6 +850,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    suspend fun updateGroupSettings(conversationId: Long, fields: Map<String, Any>) {
+        repository.updateGroupSettings(conversationId, fields)
+        val updated = repository.conversationDetail(conversationId)
+        if (chat.value.conversation?.id == conversationId) {
+            chat.value = chat.value.copy(conversation = updated, detail = updated)
+        }
+        refreshConversations()
+    }
+
+    suspend fun updateGroupInfo(conversationId: Long, title: String? = null, avatarUrl: String? = null) {
+        val updated = repository.updateGroupInfo(conversationId, title, avatarUrl)
+        if (chat.value.conversation?.id == conversationId) {
+            chat.value = chat.value.copy(conversation = updated, detail = updated)
+        }
+        refreshConversations()
+    }
+
+    suspend fun uploadGroupAvatar(uri: android.net.Uri): String {
+        val url = repository.upload(uri)
+        // avatarUrl disimpan via update_group agar kena cek izin + system event
+        return url
+    }
+
     private fun mergeSentMessage(clientId: String, sent: Message) {
         val current = chat.value
         val cleaned = current.messages.filterNot {

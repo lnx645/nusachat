@@ -101,6 +101,7 @@ class Conversations extends MY_Controller
         }
 
         $id = $this->conversation_model->createGroup((int) $user['id'], $title, $memberIds);
+        $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " membuat grup \"" . $title . "\"");
         $row = $this->conversation_model->forUser($id, (int) $user['id']);
         $this->ok(['conversation' => $this->present($row, (int) $user['id'], true)], 201);
     }
@@ -119,6 +120,15 @@ class Conversations extends MY_Controller
         $afterId = $this->param('after_id') !== null ? $this->int_param('after_id') : null;
         $limit = $this->int_param('limit', 30);
         $rows = $this->message_model->list($id, $beforeId, $afterId, $limit);
+        // Disappearing messages: hide pesan lama melebihi batas (kecuali system)
+        if (!empty($row['disappearing_days']) && (int) $row['disappearing_days'] > 0) {
+            $cutoff = time() - (int) $row['disappearing_days'] * 86400;
+            $rows = array_values(array_filter($rows, function ($m) use ($cutoff) {
+                if (($m['type'] ?? '') === 'system') return true;
+                $ts = strtotime($m['created_at'] ?? 'now');
+                return $ts === false || $ts >= $cutoff;
+            }));
+        }
 
         $this->message_model->markDelivered($id, (int) $user['id']);
 
@@ -140,6 +150,14 @@ class Conversations extends MY_Controller
         $row = $this->conversation_model->forUser($id, (int) $user['id']);
         if (!$row) {
             $this->fail('Conversation not found.', 404, 'not_found');
+        }
+
+        // Group send permission
+        if ($row['type'] === 'group' && !empty($row['only_admins_can_send']) && (int) $row['created_by'] !== (int) $user['id']) {
+            $role = $this->store->value('SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [$id, (int) $user['id']]);
+            if ($role !== 'owner' && $role !== 'admin') {
+                $this->fail('Only admins can send messages in this group.', 403, 'admin_only');
+            }
         }
 
         $type = $this->str_param('type');
@@ -285,8 +303,18 @@ class Conversations extends MY_Controller
         if (!$conversation || $conversation['type'] !== 'group') {
             $this->fail('Group not found.', 404, 'not_found');
         }
-        if ((int) $conversation['created_by'] !== (int) $user['id']) {
-            $this->fail('Only the group owner can add members.', 403, 'forbidden');
+        $isOwner = (int) $conversation['created_by'] === (int) $user['id'];
+        $role = $this->store->value('SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [$id, (int) $user['id']]);
+        $isAdmin = $isOwner || $role === 'owner' || $role === 'admin';
+        if (!empty($conversation['only_admins_can_add'])) {
+            if (!$isAdmin) {
+                $this->fail('Only admins can add members.', 403, 'admin_only');
+            }
+        } else {
+            // When open, any member can add
+            if (!$this->conversation_model->isMember($id, (int) $user['id'])) {
+                $this->fail('You are not a member.', 403, 'forbidden');
+            }
         }
         $userIds = $this->param('user_ids');
         if (!is_array($userIds) || !$userIds) {
@@ -300,6 +328,24 @@ class Conversations extends MY_Controller
             }
         }
         $this->conversation_model->addMembers($id, $valid);
+        if ($valid) {
+            $names = [];
+            foreach ($valid as $uid) {
+                $u = $this->user_model->find($uid);
+                if ($u) $names[] = $u['display_name'];
+            }
+            $count = count($names);
+            if ($count === 1) {
+                $label = $names[0];
+            } elseif ($count === 2) {
+                $label = $names[0] . " dan " . $names[1];
+            } elseif ($count === 3) {
+                $label = $names[0] . ", " . $names[1] . " dan " . $names[2];
+            } else {
+                $label = $names[0] . ", " . $names[1] . " dan " . ($count - 2) . " lainnya";
+            }
+            $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " menambahkan " . $label);
+        }
         $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', [
             'conversation_id' => $id,
         ]);
@@ -330,7 +376,15 @@ class Conversations extends MY_Controller
         }
 
         $membersBefore = $this->conversation_model->members($id);
+        $targetUser = $this->user_model->find($targetId);
+        $targetName = $targetUser['display_name'] ?? ("#" . $targetId);
         $this->conversation_model->removeMember($id, $targetId);
+
+        if ((int) $targetId === (int) $user['id']) {
+            $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " keluar");
+        } else {
+            $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " mengeluarkan " . $targetName);
+        }
 
         if ($isOwner && $targetId === (int) $user['id']) {
             $remaining = array_values(array_filter(
@@ -368,6 +422,147 @@ class Conversations extends MY_Controller
             [$id, (int) $user['id']]
         );
         $this->ok(['muted' => (bool) $muted]);
+    }
+
+    public function group_settings(): void
+    {
+        $this->require_method(['GET']);
+        $user = $this->require_auth();
+        $id = $this->int_param('id');
+        $row = $this->conversation_model->forUser($id, (int) $user['id']);
+        if (!$row || $row['type'] !== 'group') {
+            $this->fail('Group not found.', 404, 'not_found');
+        }
+        $this->ok(['settings' => [
+            'only_admins_can_send' => (bool) ($row['only_admins_can_send'] ?? false),
+            'only_admins_can_edit' => (bool) ($row['only_admins_can_edit'] ?? false),
+            'only_admins_can_add' => (bool) ($row['only_admins_can_add'] ?? false),
+            'invite_link_enabled' => (bool) ($row['invite_link_enabled'] ?? true),
+            'approve_new_members' => (bool) ($row['approve_new_members'] ?? false),
+            'disappearing_days' => (int) ($row['disappearing_days'] ?? 0),
+        ]]);
+    }
+
+    public function update_group(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['id']);
+        $id = $this->int_param('id');
+        $row = $this->conversation_model->find($id);
+        if (!$row || $row['type'] !== 'group') {
+            $this->fail('Group not found.', 404, 'not_found');
+        }
+        $isOwner = (int) $row['created_by'] === (int) $user['id'];
+        $role = $this->store->value('SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [$id, (int) $user['id']]);
+        $isAdmin = $isOwner || $role === 'owner' || $role === 'admin';
+        if (!empty($row['only_admins_can_edit']) && !$isAdmin) {
+            $this->fail('Only admins can edit group info.', 403, 'admin_only');
+        }
+        if (!$this->conversation_model->isMember($id, (int) $user['id'])) {
+            $this->fail('You are not a member.', 403, 'forbidden');
+        }
+        $fields = [];
+        if ($this->param('title') !== null) {
+            $title = trim($this->str_param('title'));
+            if (mb_strlen($title) < 2 || mb_strlen($title) > 60) {
+                $this->fail('Group name must be 2-60 characters.', 422, 'invalid_title');
+            }
+            $fields['title'] = $title;
+        }
+        if ($this->param('avatar_url') !== null) {
+            $fields['avatar_url'] = trim($this->str_param('avatar_url')) ?: null;
+        }
+        if (!$fields) {
+            $this->fail('No fields to update.', 422, 'validation_error');
+        }
+        $fields['updated_at'] = now_iso();
+        $this->store->update('conversations', $fields, 'id = ?', [$id]);
+        $updated = $this->conversation_model->forUser($id, (int) $user['id']);
+        $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " mengubah info grup");
+        $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', ['conversation_id' => $id]);
+        $this->ok(['conversation' => $this->present($updated, (int) $user['id'], true)]);
+    }
+
+    public function update_group_settings(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['id']);
+        $id = $this->int_param('id');
+        $row = $this->conversation_model->find($id);
+        if (!$row || $row['type'] !== 'group') {
+            $this->fail('Group not found.', 404, 'not_found');
+        }
+        $isOwner = (int) $row['created_by'] === (int) $user['id'];
+        $role = $this->store->value('SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [$id, (int) $user['id']]);
+        $isAdmin = $isOwner || $role === 'owner' || $role === 'admin';
+        if (!$isAdmin) {
+            $this->fail('Only admins can change group settings.', 403, 'admin_only');
+        }
+
+        $fields = [];
+        if ($this->param('only_admins_can_send') !== null) {
+            $fields['only_admins_can_send'] = $this->bool_param('only_admins_can_send') ? 1 : 0;
+        }
+        if ($this->param('only_admins_can_edit') !== null) {
+            $fields['only_admins_can_edit'] = $this->bool_param('only_admins_can_edit') ? 1 : 0;
+        }
+        if ($this->param('only_admins_can_add') !== null) {
+            $fields['only_admins_can_add'] = $this->bool_param('only_admins_can_add') ? 1 : 0;
+        }
+        if ($this->param('invite_link_enabled') !== null) {
+            $fields['invite_link_enabled'] = $this->bool_param('invite_link_enabled') ? 1 : 0;
+        }
+        if ($this->param('approve_new_members') !== null) {
+            $fields['approve_new_members'] = $this->bool_param('approve_new_members') ? 1 : 0;
+        }
+        if ($this->param('disappearing_days') !== null) {
+            $days = (int) $this->int_param('disappearing_days', 0);
+            $allowed = [0, 1, 7, 90];
+            if (!in_array($days, $allowed, true)) {
+                $this->fail('Invalid disappearing_days.', 422, 'invalid_value');
+            }
+            $fields['disappearing_days'] = $days;
+        }
+        if (!$fields) {
+            $this->fail('No settings provided.', 422, 'validation_error');
+        }
+        $fields['updated_at'] = now_iso();
+        $this->store->update('conversations', $fields, 'id = ?', [$id]);
+        // System event for audit
+        $change = [];
+        foreach ($fields as $k => $v) { if ($k !== 'updated_at') $change[] = $k; }
+        $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " mengubah pengaturan grup");
+        $updated = $this->conversation_model->find($id);
+        $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', ['conversation_id' => $id]);
+        $this->ok(['settings' => [
+            'only_admins_can_send' => (bool) ($updated['only_admins_can_send'] ?? false),
+            'only_admins_can_edit' => (bool) ($updated['only_admins_can_edit'] ?? false),
+            'only_admins_can_add' => (bool) ($updated['only_admins_can_add'] ?? false),
+            'invite_link_enabled' => (bool) ($updated['invite_link_enabled'] ?? true),
+            'approve_new_members' => (bool) ($updated['approve_new_members'] ?? false),
+            'disappearing_days' => (int) ($updated['disappearing_days'] ?? 0),
+        ]]);
+    }
+
+    private function pushSystemEvent(int $conversationId, int $actorId, string $body): void
+    {
+        $result = $this->message_model->create([
+            'conversation_id' => $conversationId,
+            'sender_id' => $actorId,
+            'type' => 'system',
+            'body' => $body,
+        ]);
+        $message = message_dto($result['row']);
+        if (!$result['duplicate']) {
+            $this->conversation_model->setLastMessage($conversationId, (int) $result['row']['id'], $result['row']['created_at']);
+            $memberIds = $this->conversation_model->memberIds($conversationId);
+            $this->realtime_model->push($memberIds, 'message', [
+                'conversation_id' => $conversationId,
+                'message' => $message,
+            ]);
+        }
     }
 
     /**

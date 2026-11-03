@@ -1,4 +1,6 @@
 package id.nusachat.app.ui
+import id.nusachat.app.ui.components.NusaNavItem
+import id.nusachat.app.ui.components.NusaNavigationBar
 import id.nusachat.app.ui.components.NusaProgress
 
 import androidx.activity.compose.BackHandler
@@ -214,17 +216,14 @@ private fun MainShell(vm: AppViewModel, user: User) {
                 Scaffold(
                     containerColor = MaterialTheme.colorScheme.background,
                     bottomBar = {
-                        NavigationBar(
-                            containerColor = MaterialTheme.colorScheme.surface,
-                            tonalElevation = 0.dp,
-                        ) {
+                        NusaNavigationBar {
                             tabs.forEachIndexed { index, item ->
                                 val badgeCount = when (index) {
                                     0 -> unread
                                     1 -> incoming
                                     else -> 0
                                 }
-                                NavigationBarItem(
+                                NusaNavItem(
                                     selected = tab == index,
                                     onClick = { tab = index },
                                     icon = {
@@ -241,13 +240,6 @@ private fun MainShell(vm: AppViewModel, user: User) {
                                         }
                                     },
                                     label = { Text(item.label) },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
-                                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    ),
                                 )
                             }
                         }
@@ -264,6 +256,7 @@ private fun MainShell(vm: AppViewModel, user: User) {
                                 vm = vm,
                                 onOpenFriends = { overlay = Overlay.FRIENDS },
                                 onOpenChatWith = vm::openChatWith,
+                                onOpenProfile = { tab = 3 },
                             )
                             2 -> DiscoverScreen(
                                 vm = vm,

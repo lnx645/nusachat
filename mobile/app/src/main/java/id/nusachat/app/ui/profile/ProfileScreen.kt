@@ -1,12 +1,14 @@
 package id.nusachat.app.ui.profile
 import id.nusachat.app.ui.components.NusaButton
+import id.nusachat.app.ui.components.NusaDatePickerDialog
+import id.nusachat.app.ui.components.NusaLineInput
+import id.nusachat.app.ui.components.NusaLinePickerInput
 import id.nusachat.app.ui.components.NusaTextButton
 import id.nusachat.app.ui.components.NusaIconButton
 import id.nusachat.app.ui.components.NusaTopAppBar
 import id.nusachat.app.ui.components.NusaBottomSheet
 import id.nusachat.app.ui.components.NusaProgress
 import id.nusachat.app.ui.components.NusaSwitch
-import id.nusachat.app.ui.components.NusaTextField
 
 import android.net.Uri
 import androidx.compose.ui.res.painterResource
@@ -34,7 +36,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,7 +48,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,7 +57,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -84,154 +83,132 @@ fun MeScreen(
     var showAbout by remember { mutableStateOf(false) }
     var showPassword by remember { mutableStateOf(false) }
 
+    if (showPassword) {
+        ChangePasswordScreen(
+            onBack = { showPassword = false },
+            onConfirm = { old, new ->
+                showPassword = false
+                vm.changePassword(old, new)
+            },
+        )
+        return
+    }
+
+    // Halaman "Saya" ala LINE Home: flat putih, tanpa kartu melayang / gradient.
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .verticalScroll(rememberScrollState()),
     ) {
-        Box(
+        // Header profil LINE: avatar kiri, nama, status message, chevron.
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(190.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.primaryContainer,
-                            MaterialTheme.colorScheme.background,
-                        )
-                    )
-                ),
+                .background(MaterialTheme.colorScheme.surface)
+                .clickable(onClick = onEditProfile)
+                .padding(horizontal = 20.dp, vertical = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(horizontal = 20.dp, vertical = 22.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Box {
+                NusaAvatar(name = user.displayName, url = user.avatarUrl, gender = user.gender, seed = user.id, size = 62.dp)
                 Box(
                     modifier = Modifier
-                        .size(76.dp)
+                        .align(Alignment.BottomEnd)
+                        .size(15.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surface),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    NusaAvatar(name = user.displayName, url = user.avatarUrl, size = 70.dp)
-                }
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(start = 14.dp),
-                ) {
-                    Text(
-                        text = user.displayName,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        text = "@${user.username}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (connected) NusaOnlineGreen
-                                    else MaterialTheme.colorScheme.outline
-                                )
-                        )
-                        Spacer(Modifier.size(5.dp))
-                        Text(
-                            text = if (connected) "Online" else "Offline",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                NusaIconButton(onClick = onEditProfile) {
-                    Icon(
-                        painter = painterResource(id = NusaIcons.Edit),
-                        contentDescription = "Edit profil",
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                }
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(2.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (connected) NusaOnlineGreen
+                            else MaterialTheme.colorScheme.outline
+                        ),
+                )
             }
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 14.dp),
+            ) {
+                Text(
+                    text = user.displayName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = user.bio?.takeIf { it.isNotBlank() }
+                        ?: "@${user.username}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = if (connected) "Online" else "Offline",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (connected) NusaOnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                painter = painterResource(id = NusaIcons.Next),
+                contentDescription = "Edit profil",
+                tint = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.size(22.dp),
+            )
         }
 
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp),
-            shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 1.dp,
-        ) {
-            Column {
-                ProfileRow(
-                    icon = NusaIcons.Edit,
-                    title = "Edit Profil",
-                    subtitle = "Nama tampilan, bio, dan foto profil",
-                    onClick = onEditProfile,
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = 64.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                )
-                ProfileRow(
-                    icon = NusaIcons.Settings,
-                    title = "Pengaturan",
-                    subtitle = "Info server dan koneksi",
-                    onClick = { showSettings = true },
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = 64.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                )
-                ProfileRow(
-                    icon = NusaIcons.Info,
-                    title = "Tentang NusaChat",
-                    subtitle = "Versi 0.1.0 • Jetpack Compose",
-                    onClick = { showAbout = true },
-                )
-            }
+        SectionLabel("Akun")
+        Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
+            ProfileRow(
+                icon = NusaIcons.Edit,
+                title = "Edit Profil",
+                subtitle = "Nama tampilan, bio, dan foto profil",
+                onClick = onEditProfile,
+            )
+            ProfileDivider()
+            ProfileRow(
+                icon = NusaIcons.Lock,
+                title = "Ganti Kata Sandi",
+                subtitle = "Amankan akunmu secara berkala",
+                onClick = { showPassword = true },
+            )
         }
 
-        Spacer(Modifier.height(12.dp))
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp),
-            shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 1.dp,
-        ) {
-            Column {
-                ProfileRow(
-                    icon = NusaIcons.Lock,
-                    title = "Ganti Kata Sandi",
-                    subtitle = "Amankan akunmu secara berkala",
-                    onClick = { showPassword = true },
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = 64.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                )
-                ProfileRow(
-                    icon = NusaIcons.Logout,
-                    title = "Keluar",
-                    subtitle = "Hapus sesi dari perangkat ini",
-                    tint = MaterialTheme.colorScheme.error,
-                    showChevron = false,
-                    onClick = { showLogout = true },
-                )
-            }
+        SectionLabel("Umum")
+        Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
+            ProfileRow(
+                icon = NusaIcons.Settings,
+                title = "Pengaturan",
+                subtitle = "Info server dan koneksi",
+                onClick = { showSettings = true },
+            )
+            ProfileDivider()
+            ProfileRow(
+                icon = NusaIcons.Info,
+                title = "Tentang NusaChat",
+                subtitle = "Versi 0.1.0",
+                onClick = { showAbout = true },
+            )
+        }
+
+        Spacer(Modifier.height(18.dp))
+        Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
+            ProfileRow(
+                icon = NusaIcons.Logout,
+                title = "Keluar",
+                subtitle = "Hapus sesi dari perangkat ini",
+                tint = MaterialTheme.colorScheme.error,
+                showChevron = false,
+                onClick = { showLogout = true },
+            )
         }
 
         Spacer(Modifier.height(20.dp))
         Text(
-            text = "NusaChat 0.1.0 • dibuat untuk belajar",
+            text = "NusaChat 0.1.0",
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 20.dp),
@@ -303,59 +280,6 @@ fun MeScreen(
         }
     }
 
-    if (showPassword) {
-        ChangePasswordSheet(
-            onDismiss = { showPassword = false },
-            onConfirm = { old, new -> showPassword = false; vm.changePassword(old, new) },
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ChangePasswordSheet(onDismiss: () -> Unit, onConfirm: (String, String) -> Unit) {
-    var old by rememberSaveable { mutableStateOf("") }
-    var newPass by rememberSaveable { mutableStateOf("") }
-    var confirm by rememberSaveable { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    NusaBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
-            Text("Ganti Kata Sandi", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(12.dp))
-            NusaTextField(value = old, onValueChange = { old = it }, label = { Text("Sandi lama") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
-            Spacer(Modifier.height(8.dp))
-            NusaTextField(value = newPass, onValueChange = { newPass = it }, label = { Text("Sandi baru (min 6)") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
-            Spacer(Modifier.height(8.dp))
-            NusaTextField(value = confirm, onValueChange = { confirm = it }, label = { Text("Ulangi sandi baru") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
-            if (error != null) {
-                Spacer(Modifier.height(6.dp))
-                Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Setelah diganti kamu akan diminta masuk ulang.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(16.dp))
-            NusaButton(
-                onClick = {
-                    if (newPass.length < 6) { error = "Sandi baru minimal 6 karakter."; return@NusaButton }
-                    if (newPass != confirm) { error = "Konfirmasi tidak cocok."; return@NusaButton }
-                    onConfirm(old, newPass)
-                },
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(12.dp),
-            ) {
-                Text("Ganti kata sandi", fontWeight = FontWeight.SemiBold)
-            }
-            Spacer(Modifier.height(24.dp))
-        }
-    }
 }
 
 @Composable
@@ -367,12 +291,31 @@ private fun SettingsLine(label: String, value: String) {
 }
 
 @Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 7.dp),
+    )
+}
+
+@Composable
+private fun ProfileDivider() {
+    HorizontalDivider(
+        modifier = Modifier.padding(start = 64.dp),
+        color = MaterialTheme.colorScheme.outlineVariant,
+        thickness = 0.7.dp,
+    )
+}
+
+@Composable
 private fun ProfileRow(
     icon: Int,
     title: String,
     subtitle: String,
     onClick: () -> Unit,
-    tint: Color = MaterialTheme.colorScheme.primary,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
     showChevron: Boolean = true,
 ) {
     Row(
@@ -393,7 +336,12 @@ private fun ProfileRow(
                 .weight(1f)
                 .padding(horizontal = 12.dp),
         ) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = tint)
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Normal,
+                color = if (tint == MaterialTheme.colorScheme.error) tint else MaterialTheme.colorScheme.onSurface,
+            )
             Text(
                 subtitle,
                 style = MaterialTheme.typography.bodySmall,
@@ -424,6 +372,7 @@ fun EditProfileScreen(
     var birthday by rememberSaveable { mutableStateOf(user.birthday.orEmpty()) }
     var discoverable by rememberSaveable { mutableStateOf(user.discoverable) }
     var localError by remember { mutableStateOf<String?>(null) }
+    var showDatePicker by remember { mutableStateOf(false) }
     val uploading by vm.uploadingAvatar.collectAsStateWithLifecycle()
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -443,10 +392,6 @@ fun EditProfileScreen(
             localError = "Bio maksimal 160 karakter."
             return
         }
-        if (birthday.isNotBlank() && !Regex("^\\d{4}-\\d{2}-\\d{2}$").matches(birthday.trim())) {
-            localError = "Tanggal lahir format YYYY-MM-DD."
-            return
-        }
         localError = null
         vm.updateProfileExtended(
             displayName, bio, phone,
@@ -457,7 +402,7 @@ fun EditProfileScreen(
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             NusaTopAppBar(
                 title = { Text("Edit Profil") },
@@ -469,10 +414,6 @@ fun EditProfileScreen(
                 actions = {
                     NusaTextButton(onClick = { save() }) { Text("Simpan") }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                ),
             )
         },
     ) { padding ->
@@ -480,161 +421,276 @@ fun EditProfileScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 18.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+                .background(MaterialTheme.colorScheme.surface)
+                .verticalScroll(rememberScrollState()),
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Box(
-                    modifier = Modifier
-                        .size(104.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer)
-                        .clickable(enabled = !uploading) { picker.launch("image/*") },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    NusaAvatar(name = user.displayName, url = user.avatarUrl, size = 96.dp)
-                    if (uploading) {
-                        Box(
-                            modifier = Modifier
-                                .size(96.dp)
-                                .clip(CircleShape)
-                                .background(Color.Black.copy(alpha = 0.45f)),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            NusaProgress(
-                                modifier = Modifier.size(26.dp),
-                                color = Color.White,
-                                strokeWidth = 2.dp,
-                            )
+            // Foto profil: tengah, badge kamera, ala LINE.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 26.dp, bottom = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box {
+                    Box(
+                        modifier = Modifier
+                            .size(100.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable(enabled = !uploading) { picker.launch("image/*") },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        NusaAvatar(name = user.displayName, url = user.avatarUrl, gender = user.gender, seed = user.id, size = 100.dp)
+                        if (uploading) {
+                            Box(
+                                modifier = Modifier
+                                    .size(100.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.45f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                NusaProgress(
+                                    modifier = Modifier.size(26.dp),
+                                    color = Color.White,
+                                    strokeWidth = 2.dp,
+                                )
+                            }
                         }
                     }
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surface)
+                            .padding(2.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
+                            .clickable(enabled = !uploading) { picker.launch("image/*") },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Camera),
+                            contentDescription = "Ganti foto",
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
                 }
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        painter = painterResource(id = NusaIcons.Camera),
-                        contentDescription = "Ganti foto",
-                        tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(17.dp),
-                    )
+                NusaTextButton(onClick = { picker.launch("image/*") }) {
+                    Text("Ganti foto profil")
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "Ketuk foto untuk menggantinya",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(22.dp))
 
-            NusaTextField(
-                value = displayName,
-                onValueChange = { displayName = it },
-                label = { Text("Nama tampilan") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-            )
-            Spacer(Modifier.height(12.dp))
-            NusaTextField(
-                value = "@${user.username}",
-                onValueChange = {},
-                label = { Text("Username") },
-                readOnly = true,
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-            )
-            Spacer(Modifier.height(12.dp))
-            NusaTextField(
-                value = phone,
-                onValueChange = { phone = it },
-                label = { Text("Nomor HP") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-            )
-            Spacer(Modifier.height(12.dp))
-            NusaTextField(
-                value = bio,
-                onValueChange = { bio = it },
-                label = { Text("Bio") },
-                minLines = 3,
-                maxLines = 5,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                text = "Gender",
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(6.dp))
-            @OptIn(ExperimentalLayoutApi::class)
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                listOf("" to "Tidak diisi", "male" to "Laki-laki", "female" to "Perempuan", "other" to "Lainnya").forEach { (value, label) ->
-                    FilterChip(
-                        selected = gender == value,
-                        onClick = { gender = value },
-                        label = { Text(label) },
-                    )
+            SectionDivider()
+
+            // Form input garis bawah gaya LINE — tanpa kartu/kotak.
+            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+                NusaLineInput(
+                    label = "Nama",
+                    value = displayName,
+                    onValueChange = { displayName = it },
+                    counter = "${displayName.length}/40",
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(20.dp))
+                NusaLineInput(
+                    label = "Username",
+                    value = "@${user.username}",
+                    onValueChange = {},
+                    supportingText = "Username tidak dapat diubah",
+                    enabled = false,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(20.dp))
+                NusaLineInput(
+                    label = "Nomor HP",
+                    value = phone,
+                    onValueChange = { phone = it },
+                    placeholder = "08xxxxxxxxxx",
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(20.dp))
+                NusaLineInput(
+                    label = "Status message / bio",
+                    value = bio,
+                    onValueChange = { bio = it },
+                    placeholder = "Tulis statusmu",
+                    counter = "${bio.length}/160",
+                    singleLine = false,
+                    minLines = 2,
+                    maxLines = 5,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            SectionDivider()
+
+            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+                NusaLinePickerInput(
+                    label = "Tanggal lahir",
+                    value = if (birthday.isBlank()) "" else formatBirthdayDisplay(birthday),
+                    placeholder = "Pilih tanggal lahir",
+                    supportingText = birthdayAge(birthday)?.let { "$it tahun" },
+                    trailingIconRes = NusaIcons.Calendar,
+                    onClick = { showDatePicker = true },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    text = "Gender",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf(
+                        "" to "Tidak diisi",
+                        "male" to "Laki-laki",
+                        "female" to "Perempuan",
+                        "other" to "Lainnya",
+                    ).forEach { (value, label) ->
+                        GenderChip(
+                            label = label,
+                            selected = gender == value,
+                            onClick = { gender = value },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(20.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Tampil di Orang Terdekat", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Matikan agar lokasimu tidak ditemukan",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    NusaSwitch(checked = discoverable, onCheckedChange = { discoverable = it })
                 }
             }
-            Spacer(Modifier.height(12.dp))
-            NusaTextField(
-                value = birthday,
-                onValueChange = { birthday = it },
-                label = { Text("Tanggal lahir (YYYY-MM-DD)") },
-                placeholder = { Text("1999-01-31") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Tampil di Orang Terdekat", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "Matikan agar lokasimu tidak ditemukan",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                NusaSwitch(checked = discoverable, onCheckedChange = { discoverable = it })
-            }
+
             if (localError != null) {
-                Spacer(Modifier.height(8.dp))
                 Text(
                     text = localError.orEmpty(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp),
                 )
+                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.height(20.dp))
-            NusaButton(
-                onClick = { save() },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-                shape = RoundedCornerShape(12.dp),
-            ) {
-                Text("Simpan perubahan", fontWeight = FontWeight.SemiBold)
+            Box(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+                NusaButton(
+                    onClick = { save() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                ) {
+                    Text("Simpan perubahan")
+                }
             }
+            Spacer(Modifier.height(16.dp))
         }
     }
+
+    if (showDatePicker) {
+        NusaDatePickerDialog(
+            initialDateMillis = parseBirthdayMillis(birthday),
+            onDismiss = { showDatePicker = false },
+            onConfirm = { millis ->
+                birthday = formatBirthdayMillis(millis)
+                showDatePicker = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun SectionDivider() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(8.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    )
+}
+
+@Composable
+private fun GenderChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+        )
+    }
+}
+
+private fun parseBirthdayMillis(value: String): Long? {
+    if (value.isBlank()) return null
+    return runCatching {
+        val format = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+            isLenient = false
+        }
+        format.parse(value.trim())?.time
+    }.getOrNull()
+}
+
+private fun formatBirthdayMillis(millis: Long): String {
+    val format = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+        timeZone = java.util.TimeZone.getTimeZone("UTC")
+    }
+    return format.format(java.util.Date(millis))
+}
+
+private fun formatBirthdayDisplay(value: String): String {
+    val millis = parseBirthdayMillis(value) ?: return value
+    val format = java.text.SimpleDateFormat(
+        "dd MMMM yyyy",
+        java.util.Locale("id", "ID"),
+    ).apply {
+        timeZone = java.util.TimeZone.getTimeZone("UTC")
+    }
+    return format.format(java.util.Date(millis))
+}
+
+private fun birthdayAge(value: String): Int? {
+    val millis = parseBirthdayMillis(value) ?: return null
+    val birth = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply {
+        timeInMillis = millis
+    }
+    val now = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+    var age = now.get(java.util.Calendar.YEAR) - birth.get(java.util.Calendar.YEAR)
+    if (
+        now.get(java.util.Calendar.DAY_OF_YEAR) <
+        birth.get(java.util.Calendar.DAY_OF_YEAR)
+    ) {
+        age--
+    }
+    return age.takeIf { it in 0..120 }
 }

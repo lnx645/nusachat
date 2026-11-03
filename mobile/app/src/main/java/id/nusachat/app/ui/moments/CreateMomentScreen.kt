@@ -127,7 +127,7 @@ fun CreateMomentScreen(
             modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                NusaAvatar(name = user?.displayName ?: "NusaChat", url = user?.avatarUrl, size = 40.dp)
+                NusaAvatar(name = user?.displayName ?: "NusaChat", url = user?.avatarUrl, gender = user?.gender, seed = user?.id, size = 40.dp)
                 Column(modifier = Modifier.padding(start = 12.dp).weight(1f)) {
                     Text(user?.displayName ?: "NusaChat", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
                     Text("@${user?.username ?: "nusa"}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

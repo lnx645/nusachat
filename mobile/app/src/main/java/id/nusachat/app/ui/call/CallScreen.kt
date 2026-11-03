@@ -59,7 +59,7 @@ fun VoiceCallScreen(
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            NusaAvatar(name = peerName, url = state.peer?.avatarUrl, size = 110.dp)
+            NusaAvatar(name = peerName, url = state.peer?.avatarUrl, gender = state.peer?.gender, seed = state.peer?.id, size = 110.dp)
             Spacer(Modifier.height(18.dp))
             Text(peerName, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             state.peer?.let {
@@ -160,7 +160,7 @@ fun IncomingCallScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(20.dp))
-            NusaAvatar(name = peerName, url = state.peer?.avatarUrl, size = 120.dp)
+            NusaAvatar(name = peerName, url = state.peer?.avatarUrl, gender = state.peer?.gender, seed = state.peer?.id, size = 120.dp)
             Spacer(Modifier.height(20.dp))
             Text(peerName, fontSize = 26.sp, fontWeight = FontWeight.Bold)
             state.peer?.let {

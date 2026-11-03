@@ -57,10 +57,12 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.sp
 import id.nusachat.app.data.Message
 import id.nusachat.app.data.User
 import id.nusachat.app.ui.chats.components.ConversationMediaCard
+import id.nusachat.app.ui.chats.components.MediaGalleryScreen
 import id.nusachat.app.ui.components.NusaAvatar
 import id.nusachat.app.ui.components.NusaConfirmSheet
 import id.nusachat.app.ui.components.NusaOnlineGreen
@@ -81,13 +83,48 @@ fun GroupInfoScreen(
     onLeave: () -> Unit,
     onShowAddMembers: () -> Unit,
     onCallPeer: (User) -> Unit = {},
+    vm: id.nusachat.app.ui.AppViewModel? = null,
     media: List<Message> = emptyList(),
     onImageClick: (String) -> Unit = {},
     onVideoClick: (String) -> Unit = {},
+    hasMoreMedia: Boolean = false,
+    onLoadOlderMedia: () -> Unit = {},
 ) {
     var confirmRemove by remember { mutableStateOf<User?>(null) }
     var confirmLeave by remember { mutableStateOf(false) }
+    var galleryCategory by remember { mutableStateOf<String?>(null) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    galleryCategory?.let { category ->
+        MediaGalleryScreen(
+            media = media,
+            initialCategory = category,
+            onBack = { galleryCategory = null },
+            onImageClick = onImageClick,
+            onVideoClick = onVideoClick,
+            hasMore = hasMoreMedia,
+            onLoadOlder = onLoadOlderMedia,
+        )
+        return
+    }
     val isOwner = conversation.createdBy == myId || conversation.myRole == "owner"
+    var showGroupSettings by remember { mutableStateOf(false) }
+    var showEditGroup by remember { mutableStateOf(false) }
+    if (showEditGroup && conversation.isGroup) {
+        // Halaman edit full seperti Edit Profil, bukan dialog
+        val vmNonNull = vm ?: return
+        EditGroupScreen(conversation = conversation, vm = vmNonNull, onBack = { showEditGroup = false })
+        return
+    }
+    if (showGroupSettings && conversation.isGroup) {
+        GroupSettingsScreen(
+            conversation = conversation,
+            vm = vm,
+            isOwner = isOwner,
+            onBack = { showGroupSettings = false },
+        )
+        return
+    }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -118,6 +155,13 @@ fun GroupInfoScreen(
                         Icon(painter = painterResource(id = NusaIcons.Back), contentDescription = "Kembali")
                     }
                 },
+                actions = {
+                    if (conversation.isGroup) {
+                        NusaIconButton(onClick = { showGroupSettings = true }) {
+                            Icon(painter = painterResource(id = NusaIcons.Settings), contentDescription = "Pengaturan grup")
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
@@ -145,7 +189,7 @@ fun GroupInfoScreen(
                         Box {
                             NusaAvatar(
                                 name = conversation.displayTitle,
-                                url = conversation.avatarUrl ?: peer?.avatarUrl,
+                                url = conversation.avatarUrl ?: peer?.avatarUrl, gender = peer?.gender, seed = peer?.id,
                                 size = 104.dp,
                             )
                             if (peer != null && !conversation.isGroup) {
@@ -160,15 +204,23 @@ fun GroupInfoScreen(
                                 )
                             }
                         }
-                        Spacer(Modifier.height(14.dp))
-                        Text(
-                            conversation.displayTitle,
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        val canEditGroup = !conversation.onlyAdminsCanEdit || isOwner
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                conversation.displayTitle,
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (conversation.isGroup && canEditGroup) {
+                                NusaIconButton(onClick = { showEditGroup = true }) {
+                                    Icon(painter = painterResource(id = NusaIcons.Edit), contentDescription = "Edit grup", modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
                         if (peer != null && !conversation.isGroup) {
                             Text(
                                 "@${peer.username}",
@@ -274,18 +326,18 @@ fun GroupInfoScreen(
                         media = media,
                         onImageClick = onImageClick,
                         onVideoClick = onVideoClick,
+                        onOpenGallery = { galleryCategory = it },
                     )
                 }
             }
             if (conversation.isGroup) {
                 item(key = "settings") {
-                    Surface(
+                    // Section flat full-width (tanpa kartu / margin samping).
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 1.dp,
+                            .padding(vertical = 4.dp)
+                            .background(MaterialTheme.colorScheme.surface),
                     ) {
                         Row(
                             modifier = Modifier
@@ -323,13 +375,11 @@ fun GroupInfoScreen(
                     }
                 }
                 item(key = "members") {
-                    Surface(
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 1.dp,
+                            .padding(vertical = 4.dp)
+                            .background(MaterialTheme.colorScheme.surface),
                     ) {
                         Column(modifier = Modifier.padding(vertical = 8.dp)) {
                             Row(
@@ -356,10 +406,11 @@ fun GroupInfoScreen(
                                     )
                                 }
                                 Spacer(Modifier.width(8.dp))
-                                NusaTextButton(onClick = onShowAddMembers) {
+                                val canAdd = !conversation.onlyAdminsCanAdd || isOwner
+                                NusaTextButton(onClick = onShowAddMembers, enabled = canAdd) {
                                     Icon(painter = painterResource(id = NusaIcons.GroupAdd), contentDescription = null, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text("Tambah")
+                                    Text(if (canAdd) "Tambah" else "Admin saja")
                                 }
                             }
                             conversation.members.forEachIndexed { index, member ->
@@ -375,7 +426,7 @@ fun GroupInfoScreen(
                                         .padding(horizontal = 16.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    NusaAvatar(name = member.displayName, url = member.avatarUrl, size = 40.dp)
+                                    NusaAvatar(name = member.displayName, url = member.avatarUrl, gender = member.gender, seed = member.id, size = 40.dp)
                                     Column(modifier = Modifier.weight(1f).padding(start = 10.dp)) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Text(
@@ -418,13 +469,11 @@ fun GroupInfoScreen(
                     }
                 }
                 item(key = "leave") {
-                    Surface(
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 1.dp,
+                            .padding(vertical = 4.dp)
+                            .background(MaterialTheme.colorScheme.surface),
                     ) {
                         Row(
                             modifier = Modifier

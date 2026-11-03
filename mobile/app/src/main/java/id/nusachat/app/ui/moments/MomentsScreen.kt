@@ -154,12 +154,12 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
                                 modifier = Modifier
                                     .size(66.dp)
                                     .clip(CircleShape)
-                                    .background(Color.White),
+                                    .background(MaterialTheme.colorScheme.surface),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 NusaAvatar(
                                     name = me?.displayName ?: "?",
-                                    url = me?.avatarUrl,
+                                    url = me?.avatarUrl, gender = me?.gender, seed = me?.id,
                                     size = 60.dp,
                                 )
                             }
@@ -270,7 +270,7 @@ private fun MomentItem(
     ) {
         NusaAvatar(
             name = moment.author.displayName,
-            url = moment.author.avatarUrl,
+            url = moment.author.avatarUrl, gender = moment.author.gender, seed = moment.author.id,
             size = 42.dp,
         )
         Column(
@@ -450,7 +450,7 @@ private fun CommentsSheet(
                     ) {
                         NusaAvatar(
                             name = comment.user.displayName,
-                            url = comment.user.avatarUrl,
+                            url = comment.user.avatarUrl, gender = comment.user.gender, seed = comment.user.id,
                             size = 30.dp,
                         )
                         Column(modifier = Modifier.padding(start = 9.dp)) {

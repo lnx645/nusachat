@@ -112,13 +112,13 @@ fun VideoBubble(url: String) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xFF1F2937)),
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     painter = painterResource(id = NusaIcons.VideoFile),
                     contentDescription = null,
-                    tint = Color.White.copy(alpha = 0.5f),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                     modifier = Modifier.size(44.dp),
                 )
             }
@@ -126,25 +126,25 @@ fun VideoBubble(url: String) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.15f)),
+                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.15f)),
         )
         Box(
             modifier = Modifier
                 .align(Alignment.Center)
                 .size(50.dp)
                 .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.93f)),
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.93f)),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 painter = painterResource(id = NusaIcons.Play),
                 contentDescription = "Putar video",
-                tint = Color(0xFF06C755),
+                tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(24.dp),
             )
         }
         Surface(
-            color = Color.Black.copy(alpha = 0.65f),
+            color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.65f),
             shape = RoundedCornerShape(6.dp),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
@@ -250,7 +250,7 @@ fun VoiceBubble(
             Icon(
                 painter = painterResource(id = if (isPlaying) NusaIcons.Pause else NusaIcons.Play),
                 contentDescription = if (isPlaying) "Jeda" else "Putar pesan suara",
-                tint = if (mine) Color(0xFF06C755) else Color.White,
+                tint = if (mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onPrimary,
                 modifier = Modifier.size(18.dp),
             )
         }
@@ -293,6 +293,7 @@ fun FileBubble(url: String, mine: Boolean, textColor: Color) {
     val name = url.substringAfterLast("/").substringBefore("?").ifBlank { "lampiran" }
     val ext = name.substringAfterLast(".", "").uppercase().takeIf { it.length in 1..5 } ?: "FILE"
     val dimColor = if (mine) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant
+    val (fileBg, fileFg) = fileColorsForExt(ext)
     Row(
         modifier = Modifier
             .widthIn(min = 190.dp, max = 240.dp)
@@ -304,13 +305,13 @@ fun FileBubble(url: String, mine: Boolean, textColor: Color) {
             modifier = Modifier
                 .size(width = 44.dp, height = 48.dp)
                 .clip(RoundedCornerShape(10.dp))
-                .background(fileColorForExt(ext)),
+                .background(fileBg),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 painter = painterResource(id = NusaIcons.FileText),
                 contentDescription = null,
-                tint = Color.White,
+                tint = fileFg,
                 modifier = Modifier.size(22.dp),
             )
         }
@@ -402,6 +403,15 @@ fun LocationBubble(message: Message, mine: Boolean, textColor: Color) {
  */
 @Composable
 fun MapPreview(lat: Double, lng: Double) {
+    // Semua warna peta dari color scheme aplikasi (ikut light/dark).
+    val mapBg = MaterialTheme.colorScheme.surfaceVariant
+    val park = MaterialTheme.colorScheme.primaryContainer
+    val water = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.22f)
+    val road = MaterialTheme.colorScheme.surface
+    val roadCase = MaterialTheme.colorScheme.outlineVariant
+    val pin = MaterialTheme.colorScheme.error
+    val pinCenter = MaterialTheme.colorScheme.surface
+    val pinShadow = MaterialTheme.colorScheme.scrim.copy(alpha = 0.25f)
     key(lat, lng) {
         Canvas(
             modifier = Modifier
@@ -411,22 +421,22 @@ fun MapPreview(lat: Double, lng: Double) {
         ) {
             val w = size.width
             val h = size.height
-            drawRect(Color(0xFFE9F1E3))
+            drawRect(mapBg)
             // Blok taman & air
             drawRoundRect(
-                Color(0xFFCBE4C0),
+                park,
                 topLeft = Offset(w * 0.62f, h * 0.52f),
                 size = Size(w * 0.42f, h * 0.52f),
                 cornerRadius = CornerRadius(10f, 10f),
             )
             drawRoundRect(
-                Color(0xFFBFD9EA),
+                water,
                 topLeft = Offset(-w * 0.12f, -h * 0.18f),
                 size = Size(w * 0.36f, h * 0.38f),
                 cornerRadius = CornerRadius(14f, 14f),
             )
             // Jalan kecil (grid)
-            val minor = Color.White
+            val minor = road
             for (i in 0..4) {
                 val y = h * (0.10f + i * 0.20f)
                 drawLine(minor, Offset(0f, y), Offset(w, y), strokeWidth = h * 0.022f)
@@ -435,17 +445,17 @@ fun MapPreview(lat: Double, lng: Double) {
                 val x = w * (0.04f + i * 0.19f)
                 drawLine(minor, Offset(x, 0f), Offset(x, h), strokeWidth = h * 0.022f)
             }
-            // Jalan utama (casing abu + isi putih)
-            drawLine(Color(0xFFD5D5D5), Offset(0f, h * 0.86f), Offset(w, h * 0.24f), strokeWidth = h * 0.10f)
-            drawLine(Color.White, Offset(0f, h * 0.86f), Offset(w, h * 0.24f), strokeWidth = h * 0.065f)
-            drawLine(Color(0xFFD5D5D5), Offset(w * 0.22f, 0f), Offset(w * 0.56f, h), strokeWidth = h * 0.08f)
-            drawLine(Color.White, Offset(w * 0.22f, 0f), Offset(w * 0.56f, h), strokeWidth = h * 0.05f)
-            // Pin merah di tengah
+            // Jalan utama (casing outline + isi surface)
+            drawLine(roadCase, Offset(0f, h * 0.86f), Offset(w, h * 0.24f), strokeWidth = h * 0.10f)
+            drawLine(road, Offset(0f, h * 0.86f), Offset(w, h * 0.24f), strokeWidth = h * 0.065f)
+            drawLine(roadCase, Offset(w * 0.22f, 0f), Offset(w * 0.56f, h), strokeWidth = h * 0.08f)
+            drawLine(road, Offset(w * 0.22f, 0f), Offset(w * 0.56f, h), strokeWidth = h * 0.05f)
+            // Pin di tengah (error scheme)
             val cx = w / 2f
             val cy = h / 2f - 8f
             val r = 25f
-            drawOval(Color(0x40000000), topLeft = Offset(cx - 13f, cy + r * 1.18f), size = Size(26f, 8f))
-            drawCircle(Color(0xFFE03131), radius = r, center = Offset(cx, cy))
+            drawOval(pinShadow, topLeft = Offset(cx - 13f, cy + r * 1.18f), size = Size(26f, 8f))
+            drawCircle(pin, radius = r, center = Offset(cx, cy))
             drawPath(
                 Path().apply {
                     moveTo(cx - r * 0.55f, cy + r * 0.35f)
@@ -453,9 +463,9 @@ fun MapPreview(lat: Double, lng: Double) {
                     lineTo(cx, cy + r * 1.25f)
                     close()
                 },
-                Color(0xFFE03131),
+                pin,
             )
-            drawCircle(Color.White, radius = r * 0.42f, center = Offset(cx, cy))
+            drawCircle(pinCenter, radius = r * 0.42f, center = Offset(cx, cy))
         }
     }
 }
@@ -484,16 +494,19 @@ private fun mimeForExt(ext: String): String = when (ext.uppercase()) {
     else -> "*/*"
 }
 
-private fun fileColorForExt(ext: String): Color = when (ext.uppercase()) {
-    "PDF" -> Color(0xFFE03131)
-    "DOC", "DOCX" -> Color(0xFF2B7CD3)
-    "XLS", "XLSX" -> Color(0xFF1E9E5A)
-    "PPT", "PPTX" -> Color(0xFFED6C02)
-    "ZIP", "RAR" -> Color(0xFF7B61FF)
-    "MP3", "WAV", "OGG", "M4A" -> Color(0xFF00B8A9)
-    "MP4", "MOV" -> Color(0xFF5B5BD6)
-    "TXT" -> Color(0xFF6B7280)
-    else -> Color(0xFF6B7280)
+/** Pasangan (background, ikon) file — semua dari color scheme aplikasi. */
+@Composable
+private fun fileColorsForExt(ext: String): Pair<Color, Color> {
+    val scheme = MaterialTheme.colorScheme
+    return when (ext.uppercase()) {
+        "PDF" -> scheme.error.copy(alpha = 0.12f) to scheme.error
+        "DOC", "DOCX" -> scheme.tertiary.copy(alpha = 0.12f) to scheme.tertiary
+        "XLS", "XLSX" -> scheme.primary.copy(alpha = 0.12f) to scheme.primary
+        "PPT", "PPTX" -> scheme.secondary.copy(alpha = 0.16f) to scheme.secondary
+        "MP3", "WAV", "OGG", "M4A" -> scheme.primary.copy(alpha = 0.12f) to scheme.primary
+        "MP4", "MOV" -> scheme.tertiary.copy(alpha = 0.12f) to scheme.tertiary
+        else -> scheme.surfaceVariant to scheme.onSurfaceVariant
+    }
 }
 
 private fun formatAudioTime(ms: Int): String {

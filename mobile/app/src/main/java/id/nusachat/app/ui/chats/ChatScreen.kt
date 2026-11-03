@@ -76,10 +76,13 @@ import id.nusachat.app.ui.chats.components.MessageBubble
 import id.nusachat.app.ui.chats.components.MessageInfoDialog
 import id.nusachat.app.ui.chats.components.TypingBubble
 import id.nusachat.app.ui.components.NusaOnlineGreen
+import id.nusachat.app.ui.theme.NusaChatBackgroundDark
+import id.nusachat.app.ui.theme.NusaChatBackgroundLight
 import id.nusachat.app.ui.theme.NusaIcons
 import id.nusachat.app.ui.ChatUiState
 import id.nusachat.app.ui.components.EmptyState
 import id.nusachat.app.ui.components.NusaActionSheet
+import id.nusachat.app.ui.chats.components.SystemEventBubble
 import id.nusachat.app.ui.components.NusaAvatar
 import id.nusachat.app.ui.components.NusaConfirmSheet
 import id.nusachat.app.ui.components.SheetAction
@@ -98,7 +101,8 @@ fun ChatScreen(
     val me = session.user
     val friends by vm.friends.collectAsStateWithLifecycle()
     val dark = isSystemInDarkTheme()
-    val chatBackground = if (dark) Color(0xFF0B100E) else Color(0xFFEDEDED)
+    // Background ruang chat khas LINE dari token tema (bukan abu WhatsApp).
+    val chatBackground = if (dark) NusaChatBackgroundDark else NusaChatBackgroundLight
     val listState = rememberLazyListState()
     var draft by rememberSaveable(conversation.id) { mutableStateOf("") }
     var showInfo by remember { mutableStateOf(false) }
@@ -127,6 +131,12 @@ fun ChatScreen(
         }
         pendingCallPeer = null
     }
+    // Backend canonical (kolom di Conversation) adalah sumber kebenaran untuk izin grup
+    val canSendInGroup = when {
+        !effectiveConversation.isGroup -> true
+        !effectiveConversation.onlyAdminsCanSend -> true
+        else -> (effectiveConversation.createdBy == me?.id || effectiveConversation.myRole == "owner")
+    }
     val sharingLocation by vm.sharingLocation.collectAsStateWithLifecycle()
     val locationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -139,9 +149,24 @@ fun ChatScreen(
         if (result.values.any { it }) showMediaPicker = true
     }
 
+    // Infinity scroll ke atas: saat mendekati paling atas, otomatis muat riwayat sebelumnya
+    // agar tidak menumpuk semua pesan sekaligus di memori/UI.
+    androidx.compose.runtime.LaunchedEffect(listState, state.hasMore, state.loadingOlder) {
+        androidx.compose.runtime.snapshotFlow { listState.firstVisibleItemIndex }
+            .collect { index ->
+                if (index <= 2 && state.hasMore && !state.loadingOlder && state.messages.isNotEmpty()) {
+                    vm.loadOlderMessages()
+                }
+            }
+    }
+
     LaunchedEffect(state.messages.size, state.typingName) {
         if (state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.lastIndex)
+            // Hanya auto-scroll ke bawah untuk pesan baru, bukan saat riwayat lama dimuat ke atas
+            val isAppending = state.messages.size > 1 && state.messages.last().id > 0
+            if (state.typingName != null || isAppending) {
+                listState.animateScrollToItem(state.messages.lastIndex)
+            }
         }
     }
 
@@ -178,6 +203,8 @@ fun ChatScreen(
                         NusaAvatar(
                             name = effectiveConversation.displayTitle,
                             url = effectiveConversation.avatarUrl ?: effectiveConversation.peer?.avatarUrl,
+                            gender = effectiveConversation.peer?.gender,
+                            seed = effectiveConversation.peer?.id,
                             size = 40.dp,
                         )
                         Spacer(Modifier.width(10.dp))
@@ -244,21 +271,44 @@ fun ChatScreen(
                         onCancel = { vm.setReply(null) },
                     )
                 }
-                ChatInputBar(
-                    draft = draft,
-                    onDraftChange = {
-                        draft = it
-                        if (it.isNotEmpty()) vm.notifyTyping()
-                    },
-                    sendingImage = state.sendingImage || state.sendingFile,
-                    onPickImage = { showAttachMenu = true },
-                    onSend = {
-                        if (draft.isNotBlank()) {
-                            vm.sendMessage(draft)
-                            draft = ""
-                        }
-                    },
-                )
+                if (!canSendInGroup) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface)
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Lock),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Hanya admin yang dapat mengirim pesan",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else {
+                    ChatInputBar(
+                        draft = draft,
+                        onDraftChange = {
+                            draft = it
+                            if (it.isNotEmpty()) vm.notifyTyping()
+                        },
+                        sendingImage = state.sendingImage || state.sendingFile,
+                        onPickImage = { showAttachMenu = true },
+                        onSend = {
+                            if (draft.isNotBlank()) {
+                                vm.sendMessage(draft)
+                                draft = ""
+                            }
+                        },
+                    )
+                }
             }
         },
     ) { padding ->
@@ -292,32 +342,29 @@ fun ChatScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 4.dp),
+                                    .padding(vertical = 8.dp),
                                 horizontalArrangement = Arrangement.Center,
                             ) {
-                                NusaTextButton(
-                                    onClick = vm::loadOlderMessages,
-                                    enabled = !state.loadingOlder,
-                                ) {
-                                    if (state.loadingOlder) {
-                                        NusaProgress(
-                                            modifier = Modifier.size(14.dp),
-                                            strokeWidth = 2.dp,
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                    }
-                                    Text("Pesan sebelumnya")
+                                if (state.loadingOlder) {
+                                    NusaProgress(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Memuat riwayat...", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                } else {
+                                    Text("Tarik untuk riwayat sebelumnya", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
                                 }
                             }
                         }
                     }
                     itemsIndexed(state.messages, key = { _, item -> item.id }) { index, message ->
-                        val quoted = state.messages.firstOrNull { it.id == message.replyToId }
-                        val prev = state.messages.getOrNull(index - 1)
-                        val next = state.messages.getOrNull(index + 1)
-                        val samePrev = prev?.sender?.id == message.sender?.id
-                        val sameNext = next?.sender?.id == message.sender?.id
-                        MessageBubble(
+                        if (message.type == "system") {
+                            SystemEventBubble(message = message)
+                        } else {
+                            val quoted = state.messages.firstOrNull { it.id == message.replyToId }
+                            val prev = state.messages.getOrNull(index - 1)
+                            val next = state.messages.getOrNull(index + 1)
+                            val samePrev = prev?.sender?.id == message.sender?.id && prev?.type != "system"
+                            val sameNext = next?.sender?.id == message.sender?.id && next?.type != "system"
+                            MessageBubble(
                             message = message,
                             quoted = quoted,
                             mine = message.sender?.id == me?.id,
@@ -337,6 +384,7 @@ fun ChatScreen(
                             },
                             onImageClick = { imageViewerUrl = it },
                         )
+                        }
                     }
                     if (state.typingName != null) {
                         item(key = "typing") {
@@ -495,6 +543,7 @@ fun ChatScreen(
             onRemoveMember = { vm.removeGroupMember(it) },
             onLeave = { vm.leaveGroup(onBack) },
             onShowAddMembers = { showAddMembers = true },
+            vm = vm,
             onCallPeer = { peer ->
                 pendingCallPeer = peer
                 showInfo = false
@@ -516,6 +565,8 @@ fun ChatScreen(
                     context.startActivity(intent)
                 }
             },
+            hasMoreMedia = state.hasMore,
+            onLoadOlderMedia = vm::loadOlderMessages,
         )
     }
 

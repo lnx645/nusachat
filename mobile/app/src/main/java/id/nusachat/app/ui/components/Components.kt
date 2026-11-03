@@ -43,8 +43,16 @@ fun NusaAvatar(
     url: String?,
     size: Dp,
     modifier: Modifier = Modifier,
+    gender: String? = null,
+    seed: Long? = null,
 ) {
     val initial = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+    // Tanpa foto profil: pakai avatar internet sesuai gender (deterministik per user).
+    val fallbackUrl = if (url.isNullOrBlank()) {
+        fallbackAvatarUrl(name = name, gender = gender, seed = seed)
+    } else {
+        null
+    }
     Box(
         modifier = modifier
             .size(size)
@@ -58,14 +66,33 @@ fun NusaAvatar(
             fontWeight = FontWeight.SemiBold,
             fontSize = (size.value * 0.38f).sp,
         )
-        if (!url.isNullOrBlank()) {
+        val imageUrl = url?.takeIf { it.isNotBlank() } ?: fallbackUrl
+        if (!imageUrl.isNullOrBlank()) {
             AsyncImage(
-                model = url,
+                model = imageUrl,
                 contentDescription = name,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize(),
             )
         }
+    }
+}
+
+/**
+ * Avatar cadangan dari internet, dipilih sesuai gender:
+ * laki-laki/perempuan dari randomuser.me, selain itu ilustrasi personas
+ * (DiceBear) berdasarkan seed nama. Indeks stabil per pengguna.
+ */
+fun fallbackAvatarUrl(name: String, gender: String?, seed: Long?): String {
+    val key = (seed ?: name.hashCode().toLong())
+    val index = ((key % 90) + 90) % 90
+    return when (gender?.lowercase()) {
+        "male", "laki-laki", "m", "pria" ->
+            "https://randomuser.me/api/portraits/men/$index.jpg"
+        "female", "perempuan", "f", "wanita" ->
+            "https://randomuser.me/api/portraits/women/$index.jpg"
+        else ->
+            "https://api.dicebear.com/9.x/personas/png?seed=${java.net.URLEncoder.encode(name.ifBlank { "Nusa" }, "UTF-8")}&size=128"
     }
 }
 
@@ -162,7 +189,7 @@ fun UserRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box {
-            NusaAvatar(name = user.displayName, url = user.avatarUrl, size = 46.dp)
+            NusaAvatar(name = user.displayName, url = user.avatarUrl, size = 46.dp, gender = user.gender, seed = user.id)
             if (user.online) {
                 Box(
                     modifier = Modifier

@@ -43,6 +43,7 @@ object NusaIcons {
     @DrawableRes val Check: Int = LucideR.drawable.lucide_ic_check
     @DrawableRes val Checks: Int = LucideR.drawable.lucide_ic_check_check
     @DrawableRes val Time: Int = LucideR.drawable.lucide_ic_clock
+    @DrawableRes val Calendar: Int = LucideR.drawable.lucide_ic_calendar
     @DrawableRes val Close: Int = LucideR.drawable.lucide_ic_x
     @DrawableRes val Logout: Int = LucideR.drawable.lucide_ic_log_out
     @DrawableRes val Visible: Int = LucideR.drawable.lucide_ic_eye
@@ -66,4 +67,9 @@ object NusaIcons {
     @DrawableRes val Forward: Int = LucideR.drawable.lucide_ic_forward
     @DrawableRes val Wifi: Int = LucideR.drawable.lucide_ic_wifi
     @DrawableRes val WifiOff: Int = LucideR.drawable.lucide_ic_wifi_off
+    @DrawableRes val Shield: Int = LucideR.drawable.lucide_ic_shield
+    @DrawableRes val Link: Int = LucideR.drawable.lucide_ic_link
+    @DrawableRes val Timer: Int = LucideR.drawable.lucide_ic_timer
+    @DrawableRes val KeyRound: Int = LucideR.drawable.lucide_ic_key_round
+    @DrawableRes val Megaphone: Int = LucideR.drawable.lucide_ic_megaphone
 }

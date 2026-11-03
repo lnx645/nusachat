@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -17,6 +18,9 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxColors
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDefaults
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
@@ -25,6 +29,9 @@ import androidx.compose.material3.IconButtonColors
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -32,8 +39,11 @@ import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchColors
+import androidx.compose.material3.Surface
 import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarColors
 import androidx.compose.material3.TopAppBarDefaults
@@ -361,6 +371,54 @@ fun NusaTopAppBar(
 }
 
 @Composable
+fun NusaNavigationBar(
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit,
+) {
+    NavigationBar(
+        modifier = modifier,
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 0.dp,
+        content = content,
+    )
+}
+
+@Composable
+fun RowScope.NusaNavItem(
+    selected: Boolean,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit,
+    label: @Composable (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    NavigationBarItem(
+        selected = selected,
+        onClick = onClick,
+        icon = icon,
+        modifier = modifier,
+        enabled = enabled,
+        label = label?.let {
+            {
+                ProvideTextStyle(
+                    MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                    ),
+                ) { it() }
+            }
+        },
+        colors = NavigationBarItemDefaults.colors(
+            selectedIconColor = MaterialTheme.colorScheme.primary,
+            selectedTextColor = MaterialTheme.colorScheme.primary,
+            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+    )
+}
+
+@Composable
 fun NusaMenu(
     expanded: Boolean,
     onDismissRequest: () -> Unit,
@@ -381,6 +439,99 @@ fun NusaMenu(
         tonalElevation = 0.dp,
         content = content,
     )
+}
+
+/**
+ * Kartu standar aplikasi — satu-satunya cara membuat card di NusaChat.
+ * Warna mengikuti color scheme (surface di atas background), radius 20dp,
+ * tanpa bayangan, border tipis outlineVariant agar tegas di light & dark.
+ */
+@Composable
+fun NusaCard(
+    modifier: Modifier = Modifier,
+    shape: Shape = RoundedCornerShape(20.dp),
+    containerColor: Color? = null,
+    contentColor: Color? = null,
+    onClick: (() -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
+    val container = containerColor ?: MaterialTheme.colorScheme.surface
+    val contentClr = contentColor ?: MaterialTheme.colorScheme.onSurface
+    val border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    if (onClick != null) {
+        Surface(
+            onClick = onClick,
+            modifier = modifier,
+            shape = shape,
+            color = container,
+            contentColor = contentClr,
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp,
+            border = border,
+            content = content,
+        )
+    } else {
+        Surface(
+            modifier = modifier,
+            shape = shape,
+            color = container,
+            contentColor = contentClr,
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp,
+            border = border,
+            content = content,
+        )
+    }
+}
+
+/**
+ * Date picker dialog mengikuti tema aplikasi (hijau LINE, radius 24dp).
+ * [onConfirm] menerima millis UTC tengah malam tanggal terpilih.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NusaDatePickerDialog(
+    initialDateMillis: Long?,
+    onDismiss: () -> Unit,
+    onConfirm: (Long) -> Unit,
+) {
+    val state = rememberDatePickerState(initialSelectedDateMillis = initialDateMillis)
+    DatePickerDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            NusaTextButton(
+                onClick = { state.selectedDateMillis?.let(onConfirm) },
+                enabled = state.selectedDateMillis != null,
+            ) { Text("Pilih") }
+        },
+        dismissButton = {
+            NusaTextButton(onClick = onDismiss) { Text("Batal") }
+        },
+        shape = RoundedCornerShape(24.dp),
+        colors = DatePickerDefaults.colors(
+            containerColor = MaterialTheme.colorScheme.surface,
+        ),
+    ) {
+        DatePicker(
+            state = state,
+            title = {
+                Text(
+                    text = "Tanggal lahir",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 24.dp, end = 12.dp, top = 16.dp),
+                )
+            },
+            showModeToggle = false,
+            colors = DatePickerDefaults.colors(
+                containerColor = MaterialTheme.colorScheme.surface,
+                selectedDayContainerColor = MaterialTheme.colorScheme.primary,
+                selectedDayContentColor = MaterialTheme.colorScheme.onPrimary,
+                todayContentColor = MaterialTheme.colorScheme.primary,
+                todayDateBorderColor = MaterialTheme.colorScheme.primary,
+            ),
+        )
+    }
 }
 
 @Composable
