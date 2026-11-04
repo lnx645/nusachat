@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -147,6 +148,10 @@ fun ChatsScreen(
             onPick = { user ->
                 showNewChat = false
                 vm.openChatWith(user)
+            },
+            onJoin = { token ->
+                showNewChat = false
+                vm.joinGroupByToken(token)
             },
         )
     }
@@ -313,9 +318,11 @@ private fun NewChatDialog(
     friends: List<User>,
     onDismiss: () -> Unit,
     onPick: (User) -> Unit,
+    onJoin: (String) -> Unit,
 ) {
     // LINE: layar penuh via Dialog — TopBar putih, search, list, nutup bottom nav
     var query by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf("") }
+    var inviteInput by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf("") }
     val filtered = friends.filter {
         query.isBlank() ||
             it.displayName.contains(query, ignoreCase = true) ||
@@ -359,6 +366,26 @@ private fun NewChatDialog(
                         placeholder = "Cari teman",
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        id.nusachat.app.ui.components.NusaSearchField(
+                            value = inviteInput,
+                            onValueChange = { inviteInput = it },
+                            placeholder = "Tempel tautan undangan grup",
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(
+                            onClick = { if (inviteInput.isNotBlank()) onJoin(inviteInput) },
+                            enabled = inviteInput.isNotBlank(),
+                        ) {
+                            Text("Gabung")
+                        }
+                    }
                     if (friends.isEmpty()) {
                         id.nusachat.app.ui.components.EmptyState(
                             icon = id.nusachat.app.ui.theme.NusaIcons.PersonAdd,

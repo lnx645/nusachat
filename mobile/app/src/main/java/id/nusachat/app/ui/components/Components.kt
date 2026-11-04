@@ -279,6 +279,30 @@ fun formatClockTime(value: String?): String {
     return SimpleDateFormat("HH:mm", Locale.US).format(date)
 }
 
+/** Kunci grup harian "yyyy-DDD" untuk separator tanggal ala WhatsApp. */
+fun dayKey(value: String?): String? {
+    val date = parseIsoDate(value) ?: return null
+    val cal = Calendar.getInstance().apply { time = date }
+    return "${cal.get(Calendar.YEAR)}-${cal.get(Calendar.DAY_OF_YEAR)}"
+}
+
+/** Label separator tanggal: HARI INI / KEMARIN / "3 November 2026". */
+fun formatDayLabel(value: String?): String {
+    val date = parseIsoDate(value) ?: return ""
+    val now = Calendar.getInstance()
+    val then = Calendar.getInstance().apply { time = date }
+    val sameDay = now.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
+        now.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
+    if (sameDay) return "HARI INI"
+    val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+    if (yesterday.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
+        yesterday.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
+    ) {
+        return "KEMARIN"
+    }
+    return SimpleDateFormat("d MMMM yyyy", Locale("id", "ID")).format(date)
+}
+
 fun formatMomentTime(value: String?): String {
     val date = parseIsoDate(value) ?: return ""
     val diff = System.currentTimeMillis() - date.time

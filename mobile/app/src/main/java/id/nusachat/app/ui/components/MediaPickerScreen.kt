@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -102,6 +103,7 @@ fun MediaPickerScreen(
     var items by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var selected by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
+    val sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     LaunchedEffect(Unit) {
         items = queryMedia(context)
@@ -109,6 +111,7 @@ fun MediaPickerScreen(
     }
 
     NusaBottomSheet(
+        sheetState = sheetState,
         onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
@@ -173,7 +176,7 @@ fun MediaPickerScreen(
                 NusaTextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Batal") }
                 NusaButton(onClick = { onConfirm(selected) }, enabled = selected.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Pilih (${selected.size})") }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(12.dp).navigationBarsPadding())
         }
     }
 }

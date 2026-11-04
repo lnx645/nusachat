@@ -68,6 +68,14 @@ Keduanya berkomunikasi lewat database, bukan lewat panggilan langsung. API menul
 - Polling `realtime_events` tiap 350 ms dengan cursor `id`.
 - Menghapus event lebih lama dari 24 jam setiap 5 menit.
 
+Sejak migrasi, pengantar realtime utama adalah gateway Erlang/OTP
+(`realtime/nusachat_realtime`, port 8091, detail di `realtime/README.md`):
+supervisor OTP menaungi koneksi MySQL, registry socket per user (ETS),
+poller outbox 350 ms, dan handler Cowboy — wire-compatible sehingga klien
+(Android `WS_URL`) tidak berubah. Gateway PHP di 8090 tetap jalan sebagai
+fallback. Database utama kini MySQL (`DB_DRIVER=mysql`); SQLite hanya arsip
+di `/tmp/nusachat.sqlite.bak`.
+
 ### Event yang dikirim
 
 Envelope:
@@ -91,6 +99,14 @@ Tipe event:
 | `read` | Lawan membaca pesan | `conversation_id`, `user_id`, `message_id` |
 | `typing` | Lawan mengetik | `conversation_id`, `user_id`, `display_name` |
 | `message_revoked` | Pesan ditarik | `conversation_id`, `message_id` |
+| `message_edited` | Pesan diubah | `conversation_id`, `message` |
+| `message_reaction` | Reaksi berubah | `conversation_id`, `message_id`, `action`, `reactions` |
+| `conversation_pinned` | Pesan disematkan | `conversation_id`, `message_id`, `user_id` |
+| `conversation_unpinned` | Sematan dilepas | `conversation_id`, `message_id`, `user_id` |
+| `join_requested` | Permintaan gabung grup | `conversation_id`, `user` |
+| `join_reviewed` | Hasil review gabung | `conversation_id`, `status` |
+| `call_offer/answer/ice/end` | Signaling 1-1 (+`kind` di offer) | `call`, `sdp`/`candidate` |
+| `call_room_offer/joined/left/ended/signal` | Signaling room grup | `call`, `user`/`sdp` |
 | `friend_request` | Permintaan pertemanan masuk | `request_id`, `user` |
 | `friend_accepted` | Permintaan diterima | `user` |
 | `conversation_updated` | Anggota grup berubah | `conversation_id`, `removed_user_id` |
@@ -135,14 +151,22 @@ Waktu disimpan sebagai string ISO-8601 UTC agar konsisten antara SQLite dan MySQ
 - **Session**: access token, refresh token, dan snapshot user di SharedPreferences privat.
 - **UI**: Compose Material 3 dengan 4 tab bawah. Halaman chat, momen, nearby, dan edit profil adalah overlay yang menyembunyikan bottom bar.
 - **Optimistic send**: pesan langsung muncul dengan `client_id`; saat respons server datang, pesan sementara diganti pesan asli. Event realtime dengan `client_id` yang sama juga direkonsiliasi. Pesan gagal bisa dikirim ulang dari menu long-press.
-- **Chat lanjutan**: long-press untuk balas/tarik, reply preview di composer, lampiran foto/video/audio/file, info grup (anggota, tambah/keluarkan, bisu, keluar).
+- **Chat lanjutan**: long-press untuk balas/edit/teruskan/reaksi/sematkan/tarik, reply preview di composer, lampiran foto/video/audio/file, info grup (anggota, tambah/keluarkan, bisu, keluar, arsip).
+- **Grup**: tautan undangan (`nusachat://group/<token>`, bisa diputar ulang), gabung tanpa berteman, antrean persetujuan admin, role owner/admin/member (admin keluarkan anggota biasa; owner kelola role).
 - **Kontak**: sinkron kontak HP via `READ_CONTACTS` ke `/contacts/sync`, hapus teman dengan konfirmasi.
-- **Momen**: composer multi-foto (`GetMultipleContents`, maks 9), hapus momen sendiri, pagination `before_id`.
+- **Momen**: composer multi-foto/video (maks 9, `VideoView` untuk mp4), hapus momen sendiri, pagination `before_id`, posting ulang (`reshared_from_id` + atribusi), bagikan ke chat (kirim ulang teks/media terenkripsi).
+- **Story 24 jam**: tabel `stories` (`expires_at`), strip di Momen, `StoryViewer` (pager + hapus milik sendiri), event `story_new`, feed menyaring kedaluwarsa + blokir.
+- **E2EE antar-perangkat**: `E2eeManager` (AES-GCM + RSA-2048 OAEP, kunci di `EncryptedSharedPreferences`), `device_keys` + `conversation_keys` (blob opaque per `device_id` + `key_fp` fingerprint SHA-256 pubkey), healing saat buka chat (`syncConversationKeys`: unwrap milikku → tetapkan bila kosong → bungkus untuk yang belum punya; reinstall = RSA baru dengan `device_id` sama wajib dibungkus ulang karena fingerprint beda), bungkus ulang saat kirim (send-heal) + saat event `device_added`/`keys_updated`, publikasi kunci saat login. Catatan: pesan lama yang blob-nya hanya untuk pubkey lama tak bisa dibuka di install baru sampai ada pemegang kunci kanonis yang buka chat/kirim (holding-side heal); terverifikasi realtime + plaintext dua arah via Erlang push (msg 701, conv 2).
+- **Dompet**: `Wallet` controller + `Wallet_model` (topup, transfer transaksional + `wallet_txns`), `WalletScreen` (saldo, top up, kirim ke teman, riwayat), event `wallet_received`, flag `monetization: true`.
 - **Profil**: gender, birthday (`YYYY-MM-DD`), discoverable, dan ganti kata sandi (sesi dicabut, wajib login ulang).
+- **Auth ala LINE + Google OAuth**: sambutan (Login/Daftar) -> login Google atau username/sandi -> daftar bertahap (Google -> nama/username -> avatar -> sandi -> persetujuan). Client: Credential Manager (`GoogleAuthHelper`, audience `BuildConfig.GOOGLE_SERVER_CLIENT_ID`); server: `POST /auth/google` verifikasi RS256 via `Googleauth` (cert Google di-cache 12 jam, cek iss/aud/exp; `aud` harus di `GOOGLE_CLIENT_IDS`), `google_sub` tertaut -> login, baru -> 409 `google_register_required` -> client lengkapi profil -> 201 + avatar galeri diunggah pasca-daftar. Kolom `users.google_sub` (unik) + `google_email`. Smoke REST 139/139.
 - **Upload**: `ActivityResultContracts.GetContent` → multipart ke `/uploads` → URL dikirim sebagai pesan/momen/avatar.
 - **Push (FCM)**: `PushManager` init Firebase + channel Pesan/Panggilan, minta izin notifikasi (API 33+), ambil token dan `POST /push/register` setelah login; `NusaFirebaseService` render notifikasi data-only. Backend kirim best-effort via `Fcm`/legacy API, skip saat `FCM_SERVER_KEY` kosong atau user mute.
-- **Voice call (WebRTC audio-only)**: `CallRepository` (`/calls/*`) + `WebRtcCallManager` (`PeerConnectionFactory`, `JavaAudioDeviceModule`, STUN Google) + `callState` di `AppViewModel`. Offer/answer/ICE lewat REST, event realtime `call_*` tiba via WS, FCM membangunkan callee. UI: tombol telepon di chat langsung, `VoiceCallScreen`, layar penuh panggilan masuk, toggle mic/speaker via `AudioManager`.
+- **Voice call 1-1** (video call dihapus): `CallRepository` (`/calls/*`, selalu `kind` audio; `video` ditolak `403 video_disabled`) + `WebRtcCallManager` audio-only (`PeerConnectionFactory`, `JavaAudioDeviceModule` software AEC/NS, TURN Cloudflare via `/calls/ice_servers`) + `callState` di `AppViewModel`. Offer/answer/ICE lewat REST, event realtime `call_*` tiba via WS, FCM + `CallForegroundService` membangunkan callee (notif Jawab/Tolak/Tutup, jalan di background). UI: tombol telepon di chat langsung, `VoiceCallScreen` (avatar + timer), layar penuh panggilan masuk, toggle mic/speaker via `AudioManager`.
+- **Panggilan grup (mesh audio)**: room di tabel `calls` (`conversation_id` terisi, `callee_id = 0`) + `call_participants`. `GroupCallMesh` memegang satu `WebRtcCallManager` per lawan bicara; SDP via `/calls/room_signal` (`call_room_signal`), ICE via `/calls/ice` + `to_user_id`. UI: `GroupCallScreen` (dering/aktif, daftar partisipan, keluar), entry dari info grup, tolak tanpa jejak via `declineGroupCall`.
 - **UI pattern**: tidak ada `AlertDialog` tersisa — konfirmasi pakai `NusaConfirmSheet`, aksi pakai `NusaActionSheet` (bottom sheet), info grup/chat baru/komposer momen/ganti sandi pakai layar penuh atau bottom sheet.
+- **Latar Chat**: halaman khusus ala WA/Telegram/LINE (`ChatThemeScreen` dari tab Saya → Umum). Wallpaper bawaan: doodle Nusa terang (`chat_doodle_light.webp`, default: putih semu abu #ECE5DD) + doodle gelap (`chat_doodle_dark.webp`), 6 warna solid, gambar galeri (`OpenDocument` + izin persistable + scrim 28%). Setiap pilihan tersimpan di `ChatThemeStore` dan selalu berpasangan dengan bubble (Otomatis/Nusa/WA/Biru/Ungu/Gelap: mine+other+warna teks) agar kontras terjaga; jam + centang di atas wallpaper ikut terang/gelap latar.
+- **Orang Terdekat realtime via Erlang** (beban PHP ~nol): layar kirim `location.update` lewat WS ke `nusa_nearby` (gen_server + ETS, persist 1 UPDATE MySQL, validasi koordinat server-side); daftar awal `nearby.result` dari query geo Erlang (mirror `User_model::nearby`: aktif+discoverable+segar 7 hari, kecuali blokir, filter haversine, `friend_status` + jarak); perubahan berikutnya di-push `nearby.changed` ke subscriber yang radiusnya mencakup. Client: `startNearbyLive`/`stopNearbyLive`, badge "Live • realtime", fallback REST bila socket putus; handler WS tahan crash callee (jawab `nearby.error`, koneksi tetap hidup). Smoke WS 18/18 termasuk regresi multi-kandidat.
 
 ## Deployment produksi
 
@@ -161,6 +185,6 @@ Untuk skala lebih besar, ganti polling `realtime_events` dengan Redis pub/sub at
 
 - Gateway WS single-process; batas praktis `stream_select()` sekitar 1024 file descriptor.
 - Handshake membaca header secara blocking dengan timeout 3 detik; client baru yang lambat bisa menahan loop sebentar.
-- Belum ada enkripsi end-to-end; pesan terenkripsi saat transit (HTTPS/WSS) dan tersimpan di database server.
-- Belum ada panggilan suara/video, notifikasi push, atau monetisasi.
-- Build Android belum diverifikasi compiler pada lingkungan pengembangan ini.
+- E2EE demo (AES-GCM + distribusi kunci RSA, tanpa ratchet/forward secrecy); pesan non-teks dan metadata tidak terenkripsi.
+- Panggilan grup mesh audio (tanpa SFU); kualitas menurun di atas ~6 partisipan dan butuh UDP/STUN terbuka.
+- Dompet hanya koin demo; bukan payment gateway dan tanpa audit trail eksternal.

@@ -110,7 +110,10 @@ Info aplikasi, fitur, batas, dan `ws_url`.
 | GET | `/users/search?q=rina` | Cari pengguna (min. 2 karakter) |
 | GET | `/users/show?id=5` | Profil pengguna lain |
 | POST | `/users/password` | Ganti password |
+| POST/DELETE | `/users/delete` | `password` → nonaktifkan + anonimkan + cabut relasi (username dipertahankan) |
 | POST | `/users/presence` | Kirim heartbeat/lokasi |
+| POST | `/users/device_key` | `device_id`, `public_key` (base64 kunci publik RSA perangkat) |
+| GET | `/users/device_keys?user_id=5` | — (daftar kunci publik perangkat user) |
 
 Field `users/update`: `display_name`, `bio`, `gender` (`male`/`female`/`other`), `birthday` (`YYYY-MM-DD`), `avatar_url`, `discoverable`, `phone`.
 
@@ -126,10 +129,15 @@ Field `users/update`: `display_name`, `bio`, `gender` (`male`/`female`/`other`),
 | --- | --- | --- |
 | GET | `/friends` | — |
 | GET | `/friends/requests` | — |
-| POST | `/friends/send` | `user_id` |
+| POST | `/friends/send` | `user_id` (ditolak bila salah satu memblokir) |
 | POST | `/friends/respond` | `request_id`, `action` = `accept`/`decline` |
 | POST/DELETE | `/friends/remove` | `user_id` |
+| POST | `/friends/block` | `user_id` |
+| POST/DELETE | `/friends/unblock` | `user_id` |
+| GET | `/friends/blocked` | — (daftar yang saya blokir) |
 | GET | `/friends/status?user_id=5` | — |
+
+Blokir satu arah: chat/panggilan langsung, permintaan teman, pencarian, profil, dan nearby terhadap yang diblokir ditolak. Bila saya memblokir → `403 blocked`; bila saya diblokir → `404` seolah tidak ada. Grup tidak terpengaruh.
 
 `GET /friends/requests` mengembalikan `incoming` dan `outgoing`.
 
@@ -158,13 +166,30 @@ Maksimal 2000 kontak per request. Nomor di-hash dengan HMAC; server tidak menyim
 | POST | `/conversations/create_group` | `title`, `member_ids` |
 | GET | `/conversations/messages` | `id`, `before_id?`, `after_id?`, `limit?` |
 | POST | `/conversations/send` | lihat di bawah |
+| POST | `/conversations/forward` | `message_id`, `to_id`, `body?`, `client_id?` |
+| GET | `/conversations/search` | `id`, `q` (min. 2 huruf), `limit?` |
+| POST | `/conversations/pin` | `id`, `message_id` |
+| POST | `/conversations/unpin` | `id`, `message_id` |
+| GET | `/conversations/pins` | `id` |
+| POST | `/conversations/archive` | `id`, `archived?` (default true) |
+| GET | `/conversations/keys` | `id` → `my_key` (milikku) + `holders` (yang sudah punya) |
+| POST | `/conversations/set_keys` | `id`, `keys: [{user_id, wrapped_key}]` (khusus anggota) |
 | POST | `/conversations/read` | `id`, `message_id` |
 | POST | `/conversations/typing` | `id` |
 | POST | `/conversations/add_members` | `id`, `user_ids` |
 | POST | `/conversations/remove_member` | `id`, `user_id` |
+| POST | `/conversations/set_role` | `id`, `user_id`, `role` = `admin`/`member` (owner saja) |
+| POST | `/conversations/invite` | `id`, `rotate?` → `invite_token` + `invite_link` |
+| POST | `/conversations/join` | `token` (token mentah atau tautan penuh) |
+| GET | `/conversations/join_requests` | `id` (admin saja) |
+| POST | `/conversations/review_request` | `request_id`, `action` = `approve`/`reject` (admin saja) |
 | POST | `/conversations/mute` | `id`, `muted` |
 
+`GET /conversations` mendukung `?archived=1` untuk daftar arsip; default menyembunyikan yang diarsipkan.
+
 Chat langsung hanya bisa dibuat dengan teman. Grup maksimal 50 anggota dan hanya owner yang bisa menambah anggota.
+
+Undangan: anggota bisa meminta tautan via `/conversations/invite` saat `invite_link_enabled` aktif; tautan bisa diputar ulang dengan `rotate: true`. Gabung via `/conversations/join` tanpa perlu berteman dulu. Bila `approve_new_members` aktif, gabung menjadi permintaan `pending` (HTTP 202) yang disetujui/ditolak admin; admin diberi event `join_requested`, pemohon diberi `join_reviewed`. Role: owner mengangkat/mencabut admin via `/conversations/set_role`; admin bisa mengeluarkan anggota biasa, hanya owner yang bisa mengeluarkan admin.
 
 ### Kirim pesan
 
@@ -178,6 +203,8 @@ Chat langsung hanya bisa dibuat dengan teman. Grup maksimal 50 anggota dan hanya
 ```
 
 Field tambahan: `reply_to_id`, `attachment_url`, `attachment_meta`. Untuk `type` selain `text`, `attachment_url` wajib. Tipe yang didukung: `text`, `image`, `file`, `audio`, `video`.
+
+Mention: tulis `@username` anggota percakapan di isi pesan teks; server menyimpannya sebagai `mentions: [user_id, ...]` dan `mentioned_me: true` untuk user yang disebut.
 
 `client_id` membuat pengiriman idempoten: request ulang dengan `client_id` yang sama mengembalikan pesan lama dengan `duplicate: true` dan HTTP `200`.
 
@@ -208,14 +235,30 @@ Response:
 
 `POST /messages/revoke` dengan `{ "message_id": 123 }`. Hanya pengirim, maksimal 24 jam setelah dikirim.
 
+### Edit pesan
+
+`POST /messages/edit` dengan `{ "message_id": 123, "body": "teks baru" }`. Hanya pengirim, maksimal 24 jam setelah dikirim. Response berisi `message` lengkap dengan `edited_at`.
+
+### Reaksi
+
+`POST /messages/react` dengan `{ "message_id": 123, "emoji": "👍" }`. Satu reaksi per user per pesan; kirim emoji yang sama untuk mencabut, emoji lain untuk mengganti. Response: `{ "action": "added"|"removed"|"replaced", "reactions": [{ "emoji", "count", "reacted_by_me" }] }`.
+
+### Teruskan pesan
+
+`POST /conversations/forward` dengan `{ "message_id": 123, "to_id": 5 }`. Menyalin pesan ke percakapan tujuan dengan `forwarded: true` dan `forwarded_from_id` terisi. `reply_to` tidak ikut disalin. Klien E2EE boleh menyertakan `body` berisi isi yang sudah dienkripsi ulang dengan kunci percakapan tujuan.
+
 ## Momen 🔒
 
 | Method | Path | Body/Query |
 | --- | --- | --- |
 | GET | `/moments` | `before_id?`, `limit?` |
 | GET | `/moments/show?id=1` | — |
-| POST | `/moments/create` | `body?`, `media?` |
+| POST | `/moments/create` | `body?`, `media?` (foto/video, maks 9) |
 | POST/DELETE | `/moments/delete` | `id` |
+| POST | `/moments/reshare` | `id` → salinan + atribusi `reshared: {moment_id, author}` |
+| GET | `/moments/stories` | — (story aktif teman + sendiri) |
+| POST | `/moments/story_create` | `body?`, `media?` (maks 4), `expires_in_hours?` (default 24) |
+| POST/DELETE | `/moments/story_delete` | `id` |
 | POST | `/moments/like` | `id` |
 | POST/DELETE | `/moments/unlike` | `id` |
 | GET | `/moments/comments?id=1` | — |
@@ -285,18 +328,54 @@ Ringkasan untuk badge dan reconnect:
 
 Butuh `FCM_SERVER_KEY` di backend. Tanpa key, response `push_enabled: false` dan API tetap jalan; notifikasi hanya dari WS saat app terbuka. Payload FCM data-only (`event`, `title`, `body` + id terkait); channel Android: `nusachat_messages` dan `nusachat_calls`.
 
-## Voice call 🔒
+## Voice call 🔒 (video call dihapus)
 
 | Method | Path | Body |
 | --- | --- | --- |
-| POST | `/calls/offer` | `to_user_id`, `sdp` |
+| POST | `/calls/offer` | `to_user_id`, `sdp`, `kind?` (hanya `audio`; `video` ditolak `403 video_disabled`) |
 | POST | `/calls/answer` | `call_id`, `sdp` |
-| POST | `/calls/ice` | `call_id`, `candidate` (`{candidate, sdpMid, sdpMLineIndex}`) |
+| POST | `/calls/ice` | `call_id`, `candidate` (`{candidate, sdpMid, sdpMLineIndex}`), `to_user_id?` (wajib untuk room grup) |
 | POST | `/calls/reject` | `call_id` |
 | POST | `/calls/end` | `call_id` |
-| GET | `/calls/incoming` | — |
+| GET | `/calls/incoming` | — (mengembalikan `calls` + `rooms`) |
+| GET | `/calls/ice_servers` | — (kredensial TURN Cloudflare short-lived per `docs/TURN.md`, fallback STUN) |
 
-Signaling lewat outbox realtime (`call_offer`, `call_answer`, `call_ice`, `call_end`) + FCM wake-up untuk `call_offer`. Media audio peer-to-peer WebRTC (STUN `stun:stun.l.google.com:19302`). Status: `ringing` → `active` → `ended`/`rejected`.
+Signaling lewat outbox realtime (`call_offer`, `call_answer`, `call_ice`, `call_end`) + FCM wake-up untuk `call_offer`. Media audio peer-to-peer WebRTC (TURN Cloudflare via `/calls/ice_servers`, fallback STUN `stun:stun.cloudflare.com:3478`). Status: `ringing` → `active` → `ended`/`rejected`.
+
+### Panggilan grup 🔒
+
+| Method | Path | Body |
+| --- | --- | --- |
+| POST | `/calls/room_create` | `conversation_id`, `kind?` → room + `participants`, `reused` |
+| POST | `/calls/room_join` | `call_id` → room + `participants` |
+| POST | `/calls/room_leave` | `call_id` → `{left, ended}` (terakhir keluar menutup room) |
+| GET | `/calls/room_state` | `call_id` → room + `participants` |
+| POST | `/calls/room_signal` | `call_id`, `to_user_id`, `sdp`, `signal` (`offer`/`answer`) |
+
+Room adalah mesh WebRTC audio: tiap anggota yang gabung bertukar SDP dengan anggota yang sudah ada via `room_signal` (`call_room_signal`) dan ICE via `/calls/ice` + `to_user_id`. Event: `call_room_offer`, `call_room_joined`, `call_room_left`, `call_room_ended`, `call_room_signal`.
+
+## E2EE 🔒
+
+Pesan teks dienkripsi AES-256 GCM di perangkat sebelum dikirim; server hanya menyimpan ciphertext (base64). Kunci sesi dibuat per percakapan dan didistribusikan antar perangkat/anggota lewat RSA-2048 OAEP:
+
+1. Perangkat mengunggah kunci publik via `POST /users/device_key`.
+2. Klien membaca `GET /conversations/keys`: bila `my_key` ada → buka dengan kunci privat; bila belum ada kunci sama sekali → tetapkan kunci lokal untuk semua anggota; bila memegang kunci kanonis → bungkus untuk anggota yang belum punya via `POST /conversations/set_keys`.
+3. Server menyimpan blob opaque dan tidak pernah melihat kunci.
+
+Bukan double-ratchet produksi: tanpa forward secrecy dan tanpa rotasi otomatis.
+
+## Dompet 🔒
+
+Koin demo (bilangan bulat, bukan uang sungguhan / bukan payment gateway).
+
+| Method | Path | Body |
+| --- | --- | --- |
+| GET | `/wallet` | — → `{balance}` |
+| POST | `/wallet/topup` | `amount` (1–10.000.000) |
+| POST | `/wallet/transfer` | `to_user_id`, `amount`, `note?` (atomik, saldo kurang → 422) |
+| GET | `/wallet/history` | `limit?` → `{balance, transactions}` |
+
+Transfer ke sesama user aktif; penerima diberi event realtime `wallet_received`.
 
 ## DTO
 
@@ -331,9 +410,15 @@ Untuk profil sendiri ditambah `phone`, `birthday`, `discoverable`, `created_at`.
   "attachment_url": null,
   "attachment_meta": null,
   "reply_to_id": null,
+  "forwarded": false,
+  "forwarded_from_id": null,
+  "mentions": [],
+  "mentioned_me": false,
+  "reactions": [{ "emoji": "👍", "count": 2, "reacted_by_me": true }],
   "client_id": "…",
   "status": "read",
   "revoked": false,
+  "edited_at": null,
   "created_at": "2026-11-03T10:00:00Z"
 }
 ```
@@ -418,7 +503,7 @@ Balasan:
 
 Server juga mengirim ping frame WebSocket setiap 25 detik. Klien harus membalas pong (OkHttp melakukannya otomatis).
 
-Tipe event: `message`, `read`, `typing`, `message_revoked`, `friend_request`, `friend_accepted`, `conversation_updated`, `moment_new`, `moment_liked`, `moment_comment`.
+Tipe event: `message`, `read`, `typing`, `message_revoked`, `message_edited`, `message_reaction`, `conversation_pinned`, `conversation_unpinned`, `friend_request`, `friend_accepted`, `conversation_updated`, `moment_new`, `moment_liked`, `moment_comment`, `story_new`.
 
 ## Status HTTP dan kode error
 

@@ -26,5 +26,10 @@ Thumbs.db
 backend/application/logs/*
 !backend/application/logs/.gitkeep
 
+# Runtime cache
+backend/application/cache/
+__pycache__/
+*.pyc
+
 # Temp
 /tmp/

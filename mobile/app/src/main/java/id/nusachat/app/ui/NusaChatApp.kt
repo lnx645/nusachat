@@ -47,9 +47,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import id.nusachat.app.data.PushDeepLink
 import id.nusachat.app.data.PushManager
 import id.nusachat.app.data.User
 import id.nusachat.app.ui.auth.AuthScreen
+import id.nusachat.app.ui.call.GroupCallScreen
 import id.nusachat.app.ui.call.IncomingCallScreen
 import id.nusachat.app.ui.call.VoiceCallScreen
 import id.nusachat.app.ui.chats.ChatScreen
@@ -129,6 +131,7 @@ private fun MainShell(vm: AppViewModel, user: User) {
     val requests by vm.requests.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
     val call by vm.callState.collectAsStateWithLifecycle()
+    val groupCall by vm.groupCall.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var tab by rememberSaveable { mutableStateOf(0) }
     var overlay by rememberSaveable { mutableStateOf<Overlay?>(null) }
@@ -141,6 +144,16 @@ private fun MainShell(vm: AppViewModel, user: User) {
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { }
+    val answerPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) vm.answerVoiceCall()
+    }
+    fun hasCallPermissions(): Boolean {
+        return androidx.core.content.ContextCompat.checkSelfPermission(
+            context, Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
 
     LaunchedEffect(Unit) {
         PushManager.ensureFirebase(context)
@@ -165,6 +178,16 @@ private fun MainShell(vm: AppViewModel, user: User) {
             vm.periodicSync()
         }
     }
+    LaunchedEffect(Unit) {
+        // Deep-link sekali pakai dari ketukan notifikasi: buka chat tujuan.
+        delay(1_500)
+        PushDeepLink.consume()?.let { id ->
+            if (id > 0) vm.openChatById(id)
+        }
+        PushDeepLink.consumeCallAction()?.let { (action, callId) ->
+            vm.onNotificationCallAction(action, callId)
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         when {
@@ -173,8 +196,11 @@ private fun MainShell(vm: AppViewModel, user: User) {
                 IncomingCallScreen(
                     state = call,
                     onAnswer = {
-                        micPermission.launch(Manifest.permission.RECORD_AUDIO)
-                        vm.answerVoiceCall()
+                        if (hasCallPermissions()) {
+                            vm.answerVoiceCall()
+                        } else {
+                            answerPermission.launch(Manifest.permission.RECORD_AUDIO)
+                        }
                     },
                     onReject = vm::rejectVoiceCall,
                 )
@@ -188,6 +214,31 @@ private fun MainShell(vm: AppViewModel, user: User) {
                     onEnd = vm::endVoiceCall,
                     onToggleMute = vm::toggleCallMute,
                     onToggleSpeaker = vm::toggleCallSpeaker,
+                )
+            }
+            groupCall.status == "ringing" -> {
+                BackHandler { vm.declineGroupCall() }
+                GroupCallScreen(
+                    state = groupCall,
+                    onAccept = {
+                        micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                        vm.acceptGroupCall()
+                    },
+                    onReject = vm::declineGroupCall,
+                    onLeave = vm::leaveGroupCall,
+                    onToggleMute = vm::toggleGroupMute,
+                    onToggleSpeaker = vm::toggleGroupSpeaker,
+                )
+            }
+            groupCall.status == "active" -> {
+                BackHandler { /* block back during call, use end button */ }
+                GroupCallScreen(
+                    state = groupCall,
+                    onAccept = {},
+                    onReject = vm::declineGroupCall,
+                    onLeave = vm::leaveGroupCall,
+                    onToggleMute = vm::toggleGroupMute,
+                    onToggleSpeaker = vm::toggleGroupSpeaker,
                 )
             }
             chatState.conversation != null -> {
@@ -236,7 +287,11 @@ private fun MainShell(vm: AppViewModel, user: User) {
                                                 }
                                             }
                                         ) {
-                                            Icon(painter = painterResource(id = item.icon), contentDescription = item.label)
+                                            Icon(
+                                                painter = painterResource(id = item.icon),
+                                                contentDescription = item.label,
+                                                modifier = Modifier.size(if (tab == index) 22.dp else 20.dp),
+                                            )
                                         }
                                     },
                                     label = { Text(item.label) },

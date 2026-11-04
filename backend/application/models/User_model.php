@@ -28,6 +28,8 @@ class User_model extends CI_Model
             'gender' => $data['gender'] ?? null,
             'birthday' => $data['birthday'] ?? null,
             'discoverable' => 1,
+            'google_sub' => $data['google_sub'] ?? null,
+            'google_email' => $data['google_email'] ?? null,
             'token_version' => 0,
             'is_active' => 1,
             'created_at' => $now,
@@ -72,6 +74,21 @@ class User_model extends CI_Model
         return (bool) $this->store->value('SELECT 1 FROM users WHERE phone = ?', [$phone]);
     }
 
+    public function findByGoogleSub(string $sub): ?array
+    {
+        return $this->store->one('SELECT * FROM users WHERE google_sub = ?', [$sub]);
+    }
+
+    public function linkGoogle(int $id, string $sub, string $email): void
+    {
+        $this->store->update(
+            'users',
+            ['google_sub' => $sub, 'google_email' => $email !== '' ? $email : null, 'updated_at' => now_iso()],
+            'id = ?',
+            [$id]
+        );
+    }
+
     public function update(int $id, array $fields): void
     {
         $allowed = ['display_name', 'avatar_url', 'bio', 'gender', 'birthday', 'discoverable', 'phone', 'phone_hash'];
@@ -105,6 +122,42 @@ class User_model extends CI_Model
         $this->store->update(
             'users',
             ['password_hash' => $hash, 'token_version' => (int) $this->store->value('SELECT token_version FROM users WHERE id = ?', [$id]) + 1, 'updated_at' => now_iso()],
+            'id = ?',
+            [$id]
+        );
+    }
+
+    /**
+     * Hapus akun: nonaktifkan + anonimkan + cabut semua relasi milik user.
+     * Username dipertahankan agar tidak bisa dipakai ulang orang lain.
+     */
+    public function deleteAccount(int $id): void
+    {
+        $now = now_iso();
+        $this->store->delete('friendships', 'requester_id = ? OR addressee_id = ?', [$id, $id]);
+        $this->store->delete('blocks', 'user_id = ? OR blocked_user_id = ?', [$id, $id]);
+        $this->store->delete('group_join_requests', 'user_id = ?', [$id]);
+        $this->store->delete('conversation_members', 'user_id = ?', [$id]);
+        $this->store->delete('push_tokens', 'user_id = ?', [$id]);
+        $this->store->delete('moment_likes', 'user_id = ?', [$id]);
+        $this->store->delete('moment_comments', 'user_id = ?', [$id]);
+        $this->store->update('moments', ['deleted_at' => $now], 'user_id = ? AND deleted_at IS NULL', [$id]);
+        $this->store->update(
+            'users',
+            [
+                'is_active' => 0,
+                'display_name' => 'Akun Dihapus',
+                'bio' => null,
+                'avatar_url' => null,
+                'phone' => null,
+                'phone_hash' => null,
+                'password_hash' => password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT),
+                'discoverable' => 0,
+                'latitude' => null,
+                'longitude' => null,
+                'token_version' => (int) $this->store->value('SELECT token_version FROM users WHERE id = ?', [$id]) + 1,
+                'updated_at' => $now,
+            ],
             'id = ?',
             [$id]
         );

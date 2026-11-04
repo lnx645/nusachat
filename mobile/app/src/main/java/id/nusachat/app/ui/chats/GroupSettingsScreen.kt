@@ -41,6 +41,7 @@ import id.nusachat.app.ui.components.NusaIconButton
 import id.nusachat.app.ui.components.NusaSwitch
 import id.nusachat.app.ui.components.NusaTopAppBar
 import id.nusachat.app.ui.theme.NusaIcons
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 
 /**
@@ -54,6 +55,7 @@ fun GroupSettingsScreen(
     vm: AppViewModel?,
     isOwner: Boolean,
     onBack: () -> Unit,
+    isAdmin: Boolean = false,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
@@ -61,6 +63,21 @@ fun GroupSettingsScreen(
     var settings by remember(conversation.id) { mutableStateOf(GroupSettings.fromConversation(conversation)) }
     var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    var inviteLink by remember(conversation.id) {
+        mutableStateOf(conversation.inviteToken?.let { "nusachat://group/$it" })
+    }
+    val requests by vm?.joinRequests?.collectAsStateWithLifecycle()
+        ?: remember { mutableStateOf(emptyList()) }
+
+    LaunchedEffect(settings.inviteLinkEnabled, conversation.id) {
+        inviteLink = if (settings.inviteLinkEnabled && vm != null) {
+            vm.fetchInviteLink(conversation.id)
+        } else null
+    }
+    LaunchedEffect(conversation.id, settings.approveNewMembers) {
+        if (isOwner || isAdmin) vm?.loadJoinRequests(conversation.id)
+    }
 
     LaunchedEffect(conversation.id) {
         settings = GroupSettings.fromConversation(conversation)
@@ -184,6 +201,98 @@ fun GroupSettingsScreen(
                     enabled = isOwner && settings.inviteLinkEnabled && !saving,
                     onCheckedChange = { approve -> update(settings.copy(approveNewMembers = approve)) },
                 )
+            }
+            if (settings.inviteLinkEnabled && inviteLink != null) {
+                item(key = "invite-show") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface)
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Tautan undangan",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Text(
+                                text = inviteLink.orEmpty(),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        NusaIconButton(onClick = {
+                            clipboard.setText(androidx.compose.ui.text.AnnotatedString(inviteLink.orEmpty()))
+                        }) {
+                            Icon(
+                                painter = painterResource(id = NusaIcons.Copy),
+                                contentDescription = "Salin tautan",
+                            )
+                        }
+                        if (isOwner) {
+                            NusaIconButton(onClick = {
+                                scope.launch {
+                                    inviteLink = vm?.fetchInviteLink(conversation.id, true)
+                                }
+                            }) {
+                                Icon(
+                                    painter = painterResource(id = NusaIcons.Refresh),
+                                    contentDescription = "Buat tautan baru",
+                                )
+                            }
+                        }
+                    }
+                }
+                item(key = "div-4") { SettingDivider() }
+            }
+            if ((isOwner || isAdmin) && requests.isNotEmpty()) {
+                item(key = "label-requests") { SectionLabel("Permintaan gabung (${requests.size})") }
+                item(key = "requests") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface)
+                            .padding(vertical = 4.dp),
+                    ) {
+                        requests.forEach { request ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = request.user.displayName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                    Text(
+                                        text = "@${request.user.username}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                NusaIconButton(onClick = { vm?.reviewJoinRequest(request, true) }) {
+                                    Icon(
+                                        painter = painterResource(id = NusaIcons.Check),
+                                        contentDescription = "Setujui",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                                NusaIconButton(onClick = { vm?.reviewJoinRequest(request, false) }) {
+                                    Icon(
+                                        painter = painterResource(id = NusaIcons.Close),
+                                        contentDescription = "Tolak",
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // --- Pesan sementara ----------------------------------------------

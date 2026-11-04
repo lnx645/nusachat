@@ -135,6 +135,97 @@ class Auth extends MY_Controller
         $this->ok(['message' => 'Logged out.']);
     }
 
+    /**
+     * Login / daftar dengan Google ID token.
+     *
+     * POST {id_token}: bila google_sub sudah tertaut -> login langsung.
+     * Bila belum: 409 google_register_required agar client lanjut ke
+     * layar nama/avatar/sandi, lalu POST lagi lengkap untuk membuat akun.
+     * POST {id_token, username, display_name, password, avatar_url?}:
+     * buat akun + tautkan google_sub.
+     */
+    public function google(): void
+    {
+        $this->require_method(['POST']);
+        $this->require_fields(['id_token']);
+        if (!$this->throttle('google:' . client_ip(), 30, 60)) {
+            $this->fail('Too many attempts. Please wait a minute.', 429, 'rate_limited');
+        }
+
+        $audiences = array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) ($this->app['google_client_ids'] ?? ''))
+        )));
+        if ($audiences === []) {
+            $this->fail('Google login is not configured on this server.', 503, 'google_not_configured');
+        }
+        try {
+            $claims = GoogleAuth::verifyIdToken((string) $this->param('id_token'), $audiences);
+        } catch (RuntimeException $e) {
+            $this->fail($e->getMessage(), 401, 'invalid_google_token');
+        }
+
+        $user = $this->user_model->findByGoogleSub($claims['sub']);
+        if ($user) {
+            if ((int) $user['is_active'] !== 1) {
+                $this->fail('This account is disabled.', 403, 'account_disabled');
+            }
+            $this->user_model->touch((int) $user['id']);
+            $this->ok([
+                'user' => user_dto($user, true),
+                'auth' => $this->token_model->issue($user, $this->device_name(), $this->app),
+            ]);
+        }
+
+        // Google baru: client harus melengkapi profil dulu.
+        $username = strtolower($this->str_param('username'));
+        $displayName = $this->str_param('display_name');
+        $password = (string) $this->param('password');
+        if ($username === '' || $displayName === '' || $password === '') {
+            $this->fail('Lengkapi profil untuk membuat akun.', 409, 'google_register_required', [
+                'google' => [
+                    'email' => $claims['email'],
+                    'name' => $claims['name'],
+                    'picture' => $claims['picture'],
+                ],
+            ]);
+        }
+
+        if (!preg_match('/^[a-z0-9_.]{4,20}$/', $username)) {
+            $this->fail('Username must be 4-20 characters: letters, numbers, dot or underscore.', 422, 'invalid_username');
+        }
+        if (in_array($username, ['admin', 'administrator', 'support', 'system', 'nusachat', 'official'], true)) {
+            $this->fail('This username is reserved.', 422, 'invalid_username');
+        }
+        $length = mb_strlen($password);
+        if ($length < 6 || $length > 72) {
+            $this->fail('Password must be 6-72 characters.', 422, 'invalid_password');
+        }
+        if (mb_strlen($displayName) < 2 || mb_strlen($displayName) > 40) {
+            $this->fail('Display name must be 2-40 characters.', 422, 'invalid_display_name');
+        }
+        if ($this->user_model->usernameExists($username)) {
+            $this->fail('Username is already taken.', 409, 'username_taken');
+        }
+
+        $userId = $this->user_model->create([
+            'username' => $username,
+            'phone' => null,
+            'password_hash' => password_hash($password, PASSWORD_DEFAULT),
+            'display_name' => $displayName,
+            'avatar_url' => $this->str_param('avatar_url') !== '' ? $this->str_param('avatar_url') : ($claims['picture'] !== '' ? $claims['picture'] : null),
+            'google_sub' => $claims['sub'],
+            'google_email' => $claims['email'],
+        ]);
+        $user = $this->user_model->find($userId);
+        $this->user_model->touch($userId);
+
+        $this->ok([
+            'user' => user_dto($user, true),
+            'auth' => $this->token_model->issue($user, $this->device_name(), $this->app),
+        ], 201);
+    }
+
     public function check_username(): void
     {
         $this->require_method(['GET']);

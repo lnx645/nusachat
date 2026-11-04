@@ -48,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import id.nusachat.app.data.User
@@ -70,7 +71,7 @@ fun CreateMomentScreen(
     BackHandler(onBack = onBack)
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             NusaTopAppBar(
                 title = { Text("Buat Momen", fontWeight = FontWeight.Bold) },
@@ -90,8 +91,8 @@ fun CreateMomentScreen(
                             disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
                             disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         ),
-                        modifier = Modifier.padding(end = 8.dp).height(36.dp),
-                    ) { Text("Posting", fontWeight = FontWeight.Bold) }
+                        modifier = Modifier.padding(end = 8.dp).height(34.dp),
+                    ) { Text("Posting", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge) }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
@@ -124,50 +125,100 @@ fun CreateMomentScreen(
         },
     ) { padding ->
         Column(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp, vertical = 12.dp)
+            modifier = Modifier.fillMaxSize().padding(padding).background(MaterialTheme.colorScheme.surface),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                NusaAvatar(name = user?.displayName ?: "NusaChat", url = user?.avatarUrl, gender = user?.gender, seed = user?.id, size = 40.dp)
-                Column(modifier = Modifier.padding(start = 12.dp).weight(1f)) {
-                    Text(user?.displayName ?: "NusaChat", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
-                    Text("@${user?.username ?: "nusa"}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Box(
-                    modifier = Modifier.size(32.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(painter = painterResource(id = NusaIcons.Person), contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Header user kecil ala WeChat — tanpa kotak ekstra
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                NusaAvatar(name = user?.displayName ?: "NusaChat", url = user?.avatarUrl, gender = user?.gender, seed = user?.id, size = 36.dp)
+                Column(modifier = Modifier.padding(start = 10.dp).weight(1f)) {
+                    Text(user?.displayName ?: "NusaChat", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                    Text("@${user?.username ?: "nusa"} • Teman saja", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                 }
             }
-            Spacer(Modifier.height(16.dp))
-            NusaTextField(
-                value = text,
-                onValueChange = { if (it.length <= 2000) text = it },
-                placeholder = { Text("Apa yang sedang kamu pikirkan?", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)) },
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                shape = RoundedCornerShape(12.dp),
-                maxLines = 12,
-            )
-            if (imageUris.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
-                Text("${imageUris.size}/9 foto • ketuk untuk hapus", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(8.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    imageUris.chunked(3).forEach { row ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            row.forEach { uri ->
-                                Box(modifier = Modifier.size(96.dp).clip(RoundedCornerShape(12.dp)).clickable { imageUris = imageUris - uri }) {
-                                    AsyncImage(model = uri, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.matchParentSize())
-                                    Box(modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(20.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
+            androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), thickness = 0.7.dp)
+            // Text area ala WeChat: tanpa border, hint besar
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+            ) {
+                androidx.compose.foundation.text.BasicTextField(
+                    value = text,
+                    onValueChange = { if (it.length <= 2000) text = it },
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface, lineHeight = 22.sp),
+                    modifier = Modifier.fillMaxSize(),
+                    decorationBox = { inner ->
+                        Box(Modifier.fillMaxSize()) {
+                            if (text.isEmpty()) {
+                                Text(
+                                    "Bagikan momenmu...",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+                                )
+                            }
+                            inner()
+                        }
+                    },
+                )
+            }
+            if (imageUris.isNotEmpty() || true) {
+                Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                    // Grid foto ala WeChat — tambah kotak + di akhir
+                    val allItems: List<Uri?> = imageUris.map { it as Uri? } + listOf(null)
+                    androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+                        columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(3),
+                        modifier = Modifier.height(if (imageUris.size <= 3) 110.dp else if (imageUris.size <= 6) 220.dp else 330.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        userScrollEnabled = false,
+                    ) {
+                        items(allItems.size.coerceAtMost(9)) { idx ->
+                            val uri = allItems[idx]
+                            if (uri == null) {
+                                if (imageUris.size >= 9) return@items
+                                Box(
+                                    modifier = Modifier
+                                        .size(106.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .clickable { showPicker = true },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(painter = painterResource(id = NusaIcons.Add), contentDescription = "Tambah foto", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
+                                }
+                            } else {
+                                val isVideo = remember(uri) {
+                                    context.contentResolver.getType(uri)?.startsWith("video") == true
+                                }
+                                Box(modifier = Modifier.size(106.dp).clip(RoundedCornerShape(8.dp))) {
+                                    if (isVideo) {
+                                        Box(modifier = Modifier.matchParentSize().background(Color.Black), contentAlignment = Alignment.Center) {
+                                            Icon(painter = painterResource(id = NusaIcons.Play), contentDescription = "Video", tint = Color.White, modifier = Modifier.size(26.dp))
+                                        }
+                                    } else {
+                                        AsyncImage(model = uri, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.matchParentSize())
+                                    }
+                                    Box(
+                                        modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(20.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.55f)).clickable { imageUris = imageUris - uri },
+                                        contentAlignment = Alignment.Center,
+                                    ) {
                                         Icon(painter = painterResource(id = NusaIcons.Close), contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
                                     }
                                 }
                             }
                         }
                     }
+                    if (imageUris.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text("${imageUris.size}/9", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.End))
+                    }
                 }
+                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.height(8.dp))
         }
     }
 

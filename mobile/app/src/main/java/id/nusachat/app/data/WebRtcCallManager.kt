@@ -1,6 +1,7 @@
 package id.nusachat.app.data
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -20,9 +21,9 @@ import org.webrtc.SessionDescription
 import org.webrtc.audio.JavaAudioDeviceModule
 
 /**
- * Audio-only WebRTC call manager (voice call).
- * Signaling (offer/answer/ICE) goes through the NusaChat REST API +
- * realtime websocket; media is peer-to-peer (STUN).
+ * WebRTC call manager khusus voice call (video call dihapus).
+ * Signaling (offer/answer/ICE) lewat REST API + websocket NusaChat;
+ * media audio peer-to-peer (STUN/TURN Cloudflare dari server).
  */
 class WebRtcCallManager(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -34,12 +35,50 @@ class WebRtcCallManager(private val context: Context) {
 
     private var factory: PeerConnectionFactory? = null
     private var peer: PeerConnection? = null
+    private val iceLock = Any()
+    private var remoteDescriptionSet = false
+    private val pendingRemoteIce = mutableListOf<IceCandidate>()
+    private var remoteQueued = 0
+    private var remoteApplied = 0
     private var localAudio: AudioTrack? = null
 
-    private val iceServers = listOf(
-        PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-        PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
+    private var iceServers: List<PeerConnection.IceServer> = listOf(
+        PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer(),
     )
+
+    /**
+     * Pakai iceServers dari server (`GET /calls/ice_servers`, docs/TURN.md).
+     * Bentuk: [{urls:[...], username?, credential?}]. Selalu valid: bila
+     * kosong/rusak, kembali ke STUN Cloudflare statis.
+     */
+    fun applyIceServersJson(payload: JSONObject?) {
+        val parsed = mutableListOf<PeerConnection.IceServer>()
+        runCatching {
+            val array = payload?.optJSONArray("iceServers") ?: return@runCatching
+            for (i in 0 until array.length()) {
+                val entry = array.optJSONObject(i) ?: continue
+                val urls = mutableListOf<String>()
+                entry.optJSONArray("urls")?.let { arr ->
+                    for (j in 0 until arr.length()) {
+                        arr.optString(j).takeIf { it.isNotBlank() }?.let { urls.add(it) }
+                    }
+                }
+                entry.optString("url").takeIf { it.isNotBlank() }?.let { urls.add(it) }
+                if (urls.isEmpty()) continue
+                val builder = PeerConnection.IceServer.builder(urls)
+                val user = entry.optString("username")
+                val pass = entry.optString("credential")
+                if (user.isNotBlank() && pass.isNotBlank()) {
+                    builder.setUsername(user).setPassword(pass)
+                }
+                parsed.add(builder.createIceServer())
+            }
+        }
+        if (parsed.isNotEmpty()) {
+            iceServers = parsed
+            Log.d("NusaRtc", "ice servers: ${parsed.size} entries")
+        }
+    }
 
     /** True when the native WebRTC library loads on this device. */
     fun isSupported(): Boolean = runCatching {
@@ -53,9 +92,9 @@ class WebRtcCallManager(private val context: Context) {
             .setEnableInternalTracer(false)
             .createInitializationOptions()
         PeerConnectionFactory.initialize(initOptions)
+        // Sengaja pakai pemrosesan audio software bawaan WebRTC (AEC/NS):
+        // pemaksa hardware di banyak HP tidak didukung sehingga gema/feedback.
         val audioModule = JavaAudioDeviceModule.builder(context)
-            .setUseHardwareAcousticEchoCanceler(true)
-            .setUseHardwareNoiseSuppressor(true)
             .createAudioDeviceModule()
         factory = PeerConnectionFactory.builder()
             .setAudioDeviceModule(audioModule)
@@ -65,13 +104,12 @@ class WebRtcCallManager(private val context: Context) {
     fun startAsCaller(): SessionDescription? {
         ensureFactory()
         createPeer()
-        val constraints = MediaConstraints().apply {
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
-        }
+        val constraints = MediaConstraints()
         var offer: SessionDescription? = null
         val latch = java.util.concurrent.CountDownLatch(1)
         peer?.createOffer(object : SimpleSdpObserver() {
             override fun onCreateSuccess(desc: SessionDescription) {
+                Log.d("NusaRtc", "offer sdp=" + desc.description)
                 peer?.setLocalDescription(SimpleSdpObserver(), desc)
                 offer = desc
                 onLocalSdp?.invoke(desc)
@@ -89,6 +127,7 @@ class WebRtcCallManager(private val context: Context) {
         val offer = SessionDescription(SessionDescription.Type.OFFER, remoteSdp)
         peer?.setRemoteDescription(object : SimpleSdpObserver() {
             override fun onSetSuccess() {
+                drainPendingIce()
                 val constraints = MediaConstraints().apply {
                     mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
                 }
@@ -105,7 +144,11 @@ class WebRtcCallManager(private val context: Context) {
 
     fun handleAnswer(remoteSdp: String) {
         val answer = SessionDescription(SessionDescription.Type.ANSWER, remoteSdp)
-        peer?.setRemoteDescription(SimpleSdpObserver(), answer)
+        peer?.setRemoteDescription(object : SimpleSdpObserver() {
+            override fun onSetSuccess() {
+                drainPendingIce()
+            }
+        }, answer)
     }
 
     fun handleRemoteIce(candidate: JSONObject) {
@@ -113,19 +156,37 @@ class WebRtcCallManager(private val context: Context) {
             val sdpMid = candidate.optString("sdpMid")
             val sdpMLineIndex = candidate.optInt("sdpMLineIndex", 0)
             val sdp = candidate.optString("candidate")
-            if (sdp.isNotBlank()) {
-                peer?.addIceCandidate(IceCandidate(sdpMid.ifBlank { "0" }, sdpMLineIndex, sdp))
+            if (sdp.isBlank()) return@runCatching
+            val ice = IceCandidate(sdpMid.ifBlank { "0" }, sdpMLineIndex, sdp)
+            // Trickle candidates arriving before the remote description is
+            // applied would be dropped by addIceCandidate; queue them instead.
+            synchronized(iceLock) {
+                val target = peer
+                if (!remoteDescriptionSet || target == null) {
+                    if (pendingRemoteIce.size < 128) pendingRemoteIce.add(ice)
+                    remoteQueued++
+                    Log.d("NusaRtc", "remote ice queued total=$remoteQueued")
+                    return@runCatching
+                }
+                remoteApplied++
+                Log.d("NusaRtc", "remote ice applied total=$remoteApplied host=" + sdp.contains("typ host"))
+                target.addIceCandidate(ice)
             }
+        }
+    }
+
+    private fun drainPendingIce() {
+        synchronized(iceLock) {
+            remoteDescriptionSet = true
+            val target = peer ?: return
+            val queued = pendingRemoteIce.toList()
+            pendingRemoteIce.clear()
+            queued.forEach { runCatching { target.addIceCandidate(it) } }
         }
     }
 
     fun setMuted(muted: Boolean) {
         localAudio?.setEnabled(!muted)
-    }
-
-    fun setSpeakerphone(speaker: Boolean) {
-        // JavaAudioDeviceModule routes automatically; speaker toggle handled
-        // via AudioManager in the UI layer. Kept here for symmetry.
     }
 
     fun close() {
@@ -138,6 +199,12 @@ class WebRtcCallManager(private val context: Context) {
 
     private fun createPeer() {
         closePeerOnly()
+        synchronized(iceLock) {
+            remoteDescriptionSet = false
+            pendingRemoteIce.clear()
+            remoteQueued = 0
+            remoteApplied = 0
+        }
         val constraints = MediaConstraints()
         peer = factory?.createPeerConnection(iceServers, constraints, object : PeerConnection.Observer {
             override fun onIceCandidate(candidate: IceCandidate) {
@@ -153,7 +220,9 @@ class WebRtcCallManager(private val context: Context) {
                 }
             }
             override fun onSignalingChange(state: PeerConnection.SignalingState) = Unit
-            override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) = Unit
+            override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
+                Log.d("NusaRtc", "ice=$state")
+            }
             override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
             override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) = Unit
             override fun onAddStream(stream: MediaStream) = Unit

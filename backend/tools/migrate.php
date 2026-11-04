@@ -68,11 +68,33 @@ if ($sql === false) {
 $sql = preg_replace('/^\s*--.*$/m', '', $sql) ?? $sql;
 $statements = array_filter(array_map('trim', preg_split('/;\s*\n/', $sql)));
 $count = 0;
+$run = static function (string $statement) use ($pdo, &$count): void {
+    try {
+        $pdo->exec($statement);
+    } catch (PDOException $e) {
+        // ALTER TABLE ... ADD COLUMN gagal bila kolom sudah ada (database lama
+        // yang dimigrasi lalu migrate dijalankan ulang). Itu aman diabaikan.
+        if (preg_match('/duplicate column/i', $e->getMessage())) {
+            return;
+        }
+        throw $e;
+    }
+    $count++;
+};
+// ALTER dulu agar indeks yang merujuk kolom baru tidak gagal di database lama.
+$alters = [];
+$rest = [];
 foreach ($statements as $statement) {
     if ($statement === '' || strpos($statement, '--') === 0) {
         continue;
     }
-    $pdo->exec($statement);
-    $count++;
+    if (preg_match('/^\s*ALTER\s+TABLE/i', $statement)) {
+        $alters[] = $statement;
+    } else {
+        $rest[] = $statement;
+    }
+}
+foreach (array_merge($alters, $rest) as $statement) {
+    $run($statement);
 }
 echo "OK: {$count} statements executed using " . basename($schema) . ".\n";

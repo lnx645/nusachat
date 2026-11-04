@@ -11,9 +11,15 @@ $config['app'] = [
     'ws_url'        => getenv('WS_PUBLIC_URL') ?: 'ws://localhost:8090',
     'cors'          => getenv('CORS_ORIGINS') ?: '*',
     'register_rate_limit' => (int) (getenv('REGISTER_RATE_LIMIT') ?: 20),
+    'google_client_ids' => getenv('GOOGLE_CLIENT_IDS') ?: '',
     'fcm_server_key' => getenv('FCM_SERVER_KEY') ?: '',
     'fcm_service_json' => getenv('FCM_SERVICE_JSON') ?: '',
     'fcm_project_id' => getenv('FCM_PROJECT_ID') ?: '',
+    'turn' => [
+        'app_id'    => getenv('TURN_APP_ID') ?: 'c6c1abdf36230f2bc354c4566d74fcc6',
+        'api_token' => getenv('TURN_API_TOKEN') ?: '',
+        'ttl'       => (int) (getenv('TURN_TTL') ?: 86400),
+    ],
     'features'      => [
         'direct_chat' => true,
         'group_chat'  => true,
@@ -22,7 +28,8 @@ $config['app'] = [
         'moments_comments' => true,
         'voice_calls' => true,
         'video_calls' => false,
-        'monetization' => false,
+        'group_calls' => true,
+        'monetization' => true,
         'push' => true,
     ],
 ];

@@ -57,6 +57,16 @@ class ChatSocket(
         onStateChange(false)
     }
 
+    /** Kirim pesan client->server (mis. location.update). Best-effort. */
+    fun send(type: String, data: JSONObject = JSONObject()) {
+        val ws = socket ?: return
+        runCatching {
+            ws.send(JSONObject().put("type", type).put("data", data).toString())
+        }
+    }
+
+    val isOpen: Boolean get() = socket != null
+
     private fun open() {
         val token = tokenProvider()
         if (!running || token.isNullOrBlank()) {

@@ -95,6 +95,56 @@ class Friend_model extends CI_Model
         );
     }
 
+    public function block(int $userId, int $targetId): void
+    {
+        $existing = $this->store->one(
+            'SELECT id FROM blocks WHERE user_id = ? AND blocked_user_id = ?',
+            [$userId, $targetId]
+        );
+        if (!$existing) {
+            $this->store->insert('blocks', [
+                'user_id' => $userId,
+                'blocked_user_id' => $targetId,
+                'created_at' => now_iso(),
+            ]);
+        }
+    }
+
+    public function unblock(int $userId, int $targetId): void
+    {
+        $this->store->delete(
+            'blocks',
+            'user_id = ? AND blocked_user_id = ?',
+            [$userId, $targetId]
+        );
+    }
+
+    public function isBlocked(int $userId, int $targetId): bool
+    {
+        return (bool) $this->store->value(
+            'SELECT 1 FROM blocks WHERE user_id = ? AND blocked_user_id = ?',
+            [$userId, $targetId]
+        );
+    }
+
+    /**
+     * @return int[] id yang diblokir oleh user (satu arah)
+     */
+    public function blockedIds(int $userId): array
+    {
+        $rows = $this->store->all('SELECT blocked_user_id FROM blocks WHERE user_id = ?', [$userId]);
+        return array_map(static fn ($id): int => (int) $id, array_column($rows, 'blocked_user_id'));
+    }
+
+    /**
+     * @return int[] id yang memblokir user (satu arah)
+     */
+    public function blockedByIds(int $userId): array
+    {
+        $rows = $this->store->all('SELECT user_id FROM blocks WHERE blocked_user_id = ?', [$userId]);
+        return array_map(static fn ($id): int => (int) $id, array_column($rows, 'user_id'));
+    }
+
     public function pending(int $userId): array
     {
         $incoming = $this->store->all(

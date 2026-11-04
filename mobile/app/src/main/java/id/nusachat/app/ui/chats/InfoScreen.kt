@@ -61,6 +61,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.sp
 import id.nusachat.app.data.Message
 import id.nusachat.app.data.User
+import id.nusachat.app.ui.chats.components.AddMembersScreen
 import id.nusachat.app.ui.chats.components.ConversationMediaCard
 import id.nusachat.app.ui.chats.components.MediaGalleryScreen
 import id.nusachat.app.ui.components.NusaAvatar
@@ -80,9 +81,11 @@ fun GroupInfoScreen(
     onToggleMute: () -> Unit,
     onAddMembers: (List<Long>) -> Unit,
     onRemoveMember: (Long) -> Unit,
+    onSetRole: (Long, String) -> Unit = { _, _ -> },
     onLeave: () -> Unit,
     onShowAddMembers: () -> Unit,
     onCallPeer: (User) -> Unit = {},
+    onGroupCall: () -> Unit = {},
     vm: id.nusachat.app.ui.AppViewModel? = null,
     media: List<Message> = emptyList(),
     onImageClick: (String) -> Unit = {},
@@ -110,6 +113,19 @@ fun GroupInfoScreen(
     val isOwner = conversation.createdBy == myId || conversation.myRole == "owner"
     var showGroupSettings by remember { mutableStateOf(false) }
     var showEditGroup by remember { mutableStateOf(false) }
+    var showAddMembersScreen by remember { mutableStateOf(false) }
+    if (showAddMembersScreen) {
+        AddMembersScreen(
+            friends = friends,
+            existingIds = conversation.members.map { it.id }.toSet(),
+            onBack = { showAddMembersScreen = false },
+            onConfirm = { ids ->
+                showAddMembersScreen = false
+                onAddMembers(ids)
+            },
+        )
+        return
+    }
     if (showEditGroup && conversation.isGroup) {
         // Halaman edit full seperti Edit Profil, bukan dialog
         val vmNonNull = vm ?: return
@@ -122,6 +138,7 @@ fun GroupInfoScreen(
             vm = vm,
             isOwner = isOwner,
             onBack = { showGroupSettings = false },
+            isAdmin = isOwner || conversation.myRole == "admin",
         )
         return
     }
@@ -305,9 +322,14 @@ fun GroupInfoScreen(
                                 )
                             } else {
                                 ContactAction(
+                                    icon = NusaIcons.Call,
+                                    label = "Panggil",
+                                    onClick = onGroupCall,
+                                )
+                                ContactAction(
                                     icon = NusaIcons.GroupAdd,
                                     label = "Tambah",
-                                    onClick = onShowAddMembers,
+                                    onClick = { showAddMembersScreen = true },
                                 )
                                 ContactAction(
                                     icon = if (conversation.muted) NusaIcons.VolumeUp else NusaIcons.VolumeOff,
@@ -407,7 +429,7 @@ fun GroupInfoScreen(
                                 }
                                 Spacer(Modifier.width(8.dp))
                                 val canAdd = !conversation.onlyAdminsCanAdd || isOwner
-                                NusaTextButton(onClick = onShowAddMembers, enabled = canAdd) {
+                                NusaTextButton(onClick = { showAddMembersScreen = true }, enabled = canAdd) {
                                     Icon(painter = painterResource(id = NusaIcons.GroupAdd), contentDescription = null, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(6.dp))
                                     Text(if (canAdd) "Tambah" else "Admin saja")
@@ -450,6 +472,20 @@ fun GroupInfoScreen(
                                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                                     )
                                                 }
+                                            } else if (member.role == "admin") {
+                                                Spacer(Modifier.width(6.dp))
+                                                Surface(
+                                                    shape = RoundedCornerShape(50),
+                                                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f),
+                                                ) {
+                                                    Text(
+                                                        "Admin",
+                                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = MaterialTheme.colorScheme.secondary,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                    )
+                                                }
                                             }
                                         }
                                         Text(
@@ -458,14 +494,85 @@ fun GroupInfoScreen(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
-                                    if (member.id != myId && isOwner) {
-                                        NusaTextButton(onClick = { confirmRemove = member }) {
-                                            Text("Keluarkan", color = MaterialTheme.colorScheme.error)
+                                    if (member.id != myId && isOwner && member.id != conversation.createdBy) {
+                                        Column(horizontalAlignment = Alignment.End) {
+                                            if (member.role == "admin") {
+                                                NusaTextButton(onClick = { onSetRole(member.id, "member") }) {
+                                                    Text("Cabut admin")
+                                                }
+                                            } else {
+                                                NusaTextButton(onClick = { onSetRole(member.id, "admin") }) {
+                                                    Text("Jadikan admin")
+                                                }
+                                            }
+                                            NusaTextButton(onClick = { confirmRemove = member }) {
+                                                Text("Keluarkan", color = MaterialTheme.colorScheme.error)
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                    }
+                }
+                item(key = "clear") {
+                    var confirmClear by remember { mutableStateOf(false) }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .background(MaterialTheme.colorScheme.surface),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { confirmClear = true }
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                painter = painterResource(id = NusaIcons.Delete),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Hapus riwayat chat",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                                Text(
+                                    "Hanya di perangkatmu, tidak untuk anggota lain",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                    if (confirmClear) {
+                        NusaConfirmSheet(
+                            title = "Hapus riwayat chat?",
+                            text = "Semua pesan di chat ini akan hilang dari tampilanmu. Anggota lain tetap melihat riwayat mereka.",
+                            confirmLabel = "Hapus",
+                            danger = true,
+                            onConfirm = {
+                                confirmClear = false
+                                vm?.clearHistory(conversation.id)
+                            },
+                            onDismiss = { confirmClear = false },
+                        )
+                    }
+                }
+                item(key = "archive") {
+                    var archived by remember(conversation.id, conversation.archived) {
+                        mutableStateOf(conversation.archived)
+                    }
+                    ArchiveRow(archived = archived) {
+                        vm?.archiveActiveChat(!archived)
+                        archived = !archived
                     }
                 }
                 item(key = "leave") {
@@ -490,13 +597,75 @@ fun GroupInfoScreen(
                             )
                             Spacer(Modifier.width(12.dp))
                             Text(
-                                "Keluar grup",
+                                if (conversation.isGroup) "Keluar grup" else "Hapus chat",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.error,
                             )
                         }
                     }
+                }
+            }
+            if (!conversation.isGroup) {
+                item(key = "clear-direct") {
+                    var confirmClear by remember { mutableStateOf(false) }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .background(MaterialTheme.colorScheme.surface),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { confirmClear = true }
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                painter = painterResource(id = NusaIcons.Delete),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Hapus riwayat chat",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                                Text(
+                                    "Hanya di perangkatmu",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                    if (confirmClear) {
+                        NusaConfirmSheet(
+                            title = "Hapus riwayat chat?",
+                            text = "Riwayat chat dengan ${conversation.displayTitle} akan dibersihkan dari perangkatmu.",
+                            confirmLabel = "Hapus",
+                            danger = true,
+                            onConfirm = {
+                                confirmClear = false
+                                vm?.clearHistory(conversation.id)
+                            },
+                            onDismiss = { confirmClear = false },
+                        )
+                    }
+                }
+            }
+            item(key = "archive-direct") {
+                var archived by remember(conversation.id, conversation.archived) {
+                    mutableStateOf(conversation.archived)
+                }
+                ArchiveRow(archived = archived) {
+                    vm?.archiveActiveChat(!archived)
+                    archived = !archived
                 }
             }
             item(key = "note") {
@@ -610,6 +779,52 @@ fun AddMembersSheet(
                 Text("Tambah (${selected.size})")
             }
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun ArchiveRow(
+    archived: Boolean,
+    onToggle: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .background(MaterialTheme.colorScheme.surface),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onToggle() }
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    painter = painterResource(id = NusaIcons.Archive),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Arsipkan obrolan", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (archived) "Obrolan ini ada di arsip" else "Sembunyikan dari daftar obrolan",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            NusaSwitch(checked = archived, onCheckedChange = { onToggle() })
         }
     }
 }

@@ -41,6 +41,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -84,7 +85,9 @@ fun ContactsScreen(
     val searchLoading by vm.searchLoading.collectAsStateWithLifecycle()
     val syncing by vm.contactsSyncing.collectAsStateWithLifecycle()
     val matched by vm.contactsMatched.collectAsStateWithLifecycle()
+    val blocked by vm.blocked.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
+    LaunchedEffect(Unit) { vm.loadBlocked() }
     var showCreateGroup by remember { mutableStateOf(false) }
     var removeTarget by remember { mutableStateOf<User?>(null) }
     val context = LocalContext.current
@@ -279,6 +282,44 @@ fun ContactsScreen(
                             }
                         }
                     }
+                    if (blocked.isNotEmpty() && query.isBlank()) {
+                        item(key = "blocked-label") { SectionLabel("Diblokir • ${blocked.size}") }
+                        items(blocked, key = { "blocked-${it.id}" }) { user ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                id.nusachat.app.ui.components.NusaAvatar(
+                                    name = user.displayName,
+                                    url = user.avatarUrl, gender = user.gender, seed = user.id,
+                                    size = 44.dp,
+                                )
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(horizontal = 12.dp),
+                                ) {
+                                    Text(
+                                        text = user.displayName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                    )
+                                    Text(
+                                        text = "@${user.username}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                }
+                                NusaTextButton(onClick = { vm.unblockUser(user) }) {
+                                    Text("Buka blokir")
+                                }
+                            }
+                        }
+                    }
                     if (syncing) {
                         item(key = "syncing") {
                             Box(
@@ -403,6 +444,7 @@ fun ContactsScreen(
             onDismiss = { removeTarget = null },
         )
     }
+
 }
 
 @Composable

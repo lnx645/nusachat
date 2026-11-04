@@ -57,6 +57,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /**
  * Design system NusaChat — semua komponen Material dibungkus di sini supaya
@@ -402,7 +403,9 @@ fun RowScope.NusaNavItem(
         label = label?.let {
             {
                 ProvideTextStyle(
-                    MaterialTheme.typography.labelMedium.copy(
+                    MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 10.sp,
+                        lineHeight = 12.sp,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                     ),
                 ) { it() }
@@ -411,7 +414,7 @@ fun RowScope.NusaNavItem(
         colors = NavigationBarItemDefaults.colors(
             selectedIconColor = MaterialTheme.colorScheme.primary,
             selectedTextColor = MaterialTheme.colorScheme.primary,
-            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+            indicatorColor = Color.Transparent,
             unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
             unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
         ),

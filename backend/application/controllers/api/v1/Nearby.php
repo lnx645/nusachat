@@ -30,9 +30,16 @@ class Nearby extends MY_Controller
 
         $this->user_model->touch((int) $user['id'], $lat, $lng);
         $rows = $this->user_model->nearby($lat, $lng, $radius, (int) $user['id'], 50);
+        $hidden = array_merge(
+            $this->friend_model->blockedIds((int) $user['id']),
+            $this->friend_model->blockedByIds((int) $user['id'])
+        );
 
         $users = [];
         foreach ($rows as $row) {
+            if (in_array((int) $row['id'], $hidden, true)) {
+                continue;
+            }
             $dto = user_dto($row);
             $dto['distance_km'] = $row['distance_km'];
             $friendship = $this->friend_model->findBetween((int) $user['id'], (int) $row['id']);

@@ -11,13 +11,22 @@ import id.nusachat.app.data.ApiException
 import id.nusachat.app.data.CallRepository
 import id.nusachat.app.data.ChatRepository
 import id.nusachat.app.data.ChatSocket
+import id.nusachat.app.data.ChatThemeStore
+import id.nusachat.app.data.GoogleAuthHelper
+import id.nusachat.app.data.GoogleCancelled
+import id.nusachat.app.data.GoogleProfile
+import id.nusachat.app.data.toUserList
 import id.nusachat.app.data.Conversation
 import id.nusachat.app.data.E2eeManager
 import id.nusachat.app.data.FriendRequest
 import id.nusachat.app.data.LocationHelper
 import id.nusachat.app.data.Message
+import id.nusachat.app.data.GroupJoinRequest
 import id.nusachat.app.data.Moment
 import id.nusachat.app.data.MomentComment
+import id.nusachat.app.data.PinnedMessage
+import id.nusachat.app.data.Reaction
+import id.nusachat.app.data.CallForegroundService
 import id.nusachat.app.data.PushManager
 import id.nusachat.app.data.SessionStore
 import id.nusachat.app.data.User
@@ -52,6 +61,7 @@ data class ChatUiState(
     val conversation: Conversation? = null,
     val messages: List<Message> = emptyList(),
     val loading: Boolean = false,
+    val keySyncing: Boolean = false,
     val loadingOlder: Boolean = false,
     val hasMore: Boolean = false,
     val error: String? = null,
@@ -59,6 +69,11 @@ data class ChatUiState(
     val sendingImage: Boolean = false,
     val sendingFile: Boolean = false,
     val replyTo: Message? = null,
+    val editing: Message? = null,
+    val pins: List<PinnedMessage> = emptyList(),
+    val searching: Boolean = false,
+    val searchQuery: String = "",
+    val searchResults: List<Message> = emptyList(),
     val detail: Conversation? = null,
     val muting: Boolean = false,
 )
@@ -68,6 +83,15 @@ data class NearbyState(
     val loading: Boolean = false,
     val loaded: Boolean = false,
     val error: String? = null,
+    /** true bila daftar datang dari push Erlang (realtime), bukan snapshot REST. */
+    val live: Boolean = false,
+)
+
+/** Pilihan latar + bubble ruang chat (disimpan di ChatThemeStore). */
+data class ChatThemeChoice(
+    val wallpaperId: String = id.nusachat.app.data.ChatWallpapers.DEFAULT,
+    val customUri: String = "",
+    val bubbleId: String = id.nusachat.app.data.ChatBubbles.AUTO,
 )
 
 data class CallUiState(
@@ -80,6 +104,15 @@ data class CallUiState(
     val remoteSdp: String? = null,
 )
 
+data class GroupCallUiState(
+    val room: id.nusachat.app.data.GroupCallRoom? = null,
+    val conversationId: Long? = null,
+    val title: String = "Panggilan grup",
+    val status: String = "idle", // idle | ringing | active | ended
+    val muted: Boolean = false,
+    val speaker: Boolean = false,
+)
+
 class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val session = SessionStore(application)
@@ -87,6 +120,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ChatRepository(application, api, session)
     private val calls = CallRepository(api)
     private val locationHelper = LocationHelper(application)
+    private val chatThemeStore = ChatThemeStore(application)
     private val rtc = WebRtcCallManager(application.applicationContext)
     val e2ee = E2eeManager(application.applicationContext)
 
@@ -97,6 +131,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val conversations = MutableStateFlow<List<Conversation>>(emptyList())
     val conversationsLoading = MutableStateFlow(false)
     val friends = MutableStateFlow<List<User>>(emptyList())
+    val blocked = MutableStateFlow<List<User>>(emptyList())
+    val stories = MutableStateFlow<List<id.nusachat.app.data.Story>>(emptyList())
+    val walletBalance = MutableStateFlow(0L)
+    val walletTxns = MutableStateFlow<List<id.nusachat.app.data.WalletTxn>>(emptyList())
     val requests = MutableStateFlow(RequestsState())
     val moments = MutableStateFlow<List<Moment>>(emptyList())
     val momentsLoading = MutableStateFlow(false)
@@ -116,9 +154,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val contactsSyncing = MutableStateFlow(false)
     val contactsMatched = MutableStateFlow<List<User>>(emptyList())
     val nearbyRadius = MutableStateFlow(loadSavedRadius())
+    val chatTheme = MutableStateFlow(loadSavedChatTheme())
+    private var nearbyLiveActive = false
     val sharingLocation = MutableStateFlow(false)
     val callState = MutableStateFlow(CallUiState())
+    val groupCall = MutableStateFlow(GroupCallUiState())
     val pushReady = MutableStateFlow(false)
+    val inviteLink = MutableStateFlow<String?>(null)
+    val joinRequests = MutableStateFlow<List<GroupJoinRequest>>(emptyList())
 
     private var socket: ChatSocket? = null
     private var activeChatId: Long? = null
@@ -203,6 +246,102 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         authError.value = null
     }
 
+    // ------------------------------------------------- login Google (OAuth)
+
+    /** Profil Google yang butuh dibuatkan akun NusaChat (register bertahap). */
+    val googlePending = MutableStateFlow<GoogleProfile?>(null)
+    private var googleIdToken: String? = null
+    /** Foto galeri yang diunggah tepat setelah akun Google dibuat. */
+    var pendingAvatarUri: Uri? = null
+
+    fun loginWithGoogle(idToken: String) {
+        authLoading.value = true
+        authError.value = null
+        viewModelScope.launch {
+            try {
+                when (val result = repository.authGoogle(idToken)) {
+                    is ChatRepository.GoogleAuthResult.LoggedIn -> {
+                        googleIdToken = null
+                        googlePending.value = null
+                        sessionState.value = SessionState(result.user, true)
+                        startRealtime()
+                        loadInitial()
+                    }
+                    ChatRepository.GoogleAuthResult.NeedRegister -> {
+                        googleIdToken = idToken
+                        googlePending.value = GoogleAuthHelper.parsePublic(idToken)
+                    }
+                }
+            } catch (e: GoogleCancelled) {
+                // User membatalkan: diam saja.
+            } catch (e: Exception) {
+                authError.value = e.message ?: "Gagal masuk dengan Google."
+            } finally {
+                authLoading.value = false
+            }
+        }
+    }
+
+    fun registerWithGoogle(username: String, displayName: String, password: String, avatarUrl: String) {
+        val token = googleIdToken
+        if (token.isNullOrBlank()) {
+            authError.value = "Sesi Google kedaluwarsa. Pilih akun Google lagi."
+            return
+        }
+        if (username.isBlank() || password.isBlank() || displayName.isBlank()) {
+            authError.value = "Nama, username, dan kata sandi wajib diisi."
+            return
+        }
+        authLoading.value = true
+        authError.value = null
+        viewModelScope.launch {
+            try {
+                when (val result = repository.authGoogle(
+                    idToken = token,
+                    username = username.trim().lowercase(Locale.US),
+                    displayName = displayName.trim(),
+                    password = password,
+                    avatarUrl = avatarUrl,
+                )) {
+                    is ChatRepository.GoogleAuthResult.LoggedIn -> {
+                        googleIdToken = null
+                        googlePending.value = null
+                        sessionState.value = SessionState(result.user, true)
+                        pendingAvatarUri?.let { uri ->
+                            pendingAvatarUri = null
+                            runCatching {
+                                val url = repository.upload(uri)
+                                val updated = repository.updateProfile(JSONObject().put("avatar_url", url))
+                                sessionState.value = SessionState(updated, true)
+                            }
+                        }
+                        startRealtime()
+                        loadInitial()
+                    }
+                    ChatRepository.GoogleAuthResult.NeedRegister -> {
+                        authError.value = "Profil belum lengkap."
+                    }
+                }
+            } catch (e: GoogleCancelled) {
+            } catch (e: Exception) {
+                authError.value = e.message ?: "Gagal mendaftar."
+            } finally {
+                authLoading.value = false
+            }
+        }
+    }
+
+    fun authGoogleError(msg: String) {
+        authError.value = msg
+    }
+
+    fun cancelGoogle() {
+        googleIdToken = null
+        googlePending.value = null
+        pendingAvatarUri = null
+        authError.value = null
+    }
+
     fun logout() {
         viewModelScope.launch {
             runCatching {
@@ -249,6 +388,101 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         loadRequests()
         refreshMoments()
         registerPush()
+        publishDeviceKey()
+    }
+
+    private fun publishDeviceKey() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                repository.publishDeviceKey(e2ee.deviceId(), e2ee.publicKeyB64())
+            }
+        }
+    }
+
+    /**
+     * Sinkronisasi kunci sesi E2EE antar perangkat/anggota:
+     * buka kunci milikku bila ada, tetapkan milikku untuk semua bila belum ada,
+     * bungkus untuk anggota yang belum punya bila aku memegang kunci kanonis.
+     */
+    fun syncConversationKeys(conversationId: Long) {
+        if (sessionState.value.user == null) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { syncKeysNow(conversationId) }
+        }
+    }
+
+    private suspend fun syncKeysNow(conversationId: Long) {
+        val me = sessionState.value.user?.id ?: session.user?.id
+        if (me == null) return
+        val deviceId = e2ee.deviceId()
+        val keys = runCatching { repository.convKeys(conversationId, deviceId) }.getOrNull()
+        keys ?: return
+        val haveKey = keys.myKey != null && e2ee.unwrapSessionKey(conversationId, keys.myKey)
+        if (!haveKey && keys.devices.isEmpty()) {
+            // Belum ada kunci kanonis sama sekali: tetapkan kunci lokal untuk semua.
+            e2ee.ensureKey(conversationId)
+        }
+        // Selalu heal: menutup perangkat/anggota yang belum punya blob
+        // (termasuk diri sendiri di device baru = self-heal; idempoten bila lengkap).
+        // Bila aku belum punya kunci dan tak bisa membungkus: tunggu keys_updated.
+        healMissingKeys(conversationId, keys.devices, includeSelf = true)
+    }
+
+    private suspend fun healMissingKeys(
+        conversationId: Long,
+        holders: List<id.nusachat.app.data.KeyHolder>,
+        includeSelf: Boolean = false,
+    ) {
+        val me = session.user?.id ?: return
+        val detail = runCatching { repository.conversationDetail(conversationId) }.getOrNull() ?: return
+        var memberIds = detail.members.map { it.id }
+        if (memberIds.isEmpty()) {
+            // Chat 1-1: turunkan anggota dari peer + diri sendiri.
+            val peerId = detail.peer?.id ?: 0L
+            memberIds = listOfNotNull(me, peerId.takeIf { it > 0 })
+        }
+        val have = holders.associate { (it.userId to it.deviceId) to it.keyFp }
+        val wrapped = mutableListOf<Triple<Long, String, String>>()
+        for (userId in memberIds.distinct()) {
+            if (userId == me && !includeSelf) continue
+            val devices = runCatching { repository.deviceKeys(userId) }.getOrNull() ?: continue
+            // Tanpa baris device_keys (client lama): fallback ke blob per-user.
+            val targets = devices.ifEmpty { listOf(id.nusachat.app.data.DeviceKey("", "")) }
+            for (dev in targets) {
+                if (dev.deviceId.isBlank()) {
+                    if (have.keys.any { it.first == userId }) continue
+                } else {
+                    // Segar hanya bila fingerprint cocok: reinstall = RSA baru
+                    // dengan device_id sama harus dibungkus ulang.
+                    val fpNow = e2ee.fingerprint(dev.publicKey)
+                    val stored = have[userId to dev.deviceId]
+                    if (stored != null && stored.isNotBlank() && stored == fpNow) continue
+                }
+                val blob = if (dev.publicKey.isBlank()) {
+                    null
+                } else {
+                    e2ee.wrapSessionKey(conversationId, dev.publicKey)
+                } ?: continue
+                wrapped.add(Triple(userId, dev.deviceId, blob))
+            }
+        }
+        if (wrapped.isNotEmpty()) {
+            runCatching { repository.setConvKeys(conversationId, wrapped) }
+        }
+    }
+
+    /**
+     * Perangkat baru milik lawan bicara (event device_added via Erlang):
+     * bungkus ulang kunci sesi untuknya bila chat-nya sedang dibuka.
+     */
+    private fun onDeviceAdded(userId: Long) {
+        val conv = chat.value.detail ?: chat.value.conversation ?: return
+        if (conv.id != activeChatId) return
+        val involves = conv.peer?.id == userId || conv.members.any { it.id == userId }
+        if (!involves) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { syncKeysNow(conv.id) }
+        }
     }
 
     fun periodicSync() {
@@ -315,15 +549,50 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val conversationId = data.optLong("conversation_id")
                 val messageId = data.optLong("message_id")
                 if (conversationId == activeChatId) {
+                    markRevokedLocal(messageId)
+                }
+            }
+            "message_edited" -> {
+                val conversationId = data.optLong("conversation_id")
+                val raw = data.optJSONObject("message")?.toMessage() ?: return
+                val message = e2ee.decryptMessage(raw)
+                if (conversationId == activeChatId) {
+                    val state = chat.value
+                    chat.value = state.copy(
+                        messages = state.messages.map { if (it.id == message.id) message else it }
+                    )
+                }
+                refreshConversations()
+            }
+            "message_reaction" -> {
+                val conversationId = data.optLong("conversation_id")
+                val messageId = data.optLong("message_id")
+                if (conversationId == activeChatId) {
+                    val reactions = mutableListOf<Reaction>()
+                    data.optJSONArray("reactions")?.let { array ->
+                        for (i in 0 until array.length()) {
+                            array.optJSONObject(i)?.let {
+                                reactions.add(
+                                    Reaction(
+                                        emoji = it.optString("emoji"),
+                                        count = it.optInt("count", 0),
+                                        reactedByMe = it.optBoolean("reacted_by_me", false),
+                                    )
+                                )
+                            }
+                        }
+                    }
                     val state = chat.value
                     chat.value = state.copy(
                         messages = state.messages.map {
-                            if (it.id == messageId) {
-                                it.copy(revoked = true, body = null, attachmentUrl = null)
-                            } else it
+                            if (it.id == messageId) it.copy(reactions = reactions) else it
                         }
                     )
                 }
+            }
+            "conversation_pinned", "conversation_unpinned" -> {
+                val conversationId = data.optLong("conversation_id")
+                if (conversationId == activeChatId) loadPins()
             }
             "friend_request", "friend_accepted" -> {
                 loadRequests()
@@ -331,11 +600,55 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 refreshConversations()
             }
             "conversation_updated" -> refreshConversations()
+            "join_requested" -> {
+                val conversationId = data.optLong("conversation_id")
+                if (conversationId == activeChatId) loadJoinRequests(conversationId)
+            }
+            "join_reviewed" -> refreshConversations()
             "moment_new", "moment_liked", "moment_comment" -> refreshMoments()
+            "story_new" -> loadStories()
+            "wallet_received" -> {
+                loadWallet()
+                message.value = "Koin ${data.optLong("amount")} diterima."
+            }
+            "keys_updated" -> onKeysUpdated(data)
+            "presence" -> {
+                val userId = data.optLong("user_id")
+                if (userId > 0) onPresenceChanged(userId)
+            }
+            "device_added" -> {
+                val userId = data.optLong("user_id")
+                if (userId > 0) onDeviceAdded(userId)
+            }
+            "nearby.result" -> {
+                val users = data.optJSONArray("users")?.toUserList().orEmpty()
+                nearby.value = NearbyState(users = users, loading = false, loaded = true, live = true)
+            }
+            "nearby.changed" -> {
+                val user = data.optJSONObject("user")?.toUser() ?: return
+                val merged = (nearby.value.users.filterNot { it.id == user.id } + user)
+                    .sortedWith(compareBy(nullsLast<Double>()) { it.distanceKm })
+                nearby.value = nearby.value.copy(users = merged, loading = false, loaded = true, live = true)
+            }
+            "nearby.error" -> {
+                nearby.value = nearby.value.copy(
+                    loading = false,
+                    loaded = true,
+                    live = false,
+                    error = data.optString("message", "Lokasi tidak valid."),
+                )
+            }
             "call_offer" -> onIncomingOffer(data)
             "call_answer" -> onCallAnswer(data)
             "call_ice" -> onCallIce(data)
             "call_end" -> onCallEnded(data)
+            "call_room_offer" -> onRoomOffer(data)
+            "call_room_signal" -> onRoomSignal(data)
+            "call_room_joined", "call_room_left" -> {
+                val callId = data.optJSONObject("call")?.optLong("id") ?: data.optLong("call_id")
+                if (callId > 0) refreshGroupRoom(callId)
+            }
+            "call_room_ended" -> onRoomEnded(data)
         }
     }
 
@@ -349,6 +662,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             message.value = "Sudah ada panggilan aktif."
             return
         }
+        if (groupCall.value.status == "active") {
+            message.value = "Sudah ada panggilan grup aktif."
+            return
+        }
         if (!rtc.isSupported()) {
             message.value = "Panggilan suara tidak didukung di perangkat ini."
             return
@@ -357,35 +674,45 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 rtc.ensureFactory()
-                val offer = withContext(Dispatchers.IO) { rtc.startAsCaller() }
-                    ?: throw IllegalStateException("Gagal membuat offer WebRTC.")
-                rtc.onIceCandidate = { candidate ->
-                    callState.value.call?.let { active ->
-                        viewModelScope.launch {
-                            runCatching {
-                                calls.ice(
-                                    active.id,
-                                    JSONObject()
-                                        .put("candidate", candidate.sdp)
-                                        .put("sdpMid", candidate.sdpMid)
-                                        .put("sdpMLineIndex", candidate.sdpMLineIndex)
-                                )
-                            }
-                        }
+                runCatching { rtc.applyIceServersJson(calls.iceServers()) }
+                // Pasang handler ICE SEBELUM membuat offer: kandidat host
+                // sering muncul segera setelah setLocalDescription. Kandidat
+                // yang muncul sebelum call id ada ditampung lalu dikirim
+                // setelah offer terkirim.
+                val earlyIce = java.util.concurrent.ConcurrentLinkedQueue<JSONObject>()
+                fun sendIce(callId: Long, json: JSONObject) {
+                    viewModelScope.launch {
+                        runCatching { calls.ice(callId, json) }
                     }
                 }
-                rtc.onConnected = {
-                    callState.value = callState.value.copy(status = "active")
+                rtc.onIceCandidate = { candidate ->
+                    val json = JSONObject()
+                        .put("candidate", candidate.sdp)
+                        .put("sdpMid", candidate.sdpMid)
+                        .put("sdpMLineIndex", candidate.sdpMLineIndex)
+                    val active = callState.value.call
+                    if (active == null) earlyIce.add(json) else sendIce(active.id, json)
                 }
+                val offer = withContext(Dispatchers.IO) { rtc.startAsCaller() }
+                    ?: throw IllegalStateException("Gagal membuat offer WebRTC.")
+                rtc.onConnected = { markCallActive() }
                 rtc.onDisconnected = {
                     if (callState.value.status == "active") endCallLocal()
                 }
-                val created = calls.offer(peer.id, offer.description)
-                callState.value = callState.value.copy(call = created, status = "dialing")
+                val created = calls.offer(peer.id, offer.description, "audio")
+                callState.value = callState.value.copy(
+                    call = created,
+                    status = "dialing",
+                )
+                withContext(Dispatchers.Main) { startCallService() }
                 pendingIce.forEach { c ->
                     runCatching { calls.ice(created.id, c) }
                 }
                 pendingIce.clear()
+                while (true) {
+                    val queued = earlyIce.poll() ?: break
+                    sendIce(created.id, queued)
+                }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     callState.value = CallUiState()
@@ -407,6 +734,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 rtc.ensureFactory()
+                runCatching { rtc.applyIceServersJson(calls.iceServers()) }
                 rtc.onIceCandidate = { candidate ->
                     viewModelScope.launch {
                         runCatching {
@@ -420,9 +748,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
-                rtc.onConnected = {
-                    callState.value = callState.value.copy(status = "active")
-                }
+                rtc.onConnected = { markCallActive() }
                 withContext(Dispatchers.IO) {
                     val latch = java.util.concurrent.CountDownLatch(1)
                     var answer: org.webrtc.SessionDescription? = null
@@ -434,7 +760,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val desc = answer ?: throw IllegalStateException("Gagal membuat answer.")
                     calls.answer(call.id, desc.description)
                     withContext(Dispatchers.Main) {
-                        callState.value = callState.value.copy(status = "active")
+                        markCallActive()
                     }
                 }
             } catch (e: Exception) {
@@ -474,23 +800,171 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         callState.value = callState.value.copy(speaker = speaker)
     }
 
+    // ------------------------------------------------------------ group call
+
+    private val mesh by lazy {
+        id.nusachat.app.data.GroupCallMesh(getApplication(), calls, viewModelScope)
+    }
+
+    fun startGroupCall(conversationId: Long) {
+        if (callState.value.status in listOf("dialing", "active", "ringing")) {
+            message.value = "Sudah ada panggilan aktif."
+            return
+        }
+        if (groupCall.value.status == "active") return
+        if (!mesh.isSupported()) {
+            message.value = "Panggilan grup tidak didukung di perangkat ini."
+            return
+        }
+        val title = conversations.value.firstOrNull { it.id == conversationId }?.displayTitle
+            ?: "Panggilan grup"
+        viewModelScope.launch {
+            try {
+                val room = calls.roomCreate(conversationId)
+                mesh.setRoom(room.call.id)
+                groupCall.value = GroupCallUiState(
+                    room = room, conversationId = conversationId,
+                    title = title, status = "active",
+                )
+                room.participants.filter { it.status == "joined" && it.user.id != session.user?.id }
+                    .forEach { mesh.offerTo(it.user.id) }
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun acceptGroupCall() {
+        val pending = groupCall.value
+        val roomId = pending.room?.call?.id ?: return
+        viewModelScope.launch {
+            try {
+                val room = calls.roomJoin(roomId)
+                mesh.setRoom(roomId)
+                groupCall.value = pending.copy(room = room, status = "active")
+                room.participants.filter { it.status == "joined" && it.user.id != session.user?.id }
+                    .forEach { mesh.offerTo(it.user.id) }
+            } catch (e: Exception) {
+                handleError(e)
+                groupCall.value = GroupCallUiState()
+            }
+        }
+    }
+
+    fun declineGroupCall() {
+        mesh.closeAll()
+        groupCall.value = GroupCallUiState()
+    }
+
+    fun leaveGroupCall() {
+        val roomId = groupCall.value.room?.call?.id
+        groupCall.value = GroupCallUiState(status = "ended")
+        mesh.closeAll()
+        if (roomId != null && roomId > 0) {
+            viewModelScope.launch {
+                runCatching { calls.roomLeave(roomId) }
+            }
+        }
+        viewModelScope.launch {
+            delay(800)
+            if (groupCall.value.status == "ended") groupCall.value = GroupCallUiState()
+        }
+    }
+
+    fun toggleGroupMute() {
+        val muted = !groupCall.value.muted
+        mesh.setMuted(muted)
+        groupCall.value = groupCall.value.copy(muted = muted)
+    }
+
+    fun toggleGroupSpeaker() {
+        val app = getApplication<Application>()
+        val audio = app.getSystemService(Application.AUDIO_SERVICE) as? AudioManager ?: return
+        val speaker = !groupCall.value.speaker
+        audio.mode = AudioManager.MODE_IN_COMMUNICATION
+        audio.isSpeakerphoneOn = speaker
+        groupCall.value = groupCall.value.copy(speaker = speaker)
+    }
+
+    private fun onRoomOffer(data: JSONObject) {
+        if (callState.value.status in listOf("dialing", "active", "ringing")) return
+        if (groupCall.value.status == "active") return
+        val callJson = data.optJSONObject("call") ?: return
+        val convId = callJson.optLong("conversation_id")
+        val from = data.optJSONObject("from")?.toUser()
+        val title = conversations.value.firstOrNull { it.id == convId }?.displayTitle
+            ?: (from?.displayName?.let { "Panggilan grup $it" } ?: "Panggilan grup")
+        viewModelScope.launch {
+            val room = runCatching { calls.roomState(callJson.optLong("id")) }.getOrNull()
+            groupCall.value = GroupCallUiState(
+                room = room,
+                conversationId = convId,
+                title = title,
+                status = "ringing",
+            )
+        }
+    }
+
+    private fun refreshGroupRoom(callId: Long) {
+        viewModelScope.launch {
+            val room = runCatching { calls.roomState(callId) }.getOrNull() ?: return@launch
+            val current = groupCall.value
+            if (current.room?.call?.id == callId && current.status == "active") {
+                groupCall.value = current.copy(room = room)
+            }
+        }
+    }
+
+    private fun onRoomSignal(data: JSONObject) {
+        val callJson = data.optJSONObject("call") ?: return
+        if (groupCall.value.room?.call?.id != callJson.optLong("id")) return
+        if (groupCall.value.status != "active") return
+        val fromId = data.optLong("from_user_id")
+        when (data.optString("signal")) {
+            "offer" -> mesh.answerTo(fromId, data.optString("sdp"))
+            "answer" -> mesh.onAnswer(fromId, data.optString("sdp"))
+        }
+    }
+
+    /**
+     * Kunci E2EE baru dibagikan untukku: unduh lalu dekrip ulang chat yang
+     * sedang dibuka + daftar percakapan (menyembuhkan "[Pesan terenkripsi]").
+     */
+    private fun onKeysUpdated(data: JSONObject) {
+        val conversationId = data.optLong("conversation_id")
+        if (conversationId <= 0) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { syncKeysNow(conversationId) }
+            withContext(Dispatchers.Main) {
+                if (conversationId == activeChatId) {
+                    val state = chat.value
+                    chat.value = state.copy(messages = state.messages.map { e2ee.decryptMessage(it) })
+                }
+                refreshConversations()
+            }
+        }
+    }
+
     private fun onIncomingOffer(data: JSONObject) {
         val callJson = data.optJSONObject("call") ?: return
         val fromJson = data.optJSONObject("from")
         val sdp = data.optString("sdp")
         if (callState.value.status in listOf("dialing", "active", "ringing")) return
+        if (groupCall.value.status == "active") return
         val call = VoiceCall(
             id = callJson.optLong("id"),
             uuid = callJson.optString("uuid"),
             callerId = callJson.optLong("caller_id"),
             calleeId = callJson.optLong("callee_id"),
             status = callJson.optString("status", "ringing"),
+            kind = callJson.optString("kind", "audio"),
         )
         val peer = fromJson?.toUser()
         callState.value = CallUiState(
             call = call, peer = peer, outgoing = false,
             status = "ringing", remoteSdp = sdp.ifBlank { null },
         )
+        startCallService()
     }
 
     private fun onCallAnswer(data: JSONObject) {
@@ -507,8 +981,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun onCallIce(data: JSONObject) {
         val candidate = data.optJSONObject("candidate") ?: return
+        // Room ICE memakai event yang sama; bedakan lewat call.conversation_id.
+        val callJson = data.optJSONObject("call")
+        if (callJson != null && callJson.optLong("conversation_id") != 0L) {
+            val roomId = callJson.optLong("id")
+            if (groupCall.value.room?.call?.id != roomId) return
+            if (groupCall.value.status != "active") return
+            mesh.onIce(data.optLong("from_user_id"), candidate)
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { rtc.handleRemoteIce(candidate) }
+        }
+    }
+
+    private fun onRoomEnded(data: JSONObject) {
+        val callId = data.optJSONObject("call")?.optLong("id") ?: data.optLong("call_id")
+        if (callId <= 0 || groupCall.value.room?.call?.id != callId) return
+        mesh.closeAll()
+        groupCall.value = GroupCallUiState(status = "ended")
+        viewModelScope.launch {
+            delay(800)
+            if (groupCall.value.status == "ended") groupCall.value = GroupCallUiState()
         }
     }
 
@@ -516,10 +1010,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         endCallLocal()
     }
 
+    /**
+     * Dipanggil saat media tersambung (atau jawaban terkirim): rute audio
+     * komunikasi (earpiece default ala WhatsApp) + foreground service
+     * agar telepon tetap jalan di background.
+     */
+    private fun markCallActive() {
+        runCatching {
+            val audio = getApplication<Application>().getSystemService(Application.AUDIO_SERVICE) as? AudioManager
+            if (audio != null) {
+                audio.mode = AudioManager.MODE_IN_COMMUNICATION
+                audio.isSpeakerphoneOn = false
+            }
+        }
+        callState.value = callState.value.copy(status = "active", speaker = false)
+        startCallService()
+    }
+
     private fun endCallLocal() {
         runCatching { rtc.close() }
         callIceJob?.cancel()
         pendingIce.clear()
+        stopCallService()
         val app = getApplication<Application>()
         runCatching {
             val audio = app.getSystemService(Application.AUDIO_SERVICE) as? AudioManager
@@ -577,11 +1089,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openChat(conversation: Conversation) {
         activeChatId = conversation.id
-        chat.value = ChatUiState(conversation = conversation, loading = true)
-        // siapkan kunci E2EE per-percakapan
-        runCatching { e2ee.ensureKey(conversation.id) }
+        // Chat dibuka: hapus notifnya bila ada.
+        runCatching { PushManager.cancelForConversation(getApplication(), conversation.id) }
+        chat.value = ChatUiState(conversation = conversation, loading = true, keySyncing = true)
         viewModelScope.launch {
             try {
+                // Tunggu kunci E2EE siap dulu (device baru!) sebelum mendekrip,
+                // kalau tidak pesan terlanjur tampil terenkripsi.
+                runCatching { syncKeysNow(conversation.id) }
+                chat.value = chat.value.copy(keySyncing = false)
                 val page = repository.messages(conversation.id, limit = 40)
                 val dec = page.messages.map { e2ee.decryptMessage(it) }
                 chat.value = ChatUiState(
@@ -592,12 +1108,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 page.messages.lastOrNull()?.let { markReadInternal(conversation.id, it.id) }
                 refreshConversations()
+                loadPins()
             } catch (e: Exception) {
                 handleError(e)
                 chat.value = chat.value.copy(
                     loading = false,
+                    keySyncing = false,
                     error = e.message ?: "Gagal memuat pesan.",
                 )
+            }
+        }
+    }
+
+    /**
+     * User lain baru online (event presence via Erlang): segarkan detail
+     * chat yang sedang dibuka agar "x anggota, y online" / "Online"
+     * terasa realtime tanpa polling.
+     */
+    private fun onPresenceChanged(userId: Long) {
+        val current = chat.value
+        val conv = current.detail ?: current.conversation ?: return
+        if (conv.id != activeChatId) return
+        val involves = conv.peer?.id == userId || conv.members.any { it.id == userId }
+        if (!involves) return
+        viewModelScope.launch {
+            val updated = runCatching { repository.conversationDetail(conv.id) }.getOrNull()
+                ?: return@launch
+            if (chat.value.conversation?.id == conv.id) {
+                chat.value = chat.value.copy(detail = updated)
             }
         }
     }
@@ -609,6 +1147,76 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 handleError(e)
             }
+        }
+    }
+
+    /** Buka chat dari deep-link notifikasi (PushDeepLink). */
+    fun openChatById(conversationId: Long) {
+        viewModelScope.launch {
+            try {
+                openChat(repository.conversationDetail(conversationId))
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    /** Aksi Jawab/Tolak/Tutup dari notifikasi telepon. */
+    fun onNotificationCallAction(action: String, callId: Long) {
+        val current = callState.value.call
+        viewModelScope.launch {
+            when (action) {
+                "answer" -> {
+                    if (current?.id == callId && callState.value.status == "ringing") {
+                        answerVoiceCall()
+                    }
+                }
+                "reject" -> {
+                    if (current?.id == callId) rejectVoiceCall() else endCallById(callId)
+                }
+                else -> {
+                    if (current?.id == callId) endVoiceCall() else endCallById(callId)
+                }
+            }
+        }
+    }
+
+    private fun endCallById(callId: Long) {
+        viewModelScope.launch {
+            runCatching { calls.end(callId) }
+            if (callState.value.call?.id == callId) {
+                withContext(Dispatchers.Main) { endCallLocal() }
+            } else {
+                stopCallService()
+            }
+        }
+    }
+
+    /** Nyalakan foreground service telepon (microphone) agar jalan di background. */
+    private fun startCallService() {
+        val app = getApplication<Application>()
+        val current = callState.value
+        val callId = current.call?.id ?: 0L
+        val intent = android.content.Intent(app, CallForegroundService::class.java).apply {
+            action = if (current.status == "ringing" && !current.outgoing) {
+                CallForegroundService.ACTION_INCOMING
+            } else {
+                CallForegroundService.ACTION_START
+            }
+            putExtra(CallForegroundService.EXTRA_CALL_ID, callId)
+            putExtra(CallForegroundService.EXTRA_PEER, current.peer?.displayName.orEmpty())
+            putExtra(CallForegroundService.EXTRA_STATUS, current.status)
+        }
+        runCatching {
+            androidx.core.content.ContextCompat.startForegroundService(app, intent)
+        }
+    }
+
+    private fun stopCallService() {
+        runCatching {
+            getApplication<Application>().stopService(
+                android.content.Intent(getApplication(), CallForegroundService::class.java)
+            )
         }
     }
 
@@ -655,6 +1263,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         chat.value = state.copy(messages = state.messages + pending, replyTo = null)
         lastTypingSent = 0L
 
+        // Bila kunci lokal baru dibuat saat mengirim (mis. habis reinstall),
+        // sebarkan ke anggota/perangkat lain agar pesan terbaca semua pihak.
+        val hadKey = e2ee.isEnabled(conversation.id)
         viewModelScope.launch {
             try {
                 val toSend = e2ee.encrypt(conversation.id, body)
@@ -662,6 +1273,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val dec = e2ee.decryptMessage(sent)
                 mergeSentMessage(clientId, dec)
                 refreshConversations()
+                if (!hadKey) {
+                    launch(Dispatchers.IO) { runCatching { syncKeysNow(conversation.id) } }
+                }
             } catch (e: Exception) {
                 val current = chat.value
                 chat.value = current.copy(
@@ -721,17 +1335,180 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 repository.revokeMessage(message.id)
-                val current = chat.value
-                chat.value = current.copy(
-                    messages = current.messages.map {
-                        if (it.id == message.id) it.copy(revoked = true, body = null, attachmentUrl = null) else it
-                    }
+                markRevokedLocal(message.id)
+                refreshConversations()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    /**
+     * Samarkan pesan yang ditarik di semua state lokal: daftar pesan, bar
+     * sematan, pratinjau balasan, dan hasil pencarian — isi aslinya tidak
+     * boleh muncul lagi di mana pun.
+     */
+    private fun markRevokedLocal(messageId: Long) {
+        val scrubbed = { m: Message ->
+            if (m.id == messageId) m.copy(revoked = true, body = null, attachmentUrl = null) else m
+        }
+        val current = chat.value
+        chat.value = current.copy(
+            messages = current.messages.map(scrubbed),
+            pins = current.pins.map { pin ->
+                if (pin.message.id == messageId) pin.copy(message = scrubbed(pin.message)) else pin
+            },
+            replyTo = current.replyTo?.let(scrubbed),
+            searchResults = current.searchResults.map(scrubbed),
+        )
+    }
+
+    fun setEditing(message: Message?) {
+        chat.value = chat.value.copy(editing = message, replyTo = if (message != null) null else chat.value.replyTo)
+    }
+
+    fun confirmEdit(body: String) {
+        val target = chat.value.editing ?: return
+        if (target.id <= 0) return
+        val text = body.trim()
+        if (text.isEmpty()) return
+        val conversation = chat.value.conversation ?: return
+        viewModelScope.launch {
+            try {
+                val encrypted = e2ee.encrypt(conversation.id, text)
+                val updated = e2ee.decryptMessage(repository.editMessage(target.id, encrypted))
+                chat.value = chat.value.copy(
+                    editing = null,
+                    messages = chat.value.messages.map { if (it.id == updated.id) updated else it }
                 )
                 refreshConversations()
             } catch (e: Exception) {
                 handleError(e)
             }
         }
+    }
+
+    fun reactMessage(message: Message, emoji: String) {
+        if (message.id <= 0) return
+        viewModelScope.launch {
+            try {
+                val (_, reactions) = repository.reactMessage(message.id, emoji)
+                chat.value = chat.value.copy(
+                    messages = chat.value.messages.map {
+                        if (it.id == message.id) it.copy(reactions = reactions) else it
+                    }
+                )
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun forwardMessage(msg: Message, toConversationId: Long) {
+        if (msg.id <= 0) return
+        viewModelScope.launch {
+            try {
+                runCatching { e2ee.ensureKey(toConversationId) }
+                // Enkripsi ulang isi untuk kunci percakapan tujuan bila beda obrolan.
+                val plain = e2ee.decryptMessage(msg).body
+                val activeId = chat.value.conversation?.id
+                val bodyOverride = if (toConversationId != activeId && msg.type == "text" && plain != null) {
+                    e2ee.encrypt(toConversationId, plain)
+                } else null
+                val sent = repository.forwardMessage(msg.id, toConversationId, UUID.randomUUID().toString(), bodyOverride)
+                if (toConversationId == activeId) {
+                    val dec = if (bodyOverride != null) e2ee.decryptMessage(sent) else sent
+                    mergeSentMessage(sent.clientId.orEmpty(), dec)
+                }
+                refreshConversations()
+                message.value = "Pesan diteruskan."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun loadPins() {
+        val conversation = chat.value.conversation ?: return
+        viewModelScope.launch {
+            try {
+                val pins = repository.pins(conversation.id).map { pin ->
+                    pin.copy(message = e2ee.decryptMessage(pin.message))
+                }
+                chat.value = chat.value.copy(pins = pins)
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun pinMessage(message: Message) {
+        val conversation = chat.value.conversation ?: return
+        if (message.id <= 0) return
+        viewModelScope.launch {
+            try {
+                val pins = repository.pinMessage(conversation.id, message.id).map { pin ->
+                    pin.copy(message = e2ee.decryptMessage(pin.message))
+                }
+                chat.value = chat.value.copy(pins = pins)
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun unpinMessage(message: Message) {
+        val conversation = chat.value.conversation ?: return
+        if (message.id <= 0) return
+        viewModelScope.launch {
+            try {
+                repository.unpinMessage(conversation.id, message.id)
+                loadPins()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun archiveActiveChat(archived: Boolean) {
+        val conversation = chat.value.conversation ?: return
+        viewModelScope.launch {
+            try {
+                repository.archiveConversation(conversation.id, archived)
+                refreshConversations()
+                message.value = if (archived) "Obrolan diarsipkan." else "Obrolan dikeluarkan dari arsip."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun searchInChat(query: String) {
+        val conversation = chat.value.conversation ?: return
+        val q = query.trim()
+        if (q.length < 2) {
+            chat.value = chat.value.copy(searching = false, searchQuery = "", searchResults = emptyList())
+            return
+        }
+        chat.value = chat.value.copy(searching = true, searchQuery = q)
+        viewModelScope.launch {
+            try {
+                val remote = repository.searchMessages(conversation.id, q).map { e2ee.decryptMessage(it) }
+                val local = chat.value.messages.filter {
+                    !it.revoked && it.body?.contains(q, ignoreCase = true) == true && remote.none { r -> r.id == it.id }
+                }
+                chat.value = chat.value.copy(searching = false, searchResults = remote + local)
+            } catch (e: Exception) {
+                val local = chat.value.messages.filter {
+                    !it.revoked && it.body?.contains(q, ignoreCase = true) == true
+                }
+                chat.value = chat.value.copy(searching = false, searchResults = local)
+            }
+        }
+    }
+
+    fun clearChatSearch() {
+        chat.value = chat.value.copy(searching = false, searchQuery = "", searchResults = emptyList())
     }
 
     fun sendImage(uri: Uri) {
@@ -794,6 +1571,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 loadConversationDetail()
                 refreshConversations()
                 message.value = "Anggota ditambahkan."
+                syncConversationKeys(conversation.id)
             } catch (e: Exception) {
                 handleError(e)
             }
@@ -807,6 +1585,76 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 repository.removeGroupMember(conversation.id, userId)
                 loadConversationDetail()
                 refreshConversations()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun setMemberRole(userId: Long, role: String) {
+        val conversation = chat.value.conversation ?: return
+        viewModelScope.launch {
+            try {
+                repository.setMemberRole(conversation.id, userId, role)
+                loadConversationDetail()
+                refreshConversations()
+                message.value = if (role == "admin") "Anggota diangkat menjadi admin." else "Role admin dicabut."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    suspend fun fetchInviteLink(conversationId: Long, rotate: Boolean = false): String? {
+        return try {
+            val (_, link) = repository.inviteLink(conversationId, rotate)
+            inviteLink.value = link.ifBlank { null }
+            inviteLink.value
+        } catch (e: Exception) {
+            handleError(e)
+            null
+        }
+    }
+
+    fun loadJoinRequests(conversationId: Long) {
+        viewModelScope.launch {
+            try {
+                joinRequests.value = repository.joinRequests(conversationId)
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun reviewJoinRequest(request: GroupJoinRequest, approve: Boolean) {
+        viewModelScope.launch {
+            try {
+                repository.reviewJoinRequest(request.requestId, approve)
+                joinRequests.value = repository.joinRequests(request.conversationId)
+                loadConversationDetail()
+                refreshConversations()
+                message.value = if (approve) "Permintaan gabung disetujui." else "Permintaan gabung ditolak."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun joinGroupByToken(token: String, onJoined: (() -> Unit)? = null) {
+        val clean = token.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                val (status, conversation) = repository.joinGroup(clean)
+                when (status) {
+                    "pending" -> message.value = "Permintaan gabung terkirim. Menunggu persetujuan admin."
+                    else -> {
+                        refreshConversations()
+                        if (conversation != null) openChat(conversation)
+                        message.value = "Kamu bergabung ke grup."
+                    }
+                }
+                onJoined?.invoke()
             } catch (e: Exception) {
                 handleError(e)
             }
@@ -871,6 +1719,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val url = repository.upload(uri)
         // avatarUrl disimpan via update_group agar kena cek izin + system event
         return url
+    }
+
+    fun clearHistory(conversationId: Long) {
+        viewModelScope.launch {
+            try {
+                repository.clearHistory(conversationId)
+                if (chat.value.conversation?.id == conversationId) {
+                    chat.value = chat.value.copy(messages = emptyList(), hasMore = false)
+                }
+                refreshConversations()
+                message.value = "Riwayat chat dibersihkan."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
     }
 
     private fun mergeSentMessage(clientId: String, sent: Message) {
@@ -1054,6 +1917,91 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun blockUser(user: User) {
+        viewModelScope.launch {
+            try {
+                repository.blockUser(user.id)
+                loadFriends()
+                loadRequests()
+                refreshConversations()
+                message.value = "${user.displayName} diblokir."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun unblockUser(user: User) {
+        viewModelScope.launch {
+            try {
+                repository.unblockUser(user.id)
+                blocked.value = blocked.value.filterNot { it.id == user.id }
+                loadFriends()
+                message.value = "${user.displayName} dibuka blokirnya."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun loadBlocked() {
+        viewModelScope.launch {
+            try {
+                blocked.value = repository.blockedUsers()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun deleteAccount(password: String, onDeleted: () -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                if (repository.deleteAccount(password)) {
+                    logout()
+                    onDeleted()
+                }
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun loadWallet() {
+        viewModelScope.launch {
+            try {
+                walletBalance.value = repository.wallet()
+                walletTxns.value = repository.walletHistory()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun walletTopup(amount: Long) {
+        viewModelScope.launch {
+            try {
+                walletBalance.value = repository.walletTopup(amount)
+                walletTxns.value = repository.walletHistory()
+                message.value = "Top up berhasil."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun walletTransfer(toUser: User, amount: Long, note: String) {
+        viewModelScope.launch {
+            try {
+                walletBalance.value = repository.walletTransfer(toUser.id, amount, note.ifBlank { null })
+                walletTxns.value = repository.walletHistory()
+                message.value = "Terkirim ke ${toUser.displayName}."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
     fun syncPhoneContacts() {
         if (contactsSyncing.value) return
         contactsSyncing.value = true
@@ -1113,7 +2061,92 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         nearbyRadius.value = clamped
         getApplication<Application>().getSharedPreferences("nusachat.nearby", android.content.Context.MODE_PRIVATE)
             .edit().putInt("radius_km", clamped).apply()
-        loadNearby(force = true)
+        if (nearbyLiveActive) startNearbyLive() else loadNearby(force = true)
+    }
+
+    /**
+     * Orang Terdekat realtime via Erlang: lokasi dikirim lewat WS,
+     * daftar awal dibalas `nearby.result`, perubahan masuk sebagai
+     * `nearby.changed` tanpa polling. Jatuh kembali ke REST bila
+     * socket belum tersambung.
+     */
+    fun startNearbyLive() {
+        if (!locationHelper.hasPermission()) {
+            nearby.value = nearby.value.copy(
+                error = "Izin lokasi diperlukan untuk melihat orang di sekitar.",
+                loaded = true,
+            )
+            return
+        }
+        nearbyLiveActive = true
+        nearby.value = nearby.value.copy(loading = true, error = null)
+        viewModelScope.launch {
+            try {
+                val location = locationHelper.currentLocation()
+                if (location == null) {
+                    nearby.value = NearbyState(
+                        loading = false,
+                        loaded = true,
+                        error = "Lokasi tidak tersedia. Aktifkan GPS lalu coba lagi.",
+                    )
+                    return@launch
+                }
+                val radius = nearbyRadius.value.coerceIn(1, 100)
+                val payload = JSONObject()
+                    .put("lat", location.first)
+                    .put("lng", location.second)
+                    .put("radius", radius)
+                val ws = socket
+                if (ws?.isOpen == true) {
+                    ws.send("location.update", payload)
+                    runCatching { repository.updatePresence(location.first, location.second) }
+                    // Hasil datang via nearby.result; timeout pengaman 12 dtk.
+                    delay(12_000)
+                    if (nearbyLiveActive && nearby.value.loading && !nearby.value.loaded) {
+                        loadNearby(force = true)
+                    }
+                } else {
+                    loadNearby(force = true)
+                }
+            } catch (e: Exception) {
+                loadNearby(force = true)
+            }
+        }
+    }
+
+    fun stopNearbyLive() {
+        nearbyLiveActive = false
+        runCatching { socket?.send("nearby.unsubscribe") }
+    }
+
+    // ------------------------------------------------- latar chat (wallpaper + bubble)
+
+    private fun loadSavedChatTheme(): ChatThemeChoice {
+        return try {
+            ChatThemeChoice(
+                wallpaperId = chatThemeStore.wallpaperId,
+                customUri = chatThemeStore.customUri,
+                bubbleId = chatThemeStore.bubbleId,
+            )
+        } catch (e: Exception) {
+            ChatThemeChoice()
+        }
+    }
+
+    fun setChatWallpaper(wallpaperId: String, customUri: String = "") {
+        chatThemeStore.wallpaperId = wallpaperId
+        if (customUri.isNotBlank()) chatThemeStore.customUri = customUri
+        chatTheme.value = chatTheme.value.copy(wallpaperId = wallpaperId, customUri = chatThemeStore.customUri)
+    }
+
+    fun setChatBubble(bubbleId: String) {
+        chatThemeStore.bubbleId = bubbleId
+        chatTheme.value = chatTheme.value.copy(bubbleId = bubbleId)
+    }
+
+    fun resetChatTheme() {
+        chatThemeStore.reset()
+        chatTheme.value = ChatThemeChoice()
     }
 
     private fun loadSavedRadius(): Int {
@@ -1146,7 +2179,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val radius = nearbyRadius.value.coerceIn(1, 100)
                 val users = repository.nearby(location.first, location.second, radius)
                 runCatching { repository.updatePresence(location.first, location.second) }
-                nearby.value = NearbyState(users = users, loading = false, loaded = true)
+                nearby.value = NearbyState(users = users, loading = false, loaded = true, live = false)
             } catch (e: Exception) {
                 nearby.value = NearbyState(
                     loading = false,
@@ -1225,6 +2258,94 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 handleError(e)
             } finally {
                 momentsLoading.value = false
+            }
+        }
+        loadStories()
+    }
+
+    fun loadStories() {
+        if (sessionState.value.user == null) return
+        viewModelScope.launch {
+            try {
+                stories.value = repository.stories()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun createStory(text: String, uris: List<android.net.Uri>) {
+        val trimmed = text.trim()
+        if (trimmed.isBlank() && uris.isEmpty()) {
+            message.value = "Tulis sesuatu atau pilih foto."
+            return
+        }
+        if (uris.size > 4) {
+            message.value = "Maksimal 4 media per story."
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val media = uris.take(4).map { repository.upload(it) }
+                val story = repository.createStory(trimmed, media)
+                stories.value = listOf(story) + stories.value
+                message.value = "Story dibagikan, hilang dalam 24 jam."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun deleteStory(story: id.nusachat.app.data.Story) {
+        viewModelScope.launch {
+            try {
+                repository.deleteStory(story.id)
+                stories.value = stories.value.filterNot { it.id == story.id }
+                message.value = "Story dihapus."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun reshareMoment(moment: Moment) {
+        if (moment.id <= 0) return
+        viewModelScope.launch {
+            try {
+                val fresh = repository.reshareMoment(moment.id)
+                moments.value = listOf(fresh) + moments.value
+                message.value = "Momen dibagikan ulang."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun shareMomentToChat(moment: Moment, conversationId: Long) {
+        viewModelScope.launch {
+            try {
+                runCatching { e2ee.ensureKey(conversationId) }
+                if (moment.body.isNotBlank()) {
+                    val encrypted = e2ee.encrypt(conversationId, moment.body)
+                    val clientId = java.util.UUID.randomUUID().toString()
+                    val sent = repository.sendMessage(conversationId, encrypted, clientId, null)
+                    if (conversationId == chat.value.conversation?.id) {
+                        mergeSentMessage(clientId, e2ee.decryptMessage(sent))
+                    }
+                }
+                moment.media.forEach { url ->
+                    val type = if (id.nusachat.app.data.isVideoUrl(url)) "video" else "image"
+                    val sent = repository.sendAttachment(
+                        conversationId, type, url, null, java.util.UUID.randomUUID().toString()
+                    )
+                    if (conversationId == chat.value.conversation?.id) {
+                        mergeSentMessage(sent.clientId.orEmpty(), e2ee.decryptMessage(sent))
+                    }
+                }
+                refreshConversations()
+                message.value = "Momen dibagikan ke chat."
+            } catch (e: Exception) {
+                handleError(e)
             }
         }
     }
@@ -1334,12 +2455,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         comments.value = emptyList()
     }
 
-    fun addComment(body: String) {
+    fun addComment(body: String, parentId: Long? = null) {
         val momentId = commentsMomentId.value ?: return
         if (body.trim().isEmpty()) return
         viewModelScope.launch {
             try {
-                val comment = repository.addComment(momentId, body.trim())
+                val comment = repository.addComment(momentId, body.trim(), parentId)
                 comments.value = comments.value + comment
                 moments.value = moments.value.map {
                     if (it.id == momentId) it.copy(commentCount = it.commentCount + 1) else it

@@ -10,6 +10,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.ui.res.painterResource
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -18,10 +19,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -69,27 +73,34 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import id.nusachat.app.data.Conversation
 import id.nusachat.app.data.Message
+import id.nusachat.app.data.PinnedMessage
 import id.nusachat.app.data.User
 import id.nusachat.app.ui.AppViewModel
 import id.nusachat.app.ui.chats.components.MessageBubble
 import id.nusachat.app.ui.chats.components.MessageInfoDialog
+import id.nusachat.app.ui.chats.components.messagePreviewText
 import id.nusachat.app.ui.chats.components.TypingBubble
 import id.nusachat.app.ui.components.NusaOnlineGreen
-import id.nusachat.app.ui.theme.NusaChatBackgroundDark
-import id.nusachat.app.ui.theme.NusaChatBackgroundLight
 import id.nusachat.app.ui.theme.NusaIcons
+import id.nusachat.app.ui.theme.doodleDrawableName
+import id.nusachat.app.ui.theme.resolveChatTheme
 import id.nusachat.app.ui.ChatUiState
 import id.nusachat.app.ui.components.EmptyState
 import id.nusachat.app.ui.components.NusaActionSheet
 import id.nusachat.app.ui.chats.components.SystemEventBubble
+import id.nusachat.app.ui.profile.PublicProfileScreen
 import id.nusachat.app.ui.components.NusaAvatar
 import id.nusachat.app.ui.components.NusaConfirmSheet
 import id.nusachat.app.ui.components.SheetAction
+import id.nusachat.app.ui.components.dayKey
 import id.nusachat.app.ui.components.formatClockTime
+import id.nusachat.app.ui.components.formatDayLabel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(
     vm: AppViewModel,
@@ -101,9 +112,13 @@ fun ChatScreen(
     val me = session.user
     val friends by vm.friends.collectAsStateWithLifecycle()
     val dark = isSystemInDarkTheme()
-    // Background ruang chat khas LINE dari token tema (bukan abu WhatsApp).
-    val chatBackground = if (dark) NusaChatBackgroundDark else NusaChatBackgroundLight
+    // Latar ruang chat dari Latar Chat pilihan user (default: putih semu abu + doodle Nusa).
+    val themeChoice by vm.chatTheme.collectAsStateWithLifecycle()
+    val chatTheme = resolveChatTheme(themeChoice.wallpaperId, themeChoice.customUri, themeChoice.bubbleId, dark)
+    val chatBackground = chatTheme.base
     val listState = rememberLazyListState()
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var highlightedId by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Long?>(null) }
     var draft by rememberSaveable(conversation.id) { mutableStateOf("") }
     var showInfo by remember { mutableStateOf(false) }
     var showAddMembers by remember { mutableStateOf(false) }
@@ -115,6 +130,32 @@ fun ChatScreen(
     var showAttachMenu by remember { mutableStateOf(false) }
     var showE2eeInfo by remember { mutableStateOf(false) }
     var showMediaPicker by remember { mutableStateOf(false) }
+    var forwardMsg by remember { mutableStateOf<Message?>(null) }
+    var showPins by remember { mutableStateOf(false) }
+    var showSearch by remember { mutableStateOf(false) }
+    var searchText by remember { mutableStateOf("") }
+    val conversations by vm.conversations.collectAsStateWithLifecycle()
+    // Baris list: separator tanggal + pesan + (indikator mengetik) + spasi bawah.
+    // Dibangun sekali per perubahan pesan agar LazyColumn stabil.
+    val rows = remember(state.messages, state.typingName) {
+        buildChatRows(state.messages, state.typingName)
+    }
+    fun jumpToMessage(id: Long) {
+        // Lompat memakai indeks absolut (banner + baris).
+        scope.launch {
+            val prefix = if (state.hasMore) 2 else 1
+            val idx = rows.indexOfFirst { it is ChatRow.Msg && it.message.id == id }
+            if (idx != -1) {
+                highlightedId = id
+                listState.animateScrollToItem(prefix + idx)
+                delay(1600)
+                if (highlightedId == id) highlightedId = null
+            }
+        }
+    }
+    LaunchedEffect(state.editing?.id) {
+        state.editing?.body?.let { draft = it }
+    }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { vm.sendFile(it) }
@@ -131,12 +172,24 @@ fun ChatScreen(
         }
         pendingCallPeer = null
     }
+    val groupCallPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) vm.startGroupCall(effectiveConversation.id)
+    }
     // Backend canonical (kolom di Conversation) adalah sumber kebenaran untuk izin grup
     val canSendInGroup = when {
         !effectiveConversation.isGroup -> true
         !effectiveConversation.onlyAdminsCanSend -> true
         else -> (effectiveConversation.createdBy == me?.id || effectiveConversation.myRole == "owner")
     }
+    val requests by vm.requests.collectAsStateWithLifecycle()
+    var directRequested by remember(effectiveConversation.peer?.id) { mutableStateOf(false) }
+    val isPendingOutgoing = requests.outgoing.any { it.user.id == effectiveConversation.peer?.id } || directRequested
+    val isDirectFriend = if (effectiveConversation.isGroup) true else {
+        val peerId = effectiveConversation.peer?.id
+        peerId == null || friends.any { it.id == peerId } ||
+            effectiveConversation.peer?.friendStatus == "accepted"
+    }
+    val canSend = canSendInGroup && isDirectFriend
     val sharingLocation by vm.sharingLocation.collectAsStateWithLifecycle()
     val locationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -160,13 +213,62 @@ fun ChatScreen(
             }
     }
 
+    // Bottom-stick ala WhatsApp: snap instan ke bawah (tanpa animasi lambat).
+    // - Buka chat / kirim pesan sendiri: selalu snap.
+    // - Pesan masuk saat baca riwayat: jangan tarik paksa, tandai pill "Pesan baru".
+    // - Keyboard dibuka: snap agar pesan terbaru kelihatan di atas keyboard.
+    var hasNewBelow by remember(conversation.id) { mutableStateOf(false) }
+    var initialSnapDone by remember(conversation.id) { mutableStateOf(false) }
+    var lastSeenId by remember(conversation.id) { mutableStateOf(0L) }
+    suspend fun snapToBottom() {
+        if (rows.isNotEmpty()) {
+            // Indeks absolut = banner e2ee (+ riwayat) + baris; baris terakhir
+            // selalu spasi bawah sehingga mendarat di paling bawah list.
+            val prefix = if (state.hasMore) 2 else 1
+            runCatching { listState.scrollToItem(prefix + rows.lastIndex) }
+        }
+        hasNewBelow = false
+    }
+    fun isAtBottom(): Boolean {
+        val info = listState.layoutInfo
+        if (info.totalItemsCount == 0) return true
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: return true
+        return lastVisible >= info.totalItemsCount - 2
+    }
+
     LaunchedEffect(state.messages.size, state.typingName) {
-        if (state.messages.isNotEmpty()) {
-            // Hanya auto-scroll ke bawah untuk pesan baru, bukan saat riwayat lama dimuat ke atas
-            val isAppending = state.messages.size > 1 && state.messages.last().id > 0
-            if (state.typingName != null || isAppending) {
-                listState.animateScrollToItem(state.messages.lastIndex)
-            }
+        if (state.messages.isEmpty()) return@LaunchedEffect
+        val latest = state.messages.lastOrNull()
+        val latestId = latest?.id ?: 0L
+        val grewAtEnd = latestId != lastSeenId
+        lastSeenId = latestId
+        if (!initialSnapDone) {
+            initialSnapDone = true
+            snapToBottom()
+            return@LaunchedEffect
+        }
+        if (grewAtEnd) {
+            val isOwn = latest?.sender?.id == me?.id
+            if (isOwn || isAtBottom()) snapToBottom()
+            else hasNewBelow = true
+        } else if (state.typingName != null && isAtBottom()) {
+            snapToBottom()
+        }
+        // Riwayat lama dimuat ke atas: diam, posisi baca aman.
+    }
+
+    val imeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(imeVisible, conversation.id) {
+        if (imeVisible) snapToBottom()
+    }
+
+    // Pill "Pesan baru" ikut hilang saat user scroll manual sampai bawah.
+    androidx.compose.runtime.LaunchedEffect(listState) {
+        androidx.compose.runtime.snapshotFlow {
+            val info = listState.layoutInfo
+            info.totalItemsCount to (info.visibleItemsInfo.lastOrNull()?.index ?: -1)
+        }.collect { (total, last) ->
+            if (total > 0 && last >= total - 2) hasNewBelow = false
         }
     }
 
@@ -182,8 +284,13 @@ fun ChatScreen(
         }
     }
 
+    var showPublicProfile by remember { mutableStateOf(false) }
+
     LaunchedEffect(showInfo) {
         if (showInfo) vm.loadConversationDetail()
+    }
+    LaunchedEffect(showPublicProfile) {
+        if (showPublicProfile) vm.refreshMoments()
     }
 
     Scaffold(
@@ -198,7 +305,10 @@ fun ChatScreen(
                 title = {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable { showInfo = true },
+                        modifier = Modifier.clickable {
+                            if (effectiveConversation.isGroup) showInfo = true
+                            else if (effectiveConversation.peer != null) showPublicProfile = true
+                        },
                     ) {
                         NusaAvatar(
                             name = effectiveConversation.displayTitle,
@@ -217,7 +327,7 @@ fun ChatScreen(
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
-                                text = chatSubtitle(state, effectiveConversation.isGroup),
+                                text = chatSubtitle(state, effectiveConversation, me?.id),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
@@ -226,6 +336,15 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    NusaIconButton(onClick = {
+                        showSearch = !showSearch
+                        if (!showSearch) {
+                            searchText = ""
+                            vm.clearChatSearch()
+                        }
+                    }) {
+                        Icon(painter = painterResource(id = NusaIcons.Search), contentDescription = "Cari pesan")
+                    }
                     if (!effectiveConversation.isGroup) {
                         NusaIconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }) {
                             Icon(painter = painterResource(id = NusaIcons.Call), contentDescription = "Panggilan suara")
@@ -271,11 +390,95 @@ fun ChatScreen(
                         onCancel = { vm.setReply(null) },
                     )
                 }
-                if (!canSendInGroup) {
+                state.editing?.let { editing ->
+                    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                painter = painterResource(id = NusaIcons.Edit),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Edit pesan",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    text = editing.body?.take(80).orEmpty(),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            NusaIconButton(onClick = { vm.setEditing(null); draft = "" }, modifier = Modifier.size(30.dp)) {
+                                Icon(painter = painterResource(id = NusaIcons.Close), contentDescription = "Batalkan edit")
+                            }
+                        }
+                    }
+                }
+                if (!isDirectFriend) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(MaterialTheme.colorScheme.surface)
+                            .navigationBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Lock),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Anda tidak dapat mengirim pesan karena Anda tidak saling berteman",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        effectiveConversation.peer?.let { peer ->
+                            if (isPendingOutgoing) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        painter = painterResource(id = NusaIcons.Time),
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        "Meminta",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            } else {
+                                NusaTextButton(onClick = {
+                                    vm.sendFriendRequest(peer)
+                                    directRequested = true
+                                }) { Text("Tambah") }
+                            }
+                        }
+                    }
+                } else if (!canSendInGroup) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface)
+                            .navigationBarsPadding()
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -303,7 +506,11 @@ fun ChatScreen(
                         onPickImage = { showAttachMenu = true },
                         onSend = {
                             if (draft.isNotBlank()) {
-                                vm.sendMessage(draft)
+                                if (state.editing != null) {
+                                    vm.confirmEdit(draft)
+                                } else {
+                                    vm.sendMessage(draft)
+                                }
                                 draft = ""
                             }
                         },
@@ -312,19 +519,138 @@ fun ChatScreen(
             }
         },
     ) { padding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            if (showSearch) {
+                Surface(color = MaterialTheme.colorScheme.surface) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        BasicTextField(
+                            value = searchText,
+                            onValueChange = {
+                                searchText = it
+                                vm.searchInChat(it)
+                            },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurface
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    MaterialTheme.colorScheme.surfaceVariant,
+                                    RoundedCornerShape(12.dp),
+                                )
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            decorationBox = { inner ->
+                                Box {
+                                    if (searchText.isEmpty()) {
+                                        Text(
+                                            text = "Cari pesan (min. 2 huruf)...",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    inner()
+                                }
+                            },
+                        )
+                        if (state.searchQuery.isNotEmpty()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = if (state.searching) "Mencari..." else "${state.searchResults.size} hasil",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            state.searchResults.take(5).forEach { result ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { jumpToMessage(result.id) }
+                                        .padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        painter = painterResource(id = NusaIcons.Search),
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = messagePreviewText(result, 60),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (state.pins.isNotEmpty()) {
+                val latestPin = state.pins.firstOrNull()
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.fillMaxWidth().clickable {
+                        if (state.pins.size == 1) {
+                            latestPin?.let { jumpToMessage(it.message.id) }
+                        } else {
+                            showPins = true
+                        }
+                    },
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Pin),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = if (state.pins.size == 1) {
+                                "Disematkan: ${latestPin?.message?.let { messagePreviewText(it, 50) }.orEmpty()}"
+                            } else {
+                                "${state.pins.size} pesan disematkan"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+            }
+            Box(modifier = Modifier.weight(1f)) {
+            ChatWallpaperLayer(
+                wallpaperId = themeChoice.wallpaperId,
+                customUri = chatTheme.customUri,
+                scrim = chatTheme.customScrim,
+            )
             when {
                 state.loading && state.messages.isEmpty() -> {
-                    NusaProgress(
+                    // Loading di atas (bukan tengah/pinggir): pill + spinner.
+                    Column(
                         modifier = Modifier
-                            .align(Alignment.Center)
-                            .size(26.dp),
-                        strokeWidth = 2.dp,
-                    )
+                            .fillMaxWidth()
+                            .padding(top = 14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        LoadingPill(text = "Memuat pesan...")
+                        if (state.keySyncing) {
+                            Spacer(Modifier.height(8.dp))
+                            LoadingPill(text = "Sinkronisasi pesan, mungkin butuh waktu lama...")
+                        }
+                    }
                 }
                 state.messages.isEmpty() -> EmptyState(
                     icon = NusaIcons.Chat,
@@ -355,15 +681,35 @@ fun ChatScreen(
                             }
                         }
                     }
-                    itemsIndexed(state.messages, key = { _, item -> item.id }) { index, message ->
-                        if (message.type == "system") {
-                            SystemEventBubble(message = message)
-                        } else {
+                    itemsIndexed(
+                        rows,
+                        key = { index, row ->
+                            when (row) {
+                                is ChatRow.Day -> "day-$index-${row.label}"
+                                is ChatRow.Msg -> "msg-${row.message.id}"
+                                is ChatRow.Typing -> "typing"
+                                ChatRow.Space -> "bottom-space"
+                            }
+                        },
+                    ) { _, row ->
+                        when (row) {
+                            is ChatRow.Day -> DateSeparator(label = row.label)
+                            is ChatRow.Typing -> TypingBubble(name = row.name)
+                            ChatRow.Space -> Spacer(Modifier.height(8.dp))
+                            is ChatRow.Msg -> {
+                                val message = row.message
+                                val index = row.index
+                                if (message.type == "system") {
+                                    SystemEventBubble(message = message)
+                                } else {
                             val quoted = state.messages.firstOrNull { it.id == message.replyToId }
                             val prev = state.messages.getOrNull(index - 1)
                             val next = state.messages.getOrNull(index + 1)
-                            val samePrev = prev?.sender?.id == message.sender?.id && prev?.type != "system"
-                            val sameNext = next?.sender?.id == message.sender?.id && next?.type != "system"
+                            // Grup bubble putus saat ganti hari (walau pengirim sama).
+                            val sameDayPrev = prev?.let { dayKey(it.createdAt) } == dayKey(message.createdAt)
+                            val sameDayNext = next?.let { dayKey(it.createdAt) } == dayKey(message.createdAt)
+                            val samePrev = prev?.sender?.id == message.sender?.id && prev?.type != "system" && sameDayPrev
+                            val sameNext = next?.sender?.id == message.sender?.id && next?.type != "system" && sameDayNext
                             MessageBubble(
                             message = message,
                             quoted = quoted,
@@ -376,6 +722,15 @@ fun ChatScreen(
                             menuOpen = messageMenu?.let { it.id == message.id && it.clientId == message.clientId } == true,
                             onDismissMenu = dismissMenu,
                             onReply = { vm.setReply(it); dismissMenu() },
+                            onEdit = { vm.setEditing(it); dismissMenu() },
+                            onForward = { forwardMsg = it; dismissMenu() },
+                            onReact = { m, e -> vm.reactMessage(m, e); dismissMenu() },
+                            onPin = { m ->
+                                if (state.pins.any { it.message.id == m.id }) vm.unpinMessage(m)
+                                else vm.pinMessage(m)
+                                dismissMenu()
+                            },
+                            pinned = state.pins.any { it.message.id == message.id },
                             onRevoke = { vm.revokeMessage(it); dismissMenu() },
                             onShowInfo = { infoMessage = it; dismissMenu() },
                             audioPlayingKey = audioPlayingKey,
@@ -383,15 +738,21 @@ fun ChatScreen(
                                 audioPlayingKey = if (audioPlayingKey == key) null else key
                             },
                             onImageClick = { imageViewerUrl = it },
+                            isHighlighted = highlightedId == message.id,
+                            bubbles = chatTheme.bubbles,
+                            wallpaperDark = chatTheme.isDark,
+                            onQuotedClick = { qid ->
+                                if (rows.none { it is ChatRow.Msg && it.message.id == qid } && state.hasMore) {
+                                    vm.loadOlderMessages()
+                                } else {
+                                    jumpToMessage(qid)
+                                }
+                            },
                         )
+                                }
+                            }
                         }
                     }
-                    if (state.typingName != null) {
-                        item(key = "typing") {
-                            TypingBubble(name = state.typingName.orEmpty())
-                        }
-                    }
-                    item(key = "bottom-space") { Spacer(Modifier.height(8.dp)) }
                 }
             }
             imageViewerUrl?.let { url ->
@@ -437,6 +798,91 @@ fun ChatScreen(
                         ) { dismissMenu() },
                 )
             }
+            if (hasNewBelow && state.messages.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 6.dp,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 10.dp)
+                        .clickable { scope.launch { snapToBottom() } },
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Pesan baru",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Down),
+                            contentDescription = "Ke bawah",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(15.dp),
+                        )
+                    }
+                }
+            }
+            }
+        }
+    }
+
+    forwardMsg?.let { msg ->
+        NusaBottomSheet(onDismissRequest = { forwardMsg = null }) {
+            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                Text(
+                    text = "Teruskan ke...",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    items(conversations.filter { it.id != conversation.id }, key = { it.id }) { conv ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    vm.forwardMessage(msg, conv.id)
+                                    forwardMsg = null
+                                }
+                                .padding(horizontal = 20.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            NusaAvatar(
+                                name = conv.displayTitle,
+                                url = conv.avatarUrl,
+                                size = 40.dp,
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                text = conv.displayTitle,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showPins) {
+        NusaBottomSheet(onDismissRequest = { showPins = false }) {
+            PinnedListSheet(
+                pins = state.pins,
+                onJump = { id ->
+                    showPins = false
+                    jumpToMessage(id)
+                },
+                onUnpin = { vm.unpinMessage(it) },
+            )
         }
     }
 
@@ -530,6 +976,17 @@ fun ChatScreen(
         }
     }
 
+    if (showPublicProfile && effectiveConversation.peer != null) {
+        BackHandler { showPublicProfile = false }
+        PublicProfileScreen(
+            user = effectiveConversation.peer!!,
+            vm = vm,
+            onBack = { showPublicProfile = false },
+            onChat = { showPublicProfile = false },
+        )
+        return
+    }
+
     if (showInfo) {
         BackHandler { showInfo = false; showAddMembers = false }
         GroupInfoScreen(
@@ -541,6 +998,7 @@ fun ChatScreen(
             onToggleMute = { vm.toggleMute(!effectiveConversation.muted) },
             onAddMembers = { ids -> vm.addGroupMembers(ids) },
             onRemoveMember = { vm.removeGroupMember(it) },
+            onSetRole = { userId, role -> vm.setMemberRole(userId, role) },
             onLeave = { vm.leaveGroup(onBack) },
             onShowAddMembers = { showAddMembers = true },
             vm = vm,
@@ -548,6 +1006,10 @@ fun ChatScreen(
                 pendingCallPeer = peer
                 showInfo = false
                 micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            },
+            onGroupCall = {
+                showInfo = false
+                groupCallPermission.launch(Manifest.permission.RECORD_AUDIO)
             },
             media = state.messages.filter {
                 !it.revoked && (
@@ -583,12 +1045,127 @@ fun ChatScreen(
     }
 }
 
-private fun chatSubtitle(state: ChatUiState, isGroup: Boolean): String {
+/**
+ * Baris list chat: separator tanggal ala WhatsApp + pesan + indikator
+ * mengetik + spasi bawah (selalu terakhir agar snap mendarat di bawah).
+ */
+private sealed interface ChatRow {
+    data class Day(val label: String) : ChatRow
+    data class Msg(val message: Message, val index: Int) : ChatRow
+    data class Typing(val name: String) : ChatRow
+    data object Space : ChatRow
+}
+
+private fun buildChatRows(messages: List<Message>, typingName: String?): List<ChatRow> {
+    val out = mutableListOf<ChatRow>()
+    var prevDay: String? = null
+    messages.forEachIndexed { index, message ->
+        val day = dayKey(message.createdAt)
+        if (day != null && day != prevDay) {
+            out.add(ChatRow.Day(formatDayLabel(message.createdAt)))
+            prevDay = day
+        }
+        out.add(ChatRow.Msg(message, index))
+    }
+    if (typingName != null) out.add(ChatRow.Typing(typingName))
+    out.add(ChatRow.Space)
+    return out
+}
+
+/**
+ * Lapisan wallpaper di belakang daftar pesan: doodle Nusa (bawaan),
+ * atau gambar galeri pilihan user + scrim agar bubble tetap terbaca.
+ */
+@Composable
+private fun ChatWallpaperLayer(wallpaperId: String, customUri: String?, scrim: Float) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val doodleRes = remember(wallpaperId) {
+        doodleDrawableName(wallpaperId)?.let { name ->
+            context.resources.getIdentifier(name, "drawable", context.packageName).takeIf { it != 0 }
+        }
+    }
+    if (doodleRes == null && customUri.isNullOrBlank()) return
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (doodleRes != null) {
+            Image(
+                painter = painterResource(id = doodleRes),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else if (!customUri.isNullOrBlank()) {
+            AsyncImage(
+                model = customUri,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (scrim > 0f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = scrim)),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DateSeparator(label: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shadowElevation = 1.dp,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun LoadingPill(text: String) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shadowElevation = 4.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            NusaProgress(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+private fun chatSubtitle(state: ChatUiState, conversation: Conversation, myId: Long?): String {
     if (!state.typingName.isNullOrBlank()) {
         return "${state.typingName} sedang mengetik..."
     }
-    if (isGroup) {
-        return "${state.conversation?.memberCount ?: 0} anggota"
+    if (conversation.isGroup) {
+        val members = state.detail?.members.orEmpty().ifEmpty { conversation.members }
+        val total = members.size.takeIf { it > 0 } ?: conversation.memberCount
+        val online = members.count { it.id != myId && it.online }
+        return if (online > 0) "$total anggota, $online online" else "$total anggota"
     }
     val peer = state.conversation?.peer ?: return "Offline"
     return when {
@@ -645,6 +1222,13 @@ private fun ChatInputBar(
                     textStyle = MaterialTheme.typography.bodyMedium.copy(
                         color = MaterialTheme.colorScheme.onSurface
                     ),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.Sentences,
+                        imeAction = androidx.compose.ui.text.input.ImeAction.Send,
+                    ),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                        onSend = { onSend() },
+                    ),
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
                     decorationBox = { inner ->
                         Box {
@@ -671,6 +1255,70 @@ private fun ChatInputBar(
                     contentDescription = "Kirim",
                     modifier = Modifier.size(20.dp),
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PinnedListSheet(
+    pins: List<PinnedMessage>,
+    onJump: (Long) -> Unit,
+    onUnpin: (Message) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+        Text(
+            text = "Pesan disematkan (${pins.size})",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+        )
+        LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+            items(pins, key = { it.message.id }) { pin ->
+                val msg = pin.message
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onJump(msg.id) }
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        painter = painterResource(id = NusaIcons.Pin),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = msg.sender?.displayName ?: "Pesan",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = messagePreviewText(msg, 60),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    NusaIconButton(
+                        onClick = { onUnpin(msg) },
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Close),
+                            contentDescription = "Lepas sematan",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
             }
         }
     }
@@ -705,7 +1353,7 @@ private fun ReplyPreviewBar(
                     maxLines = 1,
                 )
                 Text(
-                    text = quoted.body?.take(80).orEmpty().ifBlank { "[${quoted.type}]" },
+                    text = messagePreviewText(quoted),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

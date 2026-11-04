@@ -16,13 +16,15 @@ final class Call_model extends CI_Model
         $this->store = get_instance()->store;
     }
 
-    public function create(int $callerId, int $calleeId): array
+    public function create(int $callerId, int $calleeId, string $kind = 'audio', ?int $conversationId = null): array
     {
         $now = now_iso();
         $id = $this->store->insert('calls', [
             'uuid' => uuid4(),
             'caller_id' => $callerId,
             'callee_id' => $calleeId,
+            'conversation_id' => $conversationId,
+            'kind' => $kind,
             'status' => 'ringing',
             'created_at' => $now,
             'updated_at' => $now,
@@ -54,5 +56,102 @@ final class Call_model extends CI_Model
             "SELECT * FROM calls WHERE callee_id = ? AND status = 'ringing' ORDER BY id DESC LIMIT " . max(1, min(50, $limit)),
             [$userId]
         );
+    }
+
+    /**
+     * Room panggilan grup: satu baris calls (callee_id = 0) + partisipan.
+     */
+    public function createRoom(int $creatorId, int $conversationId, string $kind = 'audio'): array
+    {
+        $now = now_iso();
+        $id = $this->store->insert('calls', [
+            'uuid' => uuid4(),
+            'caller_id' => $creatorId,
+            'callee_id' => 0,
+            'conversation_id' => $conversationId,
+            'kind' => $kind,
+            'status' => 'ringing',
+            'created_at' => $now,
+            'updated_at' => $now,
+            'ended_at' => null,
+        ]);
+        $this->setParticipant($id, $creatorId, 'joined');
+        return $this->find($id);
+    }
+
+    public function activeRoomFor(int $conversationId): ?array
+    {
+        return $this->store->one(
+            "SELECT * FROM calls WHERE conversation_id = ? AND status IN ('ringing', 'active') ORDER BY id DESC LIMIT 1",
+            [$conversationId]
+        );
+    }
+
+    /** @return list<array> room yang masih bisa di-join (ringing/active) */
+    public function openRoomsFor(int $userId): array
+    {
+        return $this->store->all(
+            "SELECT c.* FROM calls c
+             JOIN conversation_members m ON m.conversation_id = c.conversation_id
+             WHERE m.user_id = ? AND c.conversation_id IS NOT NULL AND c.status IN ('ringing', 'active')
+             ORDER BY c.id DESC LIMIT 20",
+            [$userId]
+        );
+    }
+
+    public function setParticipant(int $callId, int $userId, string $status): void
+    {
+        $now = now_iso();
+        $existing = $this->store->one(
+            'SELECT id FROM call_participants WHERE call_id = ? AND user_id = ?',
+            [$callId, $userId]
+        );
+        if ($existing) {
+            $this->store->update(
+                'call_participants',
+                ['status' => $status, 'updated_at' => $now],
+                'id = ?',
+                [(int) $existing['id']]
+            );
+            return;
+        }
+        $this->store->insert('call_participants', [
+            'call_id' => $callId,
+            'user_id' => $userId,
+            'status' => $status,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+    }
+
+    public function participantStatus(int $callId, int $userId): ?string
+    {
+        $status = $this->store->value(
+            'SELECT status FROM call_participants WHERE call_id = ? AND user_id = ?',
+            [$callId, $userId]
+        );
+        return $status !== null ? (string) $status : null;
+    }
+
+    /** @return list<array> partisipan + profil ringkas */
+    public function participants(int $callId): array
+    {
+        return $this->store->all(
+            'SELECT p.*, u.username, u.display_name, u.avatar_url
+             FROM call_participants p JOIN users u ON u.id = p.user_id
+             WHERE p.call_id = ?
+             ORDER BY p.id ASC',
+            [$callId]
+        );
+    }
+
+    /** @return int[] id user yang masih joined */
+    public function joinedIds(int $callId): array
+    {
+        $rows = $this->store->all(
+            "SELECT user_id FROM call_participants WHERE call_id = ? AND status = 'joined'",
+            [$callId]
+        );
+        return array_map(static fn (array $r): int => (int) $r['user_id'], $rows);
     }
 }

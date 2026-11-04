@@ -87,6 +87,21 @@ def main():
         print("Cannot continue without tokens.")
         return finish()
 
+    status, payload = request("POST", "/auth/google", {"id_token": "header.payload.sig"})
+    err = (payload.get("error") or {}) if isinstance(payload, dict) else {}
+    check(
+        "google rejects malformed token",
+        status == 401 and err.get("code") == "invalid_google_token",
+        f"status={status} {payload}",
+    )
+    status, payload = request("POST", "/auth/google", {})
+    err = (payload.get("error") or {}) if isinstance(payload, dict) else {}
+    check(
+        "google requires id_token",
+        status == 422 and err.get("code") == "validation_error",
+        f"status={status} {payload}",
+    )
+
     status, payload = request("GET", "/users/me", token=nusa)
     check("me", status == 200 and payload["data"]["user"]["username"] == "nusa", f"status={status} {payload}")
 
@@ -132,6 +147,26 @@ def main():
         check("comment moment", status == 201, f"status={status} {payload}")
         status, payload = request("GET", "/moments", token=nusa)
         check("moments feed", status == 200 and any(m["id"] == moment_id for m in payload["data"]["moments"]), f"status={status}")
+        status, payload = request("POST", "/moments/create", {"body": "Momen video", "media": ["https://example.com/v.mp4"]}, token=nusa)
+        check("video moment", status == 201 and payload["data"]["moment"]["media"] == ["https://example.com/v.mp4"], f"status={status} {payload}")
+        status, payload = request("POST", "/moments/reshare", {"id": moment_id}, token=sari)
+        reshare_ok = status == 201 and payload["data"]["moment"]["reshared"] and payload["data"]["moment"]["reshared"]["moment_id"] == moment_id
+        check("reshare moment", reshare_ok, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/reshare", {"id": 999999}, token=sari)
+        check("reshare unknown", status == 404, f"status={status} {payload}")
+
+        status, payload = request("POST", "/moments/story_create", {"body": "Story smoke"}, token=nusa)
+        check("story create", status == 201 and payload["data"]["story"]["expires_at"], f"status={status} {payload}")
+        story_id = payload.get("data", {}).get("story", {}).get("id")
+        if story_id:
+            status, payload = request("GET", "/moments/stories", token=sari)
+            check("stories feed", status == 200 and any(s["id"] == story_id for s in payload["data"]["stories"]), f"status={status}")
+            status, payload = request("POST", "/moments/story_delete", {"id": story_id}, token=sari)
+            check("story delete foreign", status == 404, f"status={status} {payload}")
+            status, payload = request("POST", "/moments/story_delete", {"id": story_id}, token=nusa)
+            check("story delete", status == 200, f"status={status} {payload}")
+            status, payload = request("GET", "/moments/stories", token=sari)
+            check("story gone", status == 200 and all(s["id"] != story_id for s in payload["data"]["stories"]), f"status={status}")
 
     # Tiny valid PNG (1x1).
     png = base64.b64decode(
@@ -179,6 +214,267 @@ def main():
             check("send to new user", status == 201, f"status={status} {payload}")
             status, payload = request("GET", f"/conversations/messages?id={new_conv}", token=new_token)
             check("new user receives", status == 200 and len(payload["data"]["messages"]) == 1, f"status={status} {payload}")
+            status, payload = request("GET", f"/conversations/show?id={new_conv}", token=nusa)
+            member_ids = [m["id"] for m in payload.get("data", {}).get("conversation", {}).get("members", [])] if payload.get("ok") else []
+            check("direct show has members", status == 200 and set(member_ids) == {1, new_id}, f"status={status} {payload}")
+            wrapped = base64.b64encode(b"k" * 32).decode()
+            status, payload = request("POST", "/conversations/set_keys", {"id": new_conv, "keys": [{"user_id": new_id, "wrapped_key": wrapped}]}, token=nusa)
+            check("set_keys stored", status == 201 and payload.get("data", {}).get("stored") == 1, f"status={status} {payload}")
+            status, payload = request("GET", f"/conversations/keys?id={new_conv}", token=new_token)
+            check("keys round-trip", status == 200 and payload.get("data", {}).get("my_key") == wrapped, f"status={status} {payload}")
+            # Multi-device: blob per device_id, bukan per user.
+            wrapped_b = base64.b64encode(b"b" * 32).decode()
+            status, payload = request("POST", "/conversations/set_keys", {"id": new_conv, "keys": [{"user_id": new_id, "device_id": "dev-B", "wrapped_key": wrapped_b}]}, token=nusa)
+            check("set_keys per device", status == 201 and payload.get("data", {}).get("stored") == 1, f"status={status} {payload}")
+            status, payload = request("GET", f"/conversations/keys?id={new_conv}&device_id=dev-B", token=new_token)
+            check("keys per device round-trip", status == 200 and payload.get("data", {}).get("my_key") == wrapped_b, f"status={status} {payload}")
+            status, payload = request("GET", f"/conversations/keys?id={new_conv}&device_id=dev-C", token=new_token)
+            check("keys unknown device empty", status == 200 and payload.get("data", {}).get("my_key") is None, f"status={status} {payload}")
+            devs = payload.get("data", {}).get("devices", [])
+            check("keys devices listed", any(d.get("device_id") == "dev-B" for d in devs), f"status={status} {payload}")
+
+            status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": f"Halo @{username} apa kabar"}, token=nusa)
+            mention_ok = status == 201 and payload["data"]["message"]["mentions"] == [new_id]
+            check("mention resolved", mention_ok, f"status={status} {payload}")
+            mention_msg = payload.get("data", {}).get("message", {}).get("id") if status == 201 else None
+
+            if mention_msg:
+                status, payload = request("POST", "/messages/edit", {"message_id": mention_msg, "body": "Halo, apa kabar?"}, token=nusa)
+                check("edit own message", status == 200 and payload["data"]["message"]["body"] == "Halo, apa kabar?" and payload["data"]["message"]["edited_at"], f"status={status} {payload}")
+                status, payload = request("POST", "/messages/edit", {"message_id": mention_msg, "body": "diubah orang lain"}, token=new_token)
+                check("edit others forbidden", status == 403, f"status={status} {payload}")
+
+                status, payload = request("POST", "/messages/react", {"message_id": mention_msg, "emoji": "👍"}, token=new_token)
+                check("react added", status == 200 and payload["data"]["action"] == "added", f"status={status} {payload}")
+                status, payload = request("POST", "/messages/react", {"message_id": mention_msg, "emoji": "👍"}, token=new_token)
+                check("react toggled off", status == 200 and payload["data"]["action"] == "removed", f"status={status} {payload}")
+                status, payload = request("POST", "/messages/react", {"message_id": mention_msg, "emoji": "❤️"}, token=nusa)
+                react_ok = status == 200 and any(r["emoji"] == "❤️" and r["count"] == 1 for r in payload["data"]["reactions"])
+                check("react summary", react_ok, f"status={status} {payload}")
+
+                status, payload = request("POST", "/conversations/forward", {"message_id": mention_msg, "to_id": new_conv}, token=nusa)
+                fwd_ok = status == 201 and payload["data"]["message"]["forwarded"] is True
+                check("forward message", fwd_ok, f"status={status} {payload}")
+
+                status, payload = request("GET", f"/conversations/search?id={new_conv}&q=Halo", token=new_token)
+                check("search messages", status == 200 and any(m["id"] == mention_msg for m in payload["data"]["messages"]), f"status={status} {payload}")
+                status, payload = request("GET", f"/conversations/search?id={new_conv}&q=x", token=new_token)
+                check("search too short", status == 422, f"status={status} {payload}")
+
+                status, payload = request("POST", "/conversations/pin", {"id": new_conv, "message_id": mention_msg}, token=nusa)
+                check("pin message", status == 200 and any(p["message"]["id"] == mention_msg for p in payload["data"]["pins"]), f"status={status} {payload}")
+                status, payload = request("GET", f"/conversations/pins?id={new_conv}", token=new_token)
+                check("list pins", status == 200 and any(p["message"]["id"] == mention_msg for p in payload["data"]["pins"]), f"status={status} {payload}")
+                status, payload = request("POST", "/conversations/unpin", {"id": new_conv, "message_id": mention_msg}, token=nusa)
+                check("unpin message", status == 200 and payload["data"]["pins"] == [], f"status={status} {payload}")
+
+            status, payload = request("POST", "/conversations/archive", {"id": new_conv, "archived": True}, token=nusa)
+            check("archive conversation", status == 200 and payload["data"]["archived"] is True, f"status={status} {payload}")
+            status, payload = request("GET", "/conversations", token=nusa)
+            check("archived hidden", status == 200 and all(c["id"] != new_conv for c in payload["data"]["conversations"]), f"status={status}")
+            status, payload = request("GET", "/conversations?archived=1", token=nusa)
+            check("archived listed", status == 200 and any(c["id"] == new_conv for c in payload["data"]["conversations"]), f"status={status} {payload}")
+            status, payload = request("POST", "/conversations/archive", {"id": new_conv, "archived": False}, token=nusa)
+            check("unarchive conversation", status == 200 and payload["data"]["archived"] is False, f"status={status} {payload}")
+
+        # Grup: invite link, persetujuan, dan role admin.
+        budi = login("budi")
+        dewi = login("dewi")
+        _, me_budi = request("GET", "/users/me", token=budi)
+        budi_id = me_budi["data"]["user"]["id"]
+        status, payload = request("POST", "/conversations/create_group", {"title": "Smoke Group", "member_ids": [2]}, token=nusa)
+        check("create group", status == 201, f"status={status} {payload}")
+        group_id = payload.get("data", {}).get("conversation", {}).get("id")
+        if group_id:
+            status, payload = request("POST", "/conversations/invite", {"id": group_id}, token=nusa)
+            token_ok = status == 200 and len(payload["data"]["invite_token"]) >= 16
+            check("invite link", token_ok, f"status={status} {payload}")
+            invite_token = payload.get("data", {}).get("invite_token", "")
+            status, payload = request("POST", "/conversations/invite", {"id": group_id, "rotate": True}, token=nusa)
+            rotated = status == 200 and payload["data"]["invite_token"] != invite_token
+            check("rotate invite", rotated, f"status={status} {payload}")
+            invite_token = payload.get("data", {}).get("invite_token", invite_token)
+            status, payload = request("POST", "/conversations/join", {"token": "nusachat://group/" + invite_token}, token=budi)
+            check("join via link", status == 201 and payload["data"]["status"] == "joined", f"status={status} {payload}")
+
+            status, payload = request("POST", "/conversations/update_group_settings", {"id": group_id, "approve_new_members": True}, token=nusa)
+            check("enable approval", status == 200 and payload["data"]["settings"]["approve_new_members"] is True, f"status={status} {payload}")
+            status, payload = request("POST", "/conversations/join", {"token": invite_token}, token=dewi)
+            check("join pending", status == 202 and payload["data"]["status"] == "pending", f"status={status} {payload}")
+            req_id = payload.get("data", {}).get("request_id")
+            status, payload = request("GET", f"/conversations/join_requests?id={group_id}", token=nusa)
+            check("list join requests", status == 200 and any(r["request_id"] == req_id for r in payload["data"]["requests"]), f"status={status} {payload}")
+            status, payload = request("POST", "/conversations/review_request", {"request_id": req_id, "action": "approve"}, token=dewi)
+            check("review by non-admin forbidden", status == 403, f"status={status} {payload}")
+            status, payload = request("POST", "/conversations/review_request", {"request_id": req_id, "action": "approve"}, token=nusa)
+            check("approve join", status == 200 and payload["data"]["status"] == "approved", f"status={status} {payload}")
+            status, payload = request("GET", "/conversations", token=dewi)
+            check("approved user is member", status == 200 and any(c["id"] == group_id for c in payload["data"]["conversations"]), f"status={status} {payload}")
+
+            status, payload = request("POST", "/conversations/set_role", {"id": group_id, "user_id": 2, "role": "admin"}, token=nusa)
+            check("promote admin", status == 200 and payload["data"]["role"] == "admin", f"status={status} {payload}")
+            status, payload = request("POST", "/conversations/remove_member", {"id": group_id, "user_id": budi_id}, token=sari)
+            check("admin removes member", status == 200, f"status={status} {payload}")
+            status, payload = request("POST", "/conversations/remove_member", {"id": group_id, "user_id": 1}, token=sari)
+            check("admin cannot remove owner", status == 403, f"status={status} {payload}")
+            status, payload = request("POST", "/conversations/set_role", {"id": group_id, "user_id": 2, "role": "member"}, token=sari)
+            check("admin cannot set roles", status == 403, f"status={status} {payload}")
+            status, payload = request("POST", "/conversations/set_role", {"id": group_id, "user_id": 2, "role": "member"}, token=nusa)
+            check("demote admin", status == 200, f"status={status} {payload}")
+
+            status, payload = request("POST", "/conversations/update_group_settings", {"id": group_id, "invite_link_enabled": False}, token=nusa)
+            check("disable invite", status == 200, f"status={status} {payload}")
+            status, payload = request("POST", "/conversations/join", {"token": invite_token}, token=budi)
+            check("join disabled link", status == 403, f"status={status} {payload}")
+
+        # Panggilan: voice 1-1 + room grup (video call dihapus).
+        fake_sdp = "v=0\r\no=smoke 1 1 IN IP4 127.0.0.1\r\ns=smoke\r\nt=0 0\r\n"
+        status, payload = request("POST", "/calls/offer", {"to_user_id": 2, "sdp": fake_sdp, "kind": "video"}, token=nusa)
+        check("video offer rejected", status == 403 and payload.get("error", {}).get("code") == "video_disabled", f"status={status} {payload}")
+        status, payload = request("POST", "/calls/offer", {"to_user_id": 2, "sdp": fake_sdp, "kind": "audio"}, token=nusa)
+        check("audio offer", status == 201 and payload["data"]["call"]["kind"] == "audio", f"status={status} {payload}")
+        call_id = payload.get("data", {}).get("call", {}).get("id")
+        status, payload = request("POST", "/calls/offer", {"to_user_id": 2, "sdp": fake_sdp, "kind": "hologram"}, token=nusa)
+        check("invalid kind rejected", status == 422, f"status={status} {payload}")
+        if call_id:
+            status, payload = request("GET", "/calls/incoming", token=sari)
+            check("callee sees incoming", status == 200 and any(c["id"] == call_id for c in payload["data"]["calls"]), f"status={status} {payload}")
+            status, payload = request("POST", "/calls/answer", {"call_id": call_id, "sdp": fake_sdp}, token=sari)
+            check("answer call", status == 200 and payload["data"]["call"]["status"] == "active", f"status={status} {payload}")
+            status, payload = request("POST", "/calls/ice", {"call_id": call_id, "candidate": {"candidate": "a", "sdpMid": "0", "sdpMLineIndex": 0}}, token=nusa)
+            check("1-1 ice relay", status == 200 and payload["data"]["sent"] is True, f"status={status} {payload}")
+            status, payload = request("POST", "/calls/end", {"call_id": call_id}, token=nusa)
+            check("end call", status == 200 and payload["data"]["call"]["status"] == "ended", f"status={status} {payload}")
+            status, payload = request("GET", "/calls/ice_servers", token=nusa)
+            servers = payload.get("data", {}).get("iceServers", []) if payload.get("ok") else []
+            urls = [u for s in servers if isinstance(s, dict) for u in (s.get("urls") or []) if isinstance(u, str)]
+            check("ice_servers cloudflare", status == 200 and any("cloudflare" in u for u in urls), f"status={status} {payload}")
+            dump = json.dumps(payload)
+            check("api token not leaked", "api_token" not in dump and "TURN_API_TOKEN" not in dump, "token leaked in response")
+
+        status, payload = request("POST", "/conversations/create_group", {"title": "Smoke Call Group", "member_ids": [2, budi_id]}, token=nusa)
+        check("call group created", status == 201, f"status={status} {payload}")
+        call_group = payload.get("data", {}).get("conversation", {}).get("id")
+        if call_group:
+            status, payload = request("POST", "/calls/room_create", {"conversation_id": call_group, "kind": "audio"}, token=nusa)
+            check("room created", status == 201 and payload["data"]["reused"] is False, f"status={status} {payload}")
+            room_id = payload.get("data", {}).get("call", {}).get("id")
+            status, payload = request("POST", "/calls/room_create", {"conversation_id": call_group}, token=budi)
+            check("room reused", status == 200 and payload["data"]["reused"] is True and payload["data"]["call"]["id"] == room_id, f"status={status} {payload}")
+            status, payload = request("GET", f"/calls/room_state?call_id={room_id}", token=sari)
+            check("room state", status == 200 and any(p["user"]["id"] == 1 for p in payload["data"]["participants"]), f"status={status} {payload}")
+            status, payload = request("POST", "/calls/room_join", {"call_id": room_id}, token=sari)
+            check("room join", status == 200 and payload["data"]["call"]["status"] == "active", f"status={status} {payload}")
+            status, payload = request("POST", "/calls/room_signal", {"call_id": room_id, "to_user_id": 1, "sdp": fake_sdp, "signal": "offer"}, token=sari)
+            check("room sdp relay", status == 200 and payload["data"]["sent"] is True, f"status={status} {payload}")
+            status, payload = request("POST", "/calls/room_signal", {"call_id": room_id, "to_user_id": 1, "sdp": fake_sdp, "signal": "ring"}, token=sari)
+            check("room bad signal rejected", status == 422, f"status={status} {payload}")
+            status, payload = request("POST", "/calls/ice", {"call_id": room_id, "candidate": {"candidate": "b", "sdpMid": "0", "sdpMLineIndex": 0}, "to_user_id": 1}, token=sari)
+            check("room ice routed", status == 200, f"status={status} {payload}")
+            status, payload = request("POST", "/calls/ice", {"call_id": room_id, "candidate": {"candidate": "b"}}, token=sari)
+            check("room ice needs target", status == 422, f"status={status} {payload}")
+            status, payload = request("POST", "/calls/room_join", {"call_id": room_id}, token=new_token)
+            check("non-member cannot join", status == 403, f"status={status} {payload}")
+            status, payload = request("POST", "/calls/room_leave", {"call_id": room_id}, token=sari)
+            check("leave keeps room", status == 200 and payload["data"]["ended"] is False, f"status={status} {payload}")
+            status, payload = request("GET", "/calls/incoming", token=budi)
+            check("room listed incoming", status == 200 and any(r["id"] == room_id for r in payload["data"]["rooms"]), f"status={status} {payload}")
+            status, payload = request("POST", "/calls/room_leave", {"call_id": room_id}, token=budi)
+            check("second leave keeps room", status == 200 and payload["data"]["ended"] is False, f"status={status} {payload}")
+            status, payload = request("POST", "/calls/room_leave", {"call_id": room_id}, token=nusa)
+            check("last leave ends room", status == 200 and payload["data"]["ended"] is True, f"status={status} {payload}")
+            status, payload = request("POST", "/calls/room_join", {"call_id": room_id}, token=sari)
+            check("cannot join ended room", status == 422, f"status={status} {payload}")
+
+        # Blokir: nusa memblokir user smoke baru (new_id/new_token masih hidup).
+        status, payload = request("POST", "/friends/block", {"user_id": new_id}, token=nusa)
+        check("block user", status == 200 and payload["data"]["blocked"] is True, f"status={status} {payload}")
+        status, payload = request("GET", "/friends/blocked", token=nusa)
+        check("blocked list", status == 200 and any(u["id"] == new_id for u in payload["data"]["users"]), f"status={status} {payload}")
+        status, payload = request("POST", "/friends/send", {"user_id": new_id}, token=nusa)
+        check("send to blocked fails", status == 403, f"status={status} {payload}")
+        status, payload = request("POST", "/friends/send", {"user_id": 1}, token=new_token)
+        check("blocked sees nothing", status == 404, f"status={status} {payload}")
+        status, payload = request("GET", f"/users/show?id={new_id}", token=nusa)
+        check("show blocked hidden", status == 404, f"status={status} {payload}")
+        status, payload = request("GET", "/users/show?id=1", token=new_token)
+        check("show blocker hidden", status == 404, f"status={status} {payload}")
+        status, payload = request("GET", "/users/search?q=" + username, token=nusa)
+        check("search hides blocked", status == 200 and all(u["id"] != new_id for u in payload["data"]["users"]), f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": "harusnya gagal"}, token=nusa)
+        check("send to blocked conv fails", status == 403, f"status={status} {payload}")
+        status, payload = request("POST", "/calls/offer", {"to_user_id": new_id, "sdp": fake_sdp}, token=nusa)
+        check("call to blocked fails", status == 403, f"status={status} {payload}")
+        status, payload = request("POST", "/calls/offer", {"to_user_id": 1, "sdp": fake_sdp}, token=new_token)
+        check("blocked caller hidden", status == 404, f"status={status} {payload}")
+        status, payload = request("GET", "/friends", token=nusa)
+        check("friends flag blocked", status == 200 and any(f["id"] == new_id and f.get("blocked_by_me") is True for f in payload["data"]["friends"]), f"status={status} {payload}")
+        status, payload = request("POST", "/friends/unblock", {"user_id": new_id}, token=nusa)
+        check("unblock user", status == 200 and payload["data"]["blocked"] is False, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": "Setelah buka blokir"}, token=nusa)
+        check("send after unblock", status == 201, f"status={status} {payload}")
+        _, me_nusa = request("GET", "/users/me", token=nusa)
+        nusa_id = me_nusa["data"]["user"]["id"]
+        status, payload = request("POST", "/friends/block", {"user_id": nusa_id}, token=nusa)
+        check("cannot block self", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/friends/block", {"user_id": 999999}, token=nusa)
+        check("block unknown user", status == 404, f"status={status} {payload}")
+        status, payload = request("POST", "/friends/unblock", {"user_id": new_id}, token=nusa)
+        check("cleanup unblock", status == 200, f"status={status} {payload}")
+
+        # Hapus akun: user khusus yang didaftarkan lalu dihapus.
+        del_name = "del" + uuid.uuid4().hex[:8]
+        status, payload = request("POST", "/auth/register", {"username": del_name, "password": "secret123", "display_name": "Hapus Saya"})
+        check("register deletable", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/login", {"login": del_name, "password": "secret123", "device": "smoke"})
+        check("login deletable", status == 200, f"status={status} {payload}")
+        del_token = payload.get("data", {}).get("auth", {}).get("access_token")
+        status, payload = request("POST", "/users/delete", {"password": "salah"}, token=del_token)
+        check("delete wrong password", status == 401, f"status={status} {payload}")
+        status, payload = request("POST", "/users/delete", {"password": "secret123"}, token=del_token)
+        check("delete account", status == 200 and payload["data"]["deleted"] is True, f"status={status} {payload}")
+
+        # Kunci E2EE: blob opaque round-trip + proteksi member.
+        fake_pub = base64.b64encode(b"\x30" + b"A" * 100).decode()
+        fake_wrap = base64.b64encode(b"W" * 64).decode()
+        status, payload = request("POST", "/users/device_key", {"device_id": "smoke-dev", "public_key": fake_pub}, token=nusa)
+        check("publish device key", status == 201, f"status={status} {payload}")
+        status, payload = request("GET", "/users/device_keys?user_id=1", token=sari)
+        check("read device keys", status == 200 and any(k["public_key"] == fake_pub for k in payload["data"]["keys"]), f"status={status} {payload}")
+        status, payload = request("POST", "/users/device_key", {"device_id": "x", "public_key": "bukan-base64!!!"}, token=nusa)
+        check("bad public key rejected", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/set_keys", {"id": new_conv, "keys": [{"user_id": new_id, "wrapped_key": fake_wrap}]}, token=nusa)
+        check("store wrapped keys", status == 201 and payload["data"]["stored"] == 1, f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/keys?id={new_conv}", token=new_token)
+        check("read my wrapped key", status == 200 and payload["data"]["my_key"] == fake_wrap, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/set_keys", {"id": new_conv, "keys": [{"user_id": 1, "wrapped_key": fake_wrap}]}, token=budi)
+        check("non-member cannot set keys", status == 404, f"status={status} {payload}")
+
+        # Dompet: topup, transfer, riwayat, batas.
+        status, payload = request("GET", "/wallet", token=nusa)
+        nusa_start = payload["data"]["balance"] if status == 200 else 0
+        check("wallet balance", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/topup", {"amount": 50000}, token=nusa)
+        check("wallet topup", status == 201 and payload["data"]["balance"] == nusa_start + 50000, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/transfer", {"to_user_id": 2, "amount": 10000, "note": "Traktir"}, token=nusa)
+        check("wallet transfer", status == 201 and payload["data"]["balance"] == nusa_start + 40000, f"status={status} {payload}")
+        status, payload = request("GET", "/wallet", token=sari)
+        check("recipient credited", status == 200 and payload["data"]["balance"] >= 10000, f"status={status} {payload}")
+        status, payload = request("GET", "/wallet/history", token=nusa)
+        hist_ok = status == 200 and any(t["kind"] == "transfer" and t["amount"] == 10000 for t in payload["data"]["transactions"])
+        check("wallet history", hist_ok, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/transfer", {"to_user_id": 2, "amount": 9000000}, token=nusa)
+        check("overdraft rejected", status == 422 and payload["error"]["code"] == "insufficient_balance", f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/transfer", {"to_user_id": 1, "amount": 100}, token=nusa)
+        check("self transfer rejected", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/transfer", {"to_user_id": 999999, "amount": 100}, token=nusa)
+        check("transfer unknown user", status == 404, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/topup", {"amount": 0}, token=nusa)
+        check("zero topup rejected", status == 422, f"status={status} {payload}")
+        status, payload = request("GET", "/users/me", token=del_token)
+        check("token dead after delete", status == 401, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/login", {"login": del_name, "password": "secret123", "device": "smoke"})
+        check("login dead after delete", status in (401, 403), f"status={status} {payload}")
 
         status, payload = request("POST", "/auth/logout", {}, token=new_token)
         check("logout", status == 200, f"status={status} {payload}")

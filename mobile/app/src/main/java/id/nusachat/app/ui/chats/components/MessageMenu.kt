@@ -46,7 +46,12 @@ import id.nusachat.app.ui.theme.NusaIcons
 fun MessageMenuContent(
     message: Message,
     mine: Boolean,
+    pinned: Boolean = false,
     onReply: (Message) -> Unit,
+    onEdit: (Message) -> Unit = {},
+    onForward: (Message) -> Unit = {},
+    onReact: (Message, String) -> Unit = { _, _ -> },
+    onPin: (Message) -> Unit = {},
     onRevoke: (Message) -> Unit,
     onRetry: () -> Unit,
     onShowInfo: (Message) -> Unit,
@@ -65,9 +70,12 @@ fun MessageMenuContent(
         label = "menu-fade",
     )
     val copyText = messageCopyText(message)
-    val canRevoke = mine && !message.revoked && message.id > 0 && message.status != "failed"
+    val usable = !message.revoked && message.id > 0 && message.status != "failed"
+    val canRevoke = mine && usable
+    val canEdit = mine && usable && message.type == "text" && !message.body.isNullOrBlank()
     val canRetry = message.status == "failed" && message.clientId != null
     val clipboard = LocalClipboardManager.current
+    val quickEmojis = listOf("👍", "❤️", "😂", "😮", "😢")
 
     Column(
         modifier = Modifier
@@ -83,11 +91,50 @@ fun MessageMenuContent(
                 )
             },
     ) {
+        if (usable) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                quickEmojis.forEach { emoji ->
+                    Text(
+                        text = emoji,
+                        fontSize = 24.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onReact(message, emoji) }
+                            .padding(vertical = 2.dp),
+                    )
+                }
+            }
+        }
         MessageMenuRow(
             label = "Balas",
             icon = NusaIcons.Reply,
             onClick = { onReply(message) },
         )
+        if (canEdit) {
+            MessageMenuRow(
+                label = "Edit",
+                icon = NusaIcons.Edit,
+                onClick = { onEdit(message) },
+            )
+        }
+        if (usable) {
+            MessageMenuRow(
+                label = "Teruskan",
+                icon = NusaIcons.Forward,
+                onClick = { onForward(message) },
+            )
+            MessageMenuRow(
+                label = if (pinned) "Lepas sematan" else "Sematkan",
+                icon = NusaIcons.Pin,
+                onClick = { onPin(message) },
+            )
+        }
         if (copyText != null) {
             MessageMenuRow(
                 label = "Salin",

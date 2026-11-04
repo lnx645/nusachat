@@ -199,7 +199,104 @@ def main():
     ))
     check("message event", event["type"] == "message", str(event)[:300])
 
+    # Call handshake: offer/answer/ICE must reach the peer intact and in
+    # order. The mobile client queues remote ICE until the remote SDP is
+    # applied, so every candidate delivered here must arrive unmodified.
+    _, me = http("GET", "/users/me", token=sari)
+    sari_id = me["data"]["user"]["id"]
+    ws_sari = WebSocket(WS_URL, sari)
+    ws_sari.read_json(predicate=lambda e: e.get("type") == "connected")
+
+    sdp_offer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=smoke-offer\r\nt=0 0\r\n"
+    status, payload = http("POST", "/calls/offer", {
+        "to_user_id": sari_id, "sdp": sdp_offer, "kind": "audio",
+    }, token=nusa)
+    check("call offer", status == 201 and payload.get("ok"), f"status={status} {payload}")
+    call_id = payload["data"]["call"]["id"]
+    offer_ev = ws_sari.read_json(predicate=lambda e: (
+        e.get("type") == "call_offer" and e.get("data", {}).get("call", {}).get("id") == call_id
+    ))
+    check("call_offer event", offer_ev["data"].get("sdp") == sdp_offer, str(offer_ev)[:200])
+
+    sdp_answer = "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=smoke-answer\r\nt=0 0\r\n"
+    status, payload = http("POST", "/calls/answer", {
+        "call_id": call_id, "sdp": sdp_answer,
+    }, token=sari)
+    check("call answer", status == 200 and payload.get("ok"), f"status={status} {payload}")
+    answer_ev = ws.read_json(predicate=lambda e: (
+        e.get("type") == "call_answer" and e.get("data", {}).get("call", {}).get("id") == call_id
+    ))
+    check("call_answer event", answer_ev["data"].get("sdp") == sdp_answer, str(answer_ev)[:200])
+
+    cand = {
+        "candidate": "candidate:1 1 udp 2113937151 192.168.70.92 5000 typ host",
+        "sdpMid": "0",
+        "sdpMLineIndex": 0,
+    }
+    status, payload = http("POST", "/calls/ice", {
+        "call_id": call_id, "candidate": cand,
+    }, token=nusa)
+    check("call ice send", status == 200 and payload.get("ok"), f"status={status} {payload}")
+    ice_ev = ws_sari.read_json(predicate=lambda e: (
+        e.get("type") == "call_ice" and e.get("data", {}).get("call", {}).get("id") == call_id
+    ))
+    got = ice_ev["data"].get("candidate", {})
+    check("call_ice intact", got == cand, str(ice_ev)[:200])
+
+    status, payload = http("POST", "/calls/end", {"call_id": call_id}, token=nusa)
+    check("call end", status == 200 and payload.get("ok"), f"status={status} {payload}")
+
+    # Live nearby via Erlang (no PHP polling): location.update answers
+    # nearby.result, later updates push nearby.changed to subscribers.
+    # Requires the Erlang gateway (8091); skipped on the PHP fallback.
+    if "8091" in WS_URL:
+        run_nearby_live_checks(nusa, sari)
+
+    ws_sari.close()
     ws.close()
+    return finish()
+
+
+def run_nearby_live_checks(nusa, sari):
+    ws_n = WebSocket(WS_URL, nusa)
+    ws_n.read_json(predicate=lambda e: e.get("type") == "connected")
+    ws_n.send_text(json.dumps({"type": "location.update", "data": {"lat": -6.2, "lng": 106.816, "radius": 50}}))
+    result = ws_n.read_json(predicate=lambda e: e.get("type") in ("nearby.result", "nearby.error"))
+    check("nearby.result live", result.get("type") == "nearby.result" and result.get("data", {}).get("live") is True, str(result)[:200])
+    ws_s = WebSocket(WS_URL, sari)
+    ws_s.read_json(predicate=lambda e: e.get("type") == "connected")
+    ws_s.send_text(json.dumps({"type": "location.update", "data": {"lat": -6.201, "lng": 106.817, "radius": 50}}))
+    result_s = ws_s.read_json(predicate=lambda e: e.get("type") in ("nearby.result", "nearby.error"))
+    seen = [u.get("username") for u in result_s.get("data", {}).get("users", [])]
+    check("nearby sees peer", "nusa" in seen, str(seen))
+    changed = ws_n.read_json(predicate=lambda e: e.get("type") == "nearby.changed")
+    check("nearby.changed push", changed.get("data", {}).get("user", {}).get("username") == "sari", str(changed)[:200])
+    ws_n.send_text(json.dumps({"type": "location.update", "data": {"lat": 500, "lng": 10}}))
+    err = ws_n.read_json(predicate=lambda e: e.get("type") == "nearby.error")
+    check("nearby rejects bad coords", err.get("data", {}).get("code") == "invalid_location", str(err)[:200])
+    # Regression: multi-candidate sort (crashed when >1 candidate in radius).
+    budi = login("budi")
+    ws_b = WebSocket(WS_URL, budi)
+    ws_b.read_json(predicate=lambda e: e.get("type") == "connected")
+    ws_b.send_text(json.dumps({"type": "location.update", "data": {"lat": -6.2005, "lng": 106.8165, "radius": 50}}))
+    result_b = ws_b.read_json(predicate=lambda e: e.get("type") in ("nearby.result", "nearby.error"))
+    users_b = result_b.get("data", {}).get("users", [])
+    dists = [u.get("distance_km") for u in users_b]
+    check(
+        "nearby multi sorted",
+        result_b.get("type") == "nearby.result" and len(users_b) >= 2
+        and all(isinstance(d, (int, float)) for d in dists)
+        and dists == sorted(dists),
+        f"n={len(users_b)} dists={dists}",
+    )
+    ws_b.send_text(json.dumps({"type": "nearby.unsubscribe"}))
+    ws_b.close()
+    ws_n.send_text(json.dumps({"type": "nearby.unsubscribe"}))
+    ws_s.close()
+    ws_n.close()
+
+
+def finish():
     print()
     print(f"{checks - len(failures)}/{checks} checks passed")
     if failures:

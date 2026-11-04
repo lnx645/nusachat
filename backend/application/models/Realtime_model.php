@@ -22,14 +22,17 @@ class Realtime_model extends CI_Model
         }
         $payload = json_encode(['type' => $type, 'data' => $data], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $now = now_iso();
+        $events = [];
         foreach ($ids as $userId) {
-            $this->store->insert('realtime_events', [
+            $id = $this->store->insert('realtime_events', [
                 'user_id' => $userId,
                 'type' => $type,
                 'payload' => $payload,
                 'created_at' => $now,
             ]);
+            $events[] = ['id' => $id, 'user_id' => $userId, 'payload' => $payload, 'created_at' => $now];
         }
+        realtime_notify($events);
     }
 
     public function since(int $lastId, int $limit = 200): array

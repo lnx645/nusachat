@@ -20,6 +20,50 @@ data class User(
     val requestDirection: String? = null,
     val distanceKm: Double? = null,
     val conversationId: Long? = null,
+    val friendCount: Int = 0,
+    val role: String? = null,
+    val blockedByMe: Boolean = false,
+)
+
+data class GroupJoinRequest(
+    val requestId: Long,
+    val conversationId: Long = 0L,
+    val status: String = "pending",
+    val createdAt: String = "",
+    val user: User,
+)
+
+data class DeviceKey(
+    val deviceId: String,
+    val publicKey: String,
+)
+
+data class KeyHolder(
+    val userId: Long,
+    val deviceId: String,
+    val keyFp: String = "",
+)
+
+data class ConvKeys(
+    val myKey: String?,
+    val holders: List<Long>,
+    val devices: List<KeyHolder> = emptyList(),
+)
+
+data class WalletTxn(
+    val id: Long,
+    val kind: String,
+    val amount: Long,
+    val direction: String,
+    val note: String? = null,
+    val peerName: String? = null,
+    val createdAt: String = "",
+)
+
+data class Reaction(
+    val emoji: String,
+    val count: Int = 0,
+    val reactedByMe: Boolean = false,
 )
 
 data class Message(
@@ -38,6 +82,18 @@ data class Message(
     val replyToId: Long? = null,
     val lat: Double? = null,
     val lng: Double? = null,
+    val editedAt: String? = null,
+    val forwarded: Boolean = false,
+    val forwardedFromId: Long? = null,
+    val mentions: List<Long> = emptyList(),
+    val mentionedMe: Boolean = false,
+    val reactions: List<Reaction> = emptyList(),
+)
+
+data class PinnedMessage(
+    val message: Message,
+    val pinnedBy: Long = 0L,
+    val pinnedAt: String? = null,
 )
 
 data class Conversation(
@@ -54,6 +110,8 @@ data class Conversation(
     val createdBy: Long = 0L,
     val myRole: String = "member",
     val muted: Boolean = false,
+    val archived: Boolean = false,
+    val inviteToken: String? = null,
     val onlyAdminsCanSend: Boolean = false,
     val onlyAdminsCanEdit: Boolean = false,
     val onlyAdminsCanAdd: Boolean = false,
@@ -73,7 +131,22 @@ data class Moment(
     val likeCount: Int,
     val commentCount: Int,
     val likedByMe: Boolean,
+    val reshared: ResharedInfo? = null,
     val createdAt: String,
+)
+
+data class ResharedInfo(
+    val momentId: Long,
+    val author: User? = null,
+)
+
+data class Story(
+    val id: Long,
+    val author: User,
+    val body: String,
+    val media: List<String>,
+    val createdAt: String,
+    val expiresAt: String,
 )
 
 data class MomentComment(
@@ -81,6 +154,10 @@ data class MomentComment(
     val body: String,
     val createdAt: String,
     val user: User,
+    val parentId: Long? = null,
+    val replyToUserId: Long? = null,
+    val replyToDisplayName: String? = null,
+    val replyToUsername: String? = null,
 )
 
 data class FriendRequest(
@@ -123,6 +200,34 @@ internal fun JSONObject.toUser(): User = User(
     requestDirection = stringOrNull("request_direction"),
     distanceKm = if (has("distance_km") && !isNull("distance_km")) optDouble("distance_km") else null,
     conversationId = longOrNull("conversation_id"),
+    friendCount = optInt("friend_count", 0),
+    role = stringOrNull("role"),
+    blockedByMe = optBoolean("blocked_by_me", false),
+)
+
+internal fun JSONObject.toWalletTxn(): WalletTxn {
+    val peer = if (optString("direction") == "out") {
+        optJSONObject("to")
+    } else {
+        optJSONObject("from")
+    }
+    return WalletTxn(
+        id = optLong("id"),
+        kind = optString("kind"),
+        amount = optLong("amount"),
+        direction = optString("direction"),
+        note = stringOrNull("note"),
+        peerName = peer?.optString("display_name"),
+        createdAt = optString("created_at"),
+    )
+}
+
+internal fun JSONObject.toGroupJoinRequest(conversationId: Long = 0L): GroupJoinRequest = GroupJoinRequest(
+    requestId = optLong("request_id"),
+    conversationId = conversationId,
+    status = optString("status", "pending"),
+    createdAt = optString("created_at"),
+    user = optJSONObject("user")?.toUser() ?: User(0, "", "Pengguna"),
 )
 
 internal fun User.toJson(): JSONObject = JSONObject()
@@ -148,6 +253,26 @@ internal fun JSONObject.toMessage(): Message {
         has("lng") && !isNull("lng") -> optDouble("lng")
         else -> null
     }
+    val mentions = mutableListOf<Long>()
+    optJSONArray("mentions")?.let { array ->
+        for (i in 0 until array.length()) {
+            mentions.add(array.optLong(i))
+        }
+    }
+    val reactions = mutableListOf<Reaction>()
+    optJSONArray("reactions")?.let { array ->
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let {
+                reactions.add(
+                    Reaction(
+                        emoji = it.optString("emoji"),
+                        count = it.optInt("count", 0),
+                        reactedByMe = it.optBoolean("reacted_by_me", false),
+                    )
+                )
+            }
+        }
+    }
     return Message(
         id = optLong("id"),
         uuid = optString("uuid"),
@@ -163,8 +288,20 @@ internal fun JSONObject.toMessage(): Message {
         replyToId = longOrNull("reply_to_id"),
         lat = lat,
         lng = lng,
+        editedAt = stringOrNull("edited_at"),
+        forwarded = optBoolean("forwarded", false),
+        forwardedFromId = longOrNull("forwarded_from_id"),
+        mentions = mentions,
+        mentionedMe = optBoolean("mentioned_me", false),
+        reactions = reactions,
     )
 }
+
+internal fun JSONObject.toPinnedMessage(): PinnedMessage = PinnedMessage(
+    message = optJSONObject("message")?.toMessage() ?: Message(0, "", 0, null, "text", null, null, "sent", createdAt = ""),
+    pinnedBy = optLong("pinned_by", 0L),
+    pinnedAt = stringOrNull("pinned_at"),
+)
 
 internal fun JSONObject.toConversation(): Conversation {
     val members = mutableListOf<User>()
@@ -188,6 +325,8 @@ internal fun JSONObject.toConversation(): Conversation {
         createdBy = optLong("created_by"),
         myRole = optString("role", "member"),
         muted = optBoolean("muted", false),
+        archived = optBoolean("archived", false),
+        inviteToken = stringOrNull("invite_token"),
         onlyAdminsCanSend = optBoolean("only_admins_can_send", false),
         onlyAdminsCanEdit = optBoolean("only_admins_can_edit", false),
         onlyAdminsCanAdd = optBoolean("only_admins_can_add", false),
@@ -195,6 +334,11 @@ internal fun JSONObject.toConversation(): Conversation {
         approveNewMembers = optBoolean("approve_new_members", false),
         disappearingDays = optInt("disappearing_days", 0),
     )
+}
+
+fun isVideoUrl(url: String): Boolean {
+    val clean = url.substringBefore("?").lowercase()
+    return clean.endsWith(".mp4") || clean.endsWith(".m4a") || clean.endsWith(".mov") || clean.endsWith(".3gp")
 }
 
 internal fun JSONObject.toMoment(): Moment {
@@ -205,6 +349,12 @@ internal fun JSONObject.toMoment(): Moment {
             if (value.isNotBlank()) media.add(value)
         }
     }
+    val reshared = optJSONObject("reshared")?.let {
+        ResharedInfo(
+            momentId = it.optLong("moment_id"),
+            author = it.optJSONObject("author")?.toUser(),
+        )
+    }
     return Moment(
         id = optLong("id"),
         author = optJSONObject("author")?.toUser() ?: User(0, "", "Pengguna"),
@@ -213,7 +363,26 @@ internal fun JSONObject.toMoment(): Moment {
         likeCount = optInt("like_count", 0),
         commentCount = optInt("comment_count", 0),
         likedByMe = optBoolean("liked_by_me", false),
+        reshared = reshared,
         createdAt = optString("created_at"),
+    )
+}
+
+internal fun JSONObject.toStory(): Story {
+    val media = mutableListOf<String>()
+    optJSONArray("media")?.let { array ->
+        for (i in 0 until array.length()) {
+            val value = array.optString(i)
+            if (value.isNotBlank()) media.add(value)
+        }
+    }
+    return Story(
+        id = optLong("id"),
+        author = optJSONObject("author")?.toUser() ?: User(0, "", "Pengguna"),
+        body = optString("body"),
+        media = media,
+        createdAt = optString("created_at"),
+        expiresAt = optString("expires_at"),
     )
 }
 
@@ -222,6 +391,10 @@ internal fun JSONObject.toMomentComment(): MomentComment = MomentComment(
     body = optString("body"),
     createdAt = optString("created_at"),
     user = optJSONObject("user")?.toUser() ?: User(0, "", "Pengguna"),
+    parentId = longOrNull("parent_id"),
+    replyToUserId = longOrNull("reply_to_user_id"),
+    replyToDisplayName = stringOrNull("reply_to_display_name"),
+    replyToUsername = stringOrNull("reply_to_username"),
 )
 
 internal fun JSONObject.toFriendRequest(incoming: Boolean): FriendRequest = FriendRequest(

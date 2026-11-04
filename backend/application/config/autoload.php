@@ -2,7 +2,7 @@
 defined('BASEPATH') OR exit('No direct script access allowed');
 
 $autoload['packages'] = [];
-$autoload['libraries'] = ['jwt'];
+$autoload['libraries'] = ['jwt', 'googleauth'];
 $autoload['drivers'] = [];
 $autoload['helper'] = ['url'];
 $autoload['config'] = [];

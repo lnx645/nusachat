@@ -7,7 +7,7 @@ class Users extends MY_Controller
     public function __construct()
     {
         parent::__construct();
-        $this->load->model(['user_model', 'friend_model', 'token_model']);
+        $this->load->model(['user_model', 'friend_model', 'token_model', 'key_model', 'conversation_model', 'realtime_model']);
     }
 
     public function me(): void
@@ -100,8 +100,15 @@ class Users extends MY_Controller
         }
 
         $rows = $this->user_model->search($query, (int) $user['id'], 20);
+        $hidden = array_merge(
+            $this->friend_model->blockedIds((int) $user['id']),
+            $this->friend_model->blockedByIds((int) $user['id'])
+        );
         $users = [];
         foreach ($rows as $row) {
+            if (in_array((int) $row['id'], $hidden, true)) {
+                continue;
+            }
             $dto = user_dto($row);
             $friendship = $this->friend_model->findBetween((int) $user['id'], (int) $row['id']);
             $dto['friend_status'] = $friendship ? $friendship['status'] : 'none';
@@ -124,6 +131,10 @@ class Users extends MY_Controller
         }
         $row = $this->user_model->find($id);
         if (!$row || (int) $row['is_active'] !== 1) {
+            $this->fail('User not found.', 404, 'not_found');
+        }
+        if ($this->friend_model->isBlocked((int) $user['id'], $id)
+            || $this->friend_model->isBlocked($id, (int) $user['id'])) {
             $this->fail('User not found.', 404, 'not_found');
         }
         $dto = user_dto($row);
@@ -155,10 +166,74 @@ class Users extends MY_Controller
         $this->ok(['message' => 'Password changed. Please log in again.']);
     }
 
+    public function delete(): void
+    {
+        $this->require_method(['POST', 'DELETE']);
+        $user = $this->require_auth();
+        $this->require_fields(['password']);
+
+        if (!password_verify((string) $this->param('password'), $user['password_hash'])) {
+            $this->fail('Password is incorrect.', 401, 'invalid_credentials');
+        }
+        $userId = (int) $user['id'];
+        $this->token_model->revokeAll($userId);
+        $this->user_model->deleteAccount($userId);
+        $this->ok(['deleted' => true]);
+    }
+
+    public function device_key(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['device_id', 'public_key']);
+
+        $deviceId = trim($this->str_param('device_id'));
+        if ($deviceId === '' || mb_strlen($deviceId) > 128) {
+            $this->fail('Invalid device id.', 422, 'invalid_device');
+        }
+        $publicKey = trim($this->str_param('public_key'));
+        if ($publicKey === '' || mb_strlen($publicKey) > 2048
+            || base64_decode($publicKey, true) === false) {
+            $this->fail('Invalid public key.', 422, 'invalid_key');
+        }
+        $this->key_model->publishDeviceKey((int) $user['id'], $deviceId, $publicKey);
+        // Beri tahu semua lawan bicara: pemegang kunci membungkus ulang
+        // untuk perangkat baru ini (multi-device E2EE) via Erlang.
+        $neighbors = $this->conversation_model->peerUserIds((int) $user['id']);
+        if ($neighbors) {
+            $this->realtime_model->push($neighbors, 'device_added', [
+                'user_id' => (int) $user['id'],
+                'device_id' => $deviceId,
+            ]);
+        }
+        $this->ok(['published' => true], 201);
+    }
+
+    public function device_keys(): void
+    {
+        $this->require_method(['GET']);
+        $this->require_auth();
+        $userId = $this->int_param('user_id');
+        $target = $this->user_model->find($userId);
+        if (!$target || (int) $target['is_active'] !== 1) {
+            $this->fail('User not found.', 404, 'not_found');
+        }
+        $this->ok([
+            'user_id' => $userId,
+            'keys' => $this->key_model->deviceKeys($userId),
+        ]);
+    }
+
     public function presence(): void
     {
         $this->require_method(['POST']);
         $user = $this->require_auth();
+        $me = (int) $user['id'];
+
+        // Transisi offline -> online disiarkan via Erlang agar subtitle
+        // "x anggota, y online" terasa realtime (tanpa polling).
+        $prevSeen = $this->user_model->find($me)['last_seen_at'] ?? null;
+        $wasOnline = is_string($prevSeen) && (time() - (int) strtotime($prevSeen)) < 90;
 
         $lat = $this->param('lat');
         $lng = $this->param('lng');
@@ -172,6 +247,16 @@ class Users extends MY_Controller
             $this->user_model->touch((int) $user['id'], $lat, $lng);
         } else {
             $this->user_model->touch((int) $user['id']);
+        }
+        if (!$wasOnline) {
+            $neighbors = $this->conversation_model->peerUserIds($me);
+            if ($neighbors) {
+                $this->realtime_model->push($neighbors, 'presence', [
+                    'user_id' => $me,
+                    'online' => true,
+                    'display_name' => $user['display_name'] ?? null,
+                ]);
+            }
         }
         $this->ok(['server_time' => now_iso()]);
     }

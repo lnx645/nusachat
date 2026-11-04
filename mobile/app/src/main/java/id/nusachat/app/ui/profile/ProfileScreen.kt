@@ -6,6 +6,7 @@ import id.nusachat.app.ui.components.NusaLinePickerInput
 import id.nusachat.app.ui.components.NusaTextButton
 import id.nusachat.app.ui.components.NusaIconButton
 import id.nusachat.app.ui.components.NusaTopAppBar
+import id.nusachat.app.ui.chats.ChatThemeScreen
 import id.nusachat.app.ui.components.NusaBottomSheet
 import id.nusachat.app.ui.components.NusaProgress
 import id.nusachat.app.ui.components.NusaSwitch
@@ -82,6 +83,7 @@ fun MeScreen(
     var showSettings by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var showPassword by remember { mutableStateOf(false) }
+    var showDelete by remember { mutableStateOf(false) }
 
     if (showPassword) {
         ChangePasswordScreen(
@@ -91,6 +93,26 @@ fun MeScreen(
                 vm.changePassword(old, new)
             },
         )
+        return
+    }
+
+    if (showDelete) {
+        DeleteAccountScreen(
+            onBack = { showDelete = false },
+            onConfirm = { password -> vm.deleteAccount(password) },
+        )
+        return
+    }
+
+    var showWallet by remember { mutableStateOf(false) }
+    if (showWallet) {
+        WalletScreen(vm = vm, onBack = { showWallet = false })
+        return
+    }
+
+    var showChatTheme by remember { mutableStateOf(false) }
+    if (showChatTheme) {
+        ChatThemeScreen(vm = vm, onBack = { showChatTheme = false })
         return
     }
 
@@ -175,10 +197,24 @@ fun MeScreen(
                 subtitle = "Amankan akunmu secara berkala",
                 onClick = { showPassword = true },
             )
+            ProfileDivider()
+            ProfileRow(
+                icon = NusaIcons.Wallet,
+                title = "Dompet Saya",
+                subtitle = "Koin, top up, dan kirim ke teman",
+                onClick = { showWallet = true },
+            )
         }
 
         SectionLabel("Umum")
         Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
+            ProfileRow(
+                icon = NusaIcons.Photo,
+                title = "Latar Chat",
+                subtitle = "Wallpaper doodle, warna, dan bubble",
+                onClick = { showChatTheme = true },
+            )
+            ProfileDivider()
             ProfileRow(
                 icon = NusaIcons.Settings,
                 title = "Pengaturan",
@@ -203,6 +239,15 @@ fun MeScreen(
                 tint = MaterialTheme.colorScheme.error,
                 showChevron = false,
                 onClick = { showLogout = true },
+            )
+            ProfileDivider()
+            ProfileRow(
+                icon = NusaIcons.Delete,
+                title = "Hapus akun",
+                subtitle = "Nonaktifkan dan anonimkan akun permanen",
+                tint = MaterialTheme.colorScheme.error,
+                showChevron = false,
+                onClick = { showDelete = true },
             )
         }
 

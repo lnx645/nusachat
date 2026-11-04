@@ -65,6 +65,9 @@ object NusaIcons {
     @DrawableRes val Music: Int = LucideR.drawable.lucide_ic_music
     @DrawableRes val Copy: Int = LucideR.drawable.lucide_ic_copy
     @DrawableRes val Forward: Int = LucideR.drawable.lucide_ic_forward
+    @DrawableRes val Down: Int = LucideR.drawable.lucide_ic_chevron_down
+    @DrawableRes val Archive: Int = LucideR.drawable.lucide_ic_archive
+    @DrawableRes val Wallet: Int = LucideR.drawable.lucide_ic_wallet
     @DrawableRes val Wifi: Int = LucideR.drawable.lucide_ic_wifi
     @DrawableRes val WifiOff: Int = LucideR.drawable.lucide_ic_wifi_off
     @DrawableRes val Shield: Int = LucideR.drawable.lucide_ic_shield

@@ -26,6 +26,27 @@ import org.json.JSONObject
  * Firebase is initialized manually when empty, token fetch is best-effort,
  * and chat still works over the websocket when push is unavailable.
  */
+/**
+ * Deep-link sekali pakai dari ketukan notifikasi: MainActivity mengisi dari
+ * intent extras, NusaChatApp mengonsumsi lalu membuka chat tujuan.
+ */
+object PushDeepLink {
+    @Volatile var pendingConversationId: Long? = null
+    fun consume(): Long? {
+        val id = pendingConversationId
+        pendingConversationId = null
+        return id
+    }
+
+    /** Aksi notif telepon: "answer" | "reject" | "end" + call id. */
+    @Volatile var pendingCallAction: Pair<String, Long>? = null
+    fun consumeCallAction(): Pair<String, Long>? {
+        val action = pendingCallAction
+        pendingCallAction = null
+        return action
+    }
+}
+
 object PushManager {
     const val CHANNEL_MESSAGES = "nusachat_messages"
     const val CHANNEL_CALLS = "nusachat_calls"
@@ -45,12 +66,27 @@ object PushManager {
         }
     }
 
+    private const val KEY_CHANNEL_VER = "channel_ver"
+    private const val CHANNEL_VER = 2
+
     fun createChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        // Channel yang sudah ada di HP tidak ikut berubah saat kode diubah:
+        // hapus + buat ulang sekali (versi tercatat) agar suara eksplisit berlaku.
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs.getInt(KEY_CHANNEL_VER, 0) < CHANNEL_VER) {
+            runCatching { manager.deleteNotificationChannel(CHANNEL_MESSAGES) }
+            runCatching { manager.deleteNotificationChannel(CHANNEL_CALLS) }
+            prefs.edit().putInt(KEY_CHANNEL_VER, CHANNEL_VER).apply()
+        }
+        val chatSound = android.media.RingtoneManager.getDefaultUri(
+            android.media.RingtoneManager.TYPE_NOTIFICATION
+        )
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_MESSAGES, "Pesan", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Notifikasi pesan, pertemanan, dan momen"
+                setSound(chatSound, null)
             }
         )
         manager.createNotificationChannel(
@@ -108,8 +144,25 @@ object PushManager {
         runCatching { FirebaseMessaging.getInstance().deleteToken() }
     }
 
+    /** Aplikasi sedang dibuka: pesan chat tidak perlu notif sistem (daftar chat update via WS). */
+    fun isAppForeground(context: Context): Boolean {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            ?: return false
+        val pid = android.os.Process.myPid()
+        return am.runningAppProcesses?.any {
+            it.pid == pid && it.importance == android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+        } == true
+    }
+
+    fun cancelForConversation(context: Context, conversationId: Long) {
+        runCatching {
+            NotificationManagerCompat.from(context).cancel(("message:$conversationId").hashCode())
+        }
+    }
+
     fun showDataNotification(context: Context, data: Map<String, String>) {
         val event = data["event"].orEmpty()
+        if (event == "message" && isAppForeground(context)) return
         val title = data["title"] ?: when (event) {
             "call_offer" -> "Panggilan suara masuk"
             "message" -> "Pesan baru"

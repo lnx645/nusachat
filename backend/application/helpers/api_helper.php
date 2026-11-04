@@ -120,6 +120,19 @@ if (!function_exists('user_dto')) {
             'online' => $online,
             'last_seen_at' => $lastSeen,
         ];
+        // Friend count (social stat) — best effort, fallback 0
+        try {
+            $ci = get_instance();
+            if (isset($ci->store) && isset($row['id'])) {
+                $cnt = $ci->store->value(
+                    'SELECT COUNT(*) FROM friendships WHERE ((requester_id = ? OR addressee_id = ?) AND status = ?)',
+                    [(int) $row['id'], (int) $row['id'], 'accepted']
+                );
+                $dto['friend_count'] = (int) $cnt;
+            }
+        } catch (Throwable) {
+            $dto['friend_count'] = 0;
+        }
         if ($self) {
             $dto['phone'] = $row['phone'] ?? null;
             $dto['birthday'] = $row['birthday'] ?? null;
@@ -140,6 +153,13 @@ if (!function_exists('message_dto')) {
                 $meta = $decoded;
             }
         }
+        $mentions = [];
+        if (!empty($row['mentions'])) {
+            $decodedMentions = json_decode($row['mentions'], true);
+            if (is_array($decodedMentions)) {
+                $mentions = array_map('intval', $decodedMentions);
+            }
+        }
         return [
             'id' => (int) $row['id'],
             'uuid' => $row['uuid'],
@@ -155,9 +175,15 @@ if (!function_exists('message_dto')) {
             'attachment_url' => $row['revoked_at'] ? null : $row['attachment_url'],
             'attachment_meta' => $row['revoked_at'] ? null : $meta,
             'reply_to_id' => $row['reply_to_id'] !== null ? (int) $row['reply_to_id'] : null,
+            'forwarded' => isset($row['forwarded_from_id']) && $row['forwarded_from_id'] !== null,
+            'forwarded_from_id' => isset($row['forwarded_from_id']) && $row['forwarded_from_id'] !== null ? (int) $row['forwarded_from_id'] : null,
+            'mentions' => $mentions,
+            'mentioned_me' => (bool) ($row['mentioned_me'] ?? false),
+            'reactions' => $row['reactions'] ?? [],
             'client_id' => $row['client_id'] ?? null,
             'status' => $row['status'],
             'revoked' => $row['revoked_at'] !== null,
+            'edited_at' => $row['edited_at'] ?? null,
             'created_at' => $row['created_at'],
         ];
     }
@@ -184,6 +210,7 @@ if (!function_exists('conversation_dto')) {
             'unread_count' => (int) ($row['unread_count'] ?? 0),
             'role' => $row['role'] ?? 'member',
             'muted' => (bool) ($row['muted'] ?? false),
+            'archived' => (bool) ($row['archived'] ?? false),
             'members' => $members,
             'created_at' => $row['created_at'],
         ];
@@ -214,7 +241,35 @@ if (!function_exists('moment_dto')) {
             'like_count' => (int) ($row['like_count'] ?? 0),
             'comment_count' => (int) ($row['comment_count'] ?? 0),
             'liked_by_me' => (bool) ($row['liked_by_me'] ?? false),
+            'reshared' => $row['reshared'] ?? null,
             'created_at' => $row['created_at'],
+        ];
+    }
+}
+
+if (!function_exists('story_dto')) {
+    function story_dto(array $row): array
+    {
+        $media = [];
+        if (!empty($row['media_json'])) {
+            $decoded = json_decode($row['media_json'], true);
+            if (is_array($decoded)) {
+                $media = $decoded;
+            }
+        }
+        return [
+            'id' => (int) $row['id'],
+            'uuid' => $row['uuid'],
+            'author' => [
+                'id' => (int) $row['user_id'],
+                'display_name' => $row['author_display_name'] ?? null,
+                'username' => $row['author_username'] ?? null,
+                'avatar_url' => $row['author_avatar_url'] ?? null,
+            ],
+            'body' => $row['body'],
+            'media' => $media,
+            'created_at' => $row['created_at'],
+            'expires_at' => $row['expires_at'],
         ];
     }
 }
@@ -251,6 +306,42 @@ if (!function_exists('push_notify')) {
             $ci->fcm->sendSilent($tokens, $title, $body, $data);
         } catch (Throwable) {
             // Never break the API response because of push.
+        }
+    }
+}
+
+if (!function_exists('realtime_notify')) {
+    /**
+     * Dorong baris outbox yang baru ditulis langsung ke gateway Erlang
+     * (tanpa polling) agar realtime benar-benar seketika. Best-effort:
+     * timeout singkat, semua error ditelan agar response API tidak melambat.
+     */
+    function realtime_notify(array $events): void
+    {
+        if (!$events) {
+            return;
+        }
+        try {
+            $base = getenv('ERLANG_NOTIFY_URL');
+            if ($base === false || $base === '') {
+                $base = 'http://127.0.0.1:8091/internal/notify';
+            }
+            $secret = getenv('WS_SECRET');
+            if ($secret === false || $secret === '') {
+                $secret = 'dev-ws-secret';
+            }
+            $ctx = stream_context_create([
+                'http' => [
+                    'method' => 'POST',
+                    'header' => "Content-Type: application/json\r\nX-Ws-Secret: {$secret}\r\n",
+                    'content' => json_encode(['events' => array_values($events)], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                    'timeout' => 1.0,
+                    'ignore_errors' => true,
+                ],
+            ]);
+            @file_get_contents($base, false, $ctx);
+        } catch (Throwable) {
+            // Erlang down/m unreachable: event tetap di outbox, terkirim saat node nyala.
         }
     }
 }

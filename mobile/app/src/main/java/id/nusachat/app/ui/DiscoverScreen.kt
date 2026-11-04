@@ -1,8 +1,8 @@
 package id.nusachat.app.ui
-import id.nusachat.app.ui.components.NusaCard
 import id.nusachat.app.ui.components.NusaBottomSheet
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.res.painterResource
 import id.nusachat.app.ui.theme.NusaIcons
 import androidx.compose.foundation.clickable
@@ -16,12 +16,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -31,15 +32,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import id.nusachat.app.BuildConfig
-import id.nusachat.app.ui.components.NusaAvatar
-import id.nusachat.app.ui.components.NusaOnlineGreen
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,108 +46,149 @@ fun DiscoverScreen(
     onOpenNearby: () -> Unit,
 ) {
     var showAbout by remember { mutableStateOf(false) }
-    val session by vm.sessionState.collectAsStateWithLifecycle()
-    val user = session.user
 
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
         item(key = "header") {
-            Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
                 Text(
                     text = "Jelajah",
-                    fontSize = 25.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    letterSpacing = (-0.5).sp,
                 )
                 Text(
-                    text = "Temukan hal baru di sekitarmu",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = "Temukan momen dan orang di sekitarmu",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
-        item(key = "hero") {
-            Box(
+        item(key = "banner") {
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(
-                                MaterialTheme.colorScheme.primary,
-                                Color(0xFF0B8F6A),
-                                Color(0xFF28B58A),
-                            )
-                        )
-                    )
-                    .padding(18.dp),
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.primary,
+                shadowElevation = 0.dp,
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    NusaAvatar(
-                        name = user?.displayName ?: "NusaChat",
-                        url = user?.avatarUrl, gender = user?.gender, seed = user?.id,
-                        size = 52.dp,
-                    )
-                    Column(
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
                         modifier = Modifier
-                            .weight(1f)
-                            .padding(start = 14.dp),
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.22f)),
+                        contentAlignment = Alignment.Center,
                     ) {
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Explore),
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
                         Text(
-                            text = "Halo, ${user?.displayName ?: "teman"}!",
-                            color = Color.White,
-                            fontSize = 18.sp,
+                            "Jelajahi NusaChat",
+                            style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
+                            color = Color.White,
                         )
                         Text(
-                            text = "Bagikan momen atau temukan orang terdekat.",
-                            color = Color.White.copy(alpha = 0.82f),
-                            style = MaterialTheme.typography.bodySmall,
+                            "Momen teman & orang terdekat menantimu",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.85f),
                         )
                     }
                     Icon(
-                        painter = painterResource(id = NusaIcons.Explore),
+                        painter = painterResource(id = NusaIcons.Next),
                         contentDescription = null,
                         tint = Color.White.copy(alpha = 0.9f),
-                        modifier = Modifier.size(32.dp),
+                        modifier = Modifier.size(18.dp),
                     )
                 }
             }
         }
-        item(key = "menu") {
-            SurfaceGroup {
-                DiscoverRow(
-                    icon = NusaIcons.Photo,
-                    tint = Color(0xFFE39B1D),
-                    background = Color(0xFFFFF2D9),
-                    title = "Momen",
-                    subtitle = "Lihat kabar terbaru dari teman",
-                    onClick = onOpenMoments,
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = 68.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                )
-                DiscoverRow(
-                    icon = NusaIcons.Pin,
-                    tint = MaterialTheme.colorScheme.primary,
-                    background = MaterialTheme.colorScheme.primaryContainer,
-                    title = "Orang Terdekat",
-                    subtitle = "Temukan pengguna di sekitar lokasimu",
-                    onClick = onOpenNearby,
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = 68.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                )
-                DiscoverRow(
-                    icon = NusaIcons.Info,
-                    tint = Color(0xFF4A78D0),
-                    background = Color(0xFFE6EEFF),
-                    title = "Tentang NusaChat",
-                    subtitle = "Versi aplikasi dan info server",
-                    onClick = { showAbout = true },
-                )
+        item(key = "layanan-label") {
+            Text(
+                text = "LAYANAN",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 18.dp, bottom = 8.dp),
+                letterSpacing = 0.8.sp,
+            )
+        }
+        item(key = "services") {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(6.dp),
+            ) {
+                Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+                    ServiceCard(
+                        icon = NusaIcons.Photo,
+                        iconBg = Color(0xFFFFF1CC),
+                        iconTint = Color(0xFFD18B00),
+                        title = "Momen",
+                        subtitle = "Kabar teman terbaru",
+                        modifier = Modifier.weight(1f),
+                        onClick = onOpenMoments,
+                    )
+                    ServiceCard(
+                        icon = NusaIcons.Pin,
+                        iconBg = Color(0xFFE0F5E9),
+                        iconTint = Color(0xFF06C755),
+                        title = "Orang Terdekat",
+                        subtitle = "Di sekitar kamu",
+                        modifier = Modifier.weight(1f),
+                        onClick = onOpenNearby,
+                    )
+                }
             }
+        }
+        item(key = "lainnya-label") {
+            Text(
+                text = "LAINNYA",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 18.dp, bottom = 8.dp),
+                letterSpacing = 0.8.sp,
+            )
+        }
+        item(key = "menu") {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Column {
+                    DiscoverRow(
+                        icon = NusaIcons.Info,
+                        iconBg = Color(0xFFE8EEFF),
+                        iconTint = Color(0xFF4A78D0),
+                        title = "Tentang NusaChat",
+                        subtitle = "Versi 0.1.0 • Info server",
+                        onClick = { showAbout = true },
+                    )
+                }
+            }
+            Spacer(Modifier.height(16.dp))
         }
     }
 
@@ -182,21 +220,48 @@ fun DiscoverScreen(
 }
 
 @Composable
-private fun SurfaceGroup(content: @Composable () -> Unit) {
-    NusaCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 4.dp),
+private fun ServiceCard(
+    icon: Int,
+    iconBg: Color,
+    iconTint: Color,
+    title: String,
+    subtitle: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.Start,
     ) {
-        Column { content() }
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(iconBg),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painter = painterResource(id = icon),
+                contentDescription = null,
+                tint = iconTint,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+        Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
 private fun DiscoverRow(
     icon: Int,
-    tint: Color,
-    background: Color,
+    iconBg: Color,
+    iconTint: Color,
     title: String,
     subtitle: String,
     onClick: () -> Unit,
@@ -205,21 +270,21 @@ private fun DiscoverRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
                 .size(42.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(background),
+                .background(iconBg),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 painter = painterResource(id = icon),
                 contentDescription = null,
-                tint = tint,
-                modifier = Modifier.size(23.dp),
+                tint = iconTint,
+                modifier = Modifier.size(22.dp),
             )
         }
         Column(
@@ -227,17 +292,19 @@ private fun DiscoverRow(
                 .weight(1f)
                 .padding(horizontal = 12.dp),
         ) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
             Text(
                 subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
             )
         }
         Icon(
             painter = painterResource(id = NusaIcons.Next),
             contentDescription = null,
             tint = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.size(18.dp),
         )
     }
 }

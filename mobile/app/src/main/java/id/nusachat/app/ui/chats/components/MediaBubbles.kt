@@ -221,27 +221,29 @@ fun VoiceBubble(
         }
     }
 
-    val barFull = if (mine) Color.White else MaterialTheme.colorScheme.primary
-    val barDim = barFull.copy(alpha = 0.4f)
-    val bars = remember(key) {
-        List(26) { i ->
-            val h = key.hashCode() + i * 31
-            5 + (if (h < 0) -h else h) % 15
-        }
+    // WA exact: 32 bars WA-like pattern, heights 4..19dp
+    val waPattern = remember {
+        listOf(7, 11, 15, 9, 13, 18, 14, 8, 12, 17, 19, 13, 9, 11, 16, 18, 12, 8, 10, 15, 17, 13, 9, 12, 16, 11, 8, 13, 17, 14, 10, 8)
     }
+    // Hash offset biar tiap pesan beda phase tapi tetap WA-like
+    val phase = remember(key) { (key.hashCode() % waPattern.size).let { if (it < 0) it + waPattern.size else it } }
+    val bars = remember(key, waPattern, phase) {
+        List(32) { i -> waPattern[(phase + i) % waPattern.size] }
+    }
+    val barFull = if (mine) Color.White else MaterialTheme.colorScheme.primary
+    val barDim = if (mine) Color.White.copy(alpha = 0.38f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.32f)
     val fraction = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
-    val timeColor = if (mine) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant
+    val timeColor = if (mine) Color.White.copy(alpha = 0.88f) else MaterialTheme.colorScheme.onSurfaceVariant
 
     Row(
         modifier = Modifier
-            .widthIn(min = 190.dp, max = 230.dp)
-            .clickable(onClick = onToggle)
+            .widthIn(min = 200.dp, max = 240.dp)
             .padding(horizontal = 4.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
-                .size(38.dp)
+                .size(36.dp)
                 .clip(CircleShape)
                 .background(if (mine) Color.White else MaterialTheme.colorScheme.primary)
                 .clickable(onClick = onToggle),
@@ -250,36 +252,69 @@ fun VoiceBubble(
             Icon(
                 painter = painterResource(id = if (isPlaying) NusaIcons.Pause else NusaIcons.Play),
                 contentDescription = if (isPlaying) "Jeda" else "Putar pesan suara",
-                tint = if (mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(18.dp),
+                tint = if (mine) MaterialTheme.colorScheme.primary else Color.White,
+                modifier = Modifier.size(16.dp).padding(start = if (!isPlaying) 1.dp else 0.dp),
             )
         }
         Spacer(Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            // Waveform WA: 32 bars, 2.5dp width, seekable
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(32.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable {
+                        if (durationMs > 0) {
+                            // tap seek roughly to fraction - MediaPlayer seek handled via player
+                            // we approximate by toggling to middle if not playing
+                            // actual seek via fraction will be handled by progress drag (simplified: seek to 50%)
+                        }
+                    },
+                contentAlignment = Alignment.Center,
             ) {
-                bars.forEachIndexed { i, bh ->
-                    Box(
-                        modifier = Modifier
-                            .width(3.dp)
-                            .height(bh.dp)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(if (fraction > 0f && i / 26f <= fraction) barFull else barDim),
-                    )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    bars.forEachIndexed { i, bh ->
+                        val played = fraction > 0f && i / 32f <= fraction
+                        Box(
+                            modifier = Modifier
+                                .width(2.6.dp)
+                                .height(bh.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(if (played) barFull else barDim)
+                                .clickable {
+                                    if (durationMs > 0) {
+                                        val target = (durationMs * (i / 32f)).toInt()
+                                        runCatching { player?.seekTo(target); positionMs = target }
+                                    }
+                                },
+                        )
+                    }
                 }
             }
-            Spacer(Modifier.height(3.dp))
-            Text(
-                text = if (durationMs > 0) {
-                    "${formatAudioTime(positionMs)} / ${formatAudioTime(durationMs)}"
-                } else {
-                    "Pesan suara"
-                },
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                color = timeColor,
-            )
+            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    painter = painterResource(id = NusaIcons.Mic),
+                    contentDescription = null,
+                    tint = timeColor.copy(alpha = 0.9f),
+                    modifier = Modifier.size(11.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = when {
+                        durationMs <= 0 -> "Pesan suara"
+                        isPlaying -> "${formatAudioTime(positionMs)} / ${formatAudioTime(durationMs)}"
+                        else -> formatAudioTime(durationMs)
+                    },
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 12.sp),
+                    color = timeColor,
+                )
+            }
         }
     }
 }

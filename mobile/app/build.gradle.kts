@@ -20,10 +20,21 @@ android {
             useSupportLibrary = true
         }
 
-        // Debug build points at the host machine's LAN address so a physical
-        // device on the same Wi-Fi network can reach the backend.
+        // Debug build points at the dev machine's LAN address so any phone on
+        // the same Wi-Fi network can reach the backend. If the machine moves
+        // to another network, update these to its new LAN IP and rebuild.
+        // (The 127.0.0.1 + `adb reverse` variant only works on the single
+        // USB-connected phone, not on other devices.)
         buildConfigField("String", "API_BASE_URL", "\"http://192.168.70.92:8080/api/v1\"")
-        buildConfigField("String", "WS_URL", "\"ws://192.168.70.92:8090\"")
+        // Google OAuth: Web client ID sebagai audience ID token.
+        buildConfigField(
+            "String",
+            "GOOGLE_SERVER_CLIENT_ID",
+            "\"719918438607-u9092qoccu5l7dsksoi1f54ok87gr1ac.apps.googleusercontent.com\"",
+        )
+        // Realtime pindah ke gateway Erlang/OTP (realtime/nusachat_realtime).
+        // Gateway PHP di 8090 tetap jalan sebagai fallback.
+        buildConfigField("String", "WS_URL", "\"ws://192.168.70.92:8091\"")
     }
 
     buildTypes {
@@ -110,4 +121,9 @@ dependencies {
 
     // E2EE: kunci per-percakapan di EncryptedSharedPreferences.
     implementation("androidx.security:security-crypto:1.1.0")
+
+    // Login Google (Credential Manager + ID token).
+    implementation("androidx.credentials:credentials:1.5.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
 }

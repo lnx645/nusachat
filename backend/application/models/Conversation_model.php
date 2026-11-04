@@ -94,7 +94,7 @@ class Conversation_model extends CI_Model
     public function forUser(int $id, int $userId): ?array
     {
         return $this->store->one(
-            'SELECT c.*, m.last_read_message_id, m.role, m.muted,
+            'SELECT c.*, m.last_read_message_id, m.role, m.muted, m.archived,
                     (SELECT COUNT(*) FROM messages msg
                      WHERE msg.conversation_id = c.id AND msg.id > m.last_read_message_id
                        AND msg.sender_id <> ? AND msg.revoked_at IS NULL) AS unread_count
@@ -108,7 +108,7 @@ class Conversation_model extends CI_Model
     public function listFor(int $userId, int $limit = 100): array
     {
         return $this->store->all(
-            'SELECT c.*, m.last_read_message_id, m.role, m.muted,
+            'SELECT c.*, m.last_read_message_id, m.role, m.muted, m.archived,
                     (SELECT COUNT(*) FROM messages msg
                      WHERE msg.conversation_id = c.id AND msg.id > m.last_read_message_id
                        AND msg.sender_id <> ? AND msg.revoked_at IS NULL) AS unread_count
@@ -134,6 +134,18 @@ class Conversation_model extends CI_Model
     public function memberIds(int $conversationId): array
     {
         $rows = $this->store->all('SELECT user_id FROM conversation_members WHERE conversation_id = ?', [$conversationId]);
+        return array_map('intval', array_column($rows, 'user_id'));
+    }
+
+    /** Semua user yang berbagi percakapan dengan user ini (untuk event presence). */
+    public function peerUserIds(int $userId): array
+    {
+        $rows = $this->store->all(
+            'SELECT DISTINCT m2.user_id FROM conversation_members m1 ' .
+            'JOIN conversation_members m2 ON m2.conversation_id = m1.conversation_id ' .
+            'WHERE m1.user_id = ? AND m2.user_id != ?',
+            [$userId, $userId]
+        );
         return array_map('intval', array_column($rows, 'user_id'));
     }
 
@@ -172,6 +184,163 @@ class Conversation_model extends CI_Model
             [$conversationId, $userId]
         );
         $this->store->update('conversations', ['updated_at' => now_iso()], 'id = ?', [$conversationId]);
+    }
+
+    public function roleOf(int $conversationId, int $userId): ?string
+    {
+        $role = $this->store->value(
+            'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?',
+            [$conversationId, $userId]
+        );
+        return $role !== null ? (string) $role : null;
+    }
+
+    public function isAdmin(int $conversationId, int $userId): bool
+    {
+        $row = $this->find($conversationId);
+        if ($row && (int) $row['created_by'] === $userId) {
+            return true;
+        }
+        $role = $this->roleOf($conversationId, $userId);
+        return $role === 'owner' || $role === 'admin';
+    }
+
+    public function isOwner(int $conversationId, int $userId): bool
+    {
+        $row = $this->find($conversationId);
+        if ($row && (int) $row['created_by'] === $userId) {
+            return true;
+        }
+        return $this->roleOf($conversationId, $userId) === 'owner';
+    }
+
+    public function setRole(int $conversationId, int $userId, string $role): void
+    {
+        $this->store->update(
+            'conversation_members',
+            ['role' => $role],
+            'conversation_id = ? AND user_id = ?',
+            [$conversationId, $userId]
+        );
+    }
+
+    public function memberCount(int $conversationId): int
+    {
+        return (int) $this->store->value(
+            'SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ?',
+            [$conversationId]
+        );
+    }
+
+    public function ensureInviteToken(int $conversationId): string
+    {
+        $existing = $this->store->value(
+            'SELECT invite_token FROM conversations WHERE id = ?',
+            [$conversationId]
+        );
+        if (is_string($existing) && $existing !== '') {
+            return $existing;
+        }
+        $token = bin2hex(random_bytes(12));
+        $this->store->update('conversations', ['invite_token' => $token, 'updated_at' => now_iso()], 'id = ?', [$conversationId]);
+        return $token;
+    }
+
+    public function rotateInviteToken(int $conversationId): string
+    {
+        $token = bin2hex(random_bytes(12));
+        $this->store->update('conversations', ['invite_token' => $token, 'updated_at' => now_iso()], 'id = ?', [$conversationId]);
+        return $token;
+    }
+
+    public function findByInviteToken(string $token): ?array
+    {
+        if ($token === '') {
+            return null;
+        }
+        return $this->store->one('SELECT * FROM conversations WHERE invite_token = ?', [$token]);
+    }
+
+    /**
+     * @return array{status: string, request: array} status: joined|pending|member
+     */
+    public function requestJoin(int $conversationId, int $userId, bool $needsApproval): array
+    {
+        if ($this->isMember($conversationId, $userId)) {
+            return ['status' => 'member', 'request' => []];
+        }
+        $existing = $this->store->one(
+            'SELECT * FROM group_join_requests WHERE conversation_id = ? AND user_id = ?',
+            [$conversationId, $userId]
+        );
+        $now = now_iso();
+        if (!$needsApproval) {
+            $this->addMembers($conversationId, [$userId]);
+            if ($existing) {
+                $this->store->update(
+                    'group_join_requests',
+                    ['status' => 'approved', 'updated_at' => $now],
+                    'id = ?',
+                    [(int) $existing['id']]
+                );
+            }
+            return ['status' => 'joined', 'request' => []];
+        }
+        if ($existing && $existing['status'] === 'pending') {
+            return ['status' => 'pending', 'request' => $existing];
+        }
+        if ($existing) {
+            $this->store->update(
+                'group_join_requests',
+                ['status' => 'pending', 'updated_at' => $now],
+                'id = ?',
+                [(int) $existing['id']]
+            );
+            $request = $this->store->one('SELECT * FROM group_join_requests WHERE id = ?', [(int) $existing['id']]);
+            return ['status' => 'pending', 'request' => $request ?? []];
+        }
+        $id = $this->store->insert('group_join_requests', [
+            'conversation_id' => $conversationId,
+            'user_id' => $userId,
+            'status' => 'pending',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+        $request = $this->store->one('SELECT * FROM group_join_requests WHERE id = ?', [$id]);
+        return ['status' => 'pending', 'request' => $request ?? []];
+    }
+
+    /**
+     * @return array<int, array> pending requests + user rows
+     */
+    public function pendingJoinRequests(int $conversationId): array
+    {
+        return $this->store->all(
+            'SELECT r.*, u.username, u.display_name, u.avatar_url
+             FROM group_join_requests r JOIN users u ON u.id = r.user_id
+             WHERE r.conversation_id = ? AND r.status = ?
+             ORDER BY r.id ASC',
+            [$conversationId, 'pending']
+        );
+    }
+
+    public function reviewJoinRequest(int $requestId, bool $approve): ?array
+    {
+        $request = $this->store->one('SELECT * FROM group_join_requests WHERE id = ?', [$requestId]);
+        if (!$request || $request['status'] !== 'pending') {
+            return null;
+        }
+        $now = now_iso();
+        $this->store->update(
+            'group_join_requests',
+            ['status' => $approve ? 'approved' : 'rejected', 'updated_at' => $now],
+            'id = ?',
+            [$requestId]
+        );
+        if ($approve) {
+            $this->addMembers((int) $request['conversation_id'], [(int) $request['user_id']]);
+        }
+        return $this->store->one('SELECT * FROM group_join_requests WHERE id = ?', [$requestId]);
     }
 
     public function markRead(int $conversationId, int $userId, int $messageId): void

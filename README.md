@@ -7,16 +7,19 @@ Aplikasi chat orisinal bergaya messenger: obrolan langsung dan grup, momen, kont
 ## Fitur
 
 - Autentikasi JWT HS256 + refresh token berputar, logout mencabut sesi lewat `token_version`. Ganti kata sandi dari aplikasi.
-- Chat langsung dan grup, indikator mengetik, status terkirim/dibaca, balas pesan, tarik pesan, kirim ulang saat gagal, lampiran foto/video/audio/file, dan pengiriman idempoten lewat `client_id`.
-- Grup: buat, tambah/keluarkan anggota (owner), keluar grup, bisu notifikasi, info anggota.
-- Daftar teman, pencarian pengguna, permintaan pertemanan, hapus teman, dan sinkronisasi kontak HP (izin `READ_CONTACTS`).
+- Chat langsung dan grup, indikator mengetik, status terkirim/dibaca, balas pesan, tarik pesan, edit pesan, reaksi emoji, teruskan pesan, sematkan pesan, arsip obrolan, cari pesan, mention `@username`, kirim ulang saat gagal, lampiran foto/video/audio/file, dan pengiriman idempoten lewat `client_id`.
+- Grup: buat, tambah/keluarkan anggota (owner + admin), keluar grup, bisu notifikasi, info anggota, undang via tautan, persetujuan admin, role admin.
+- Daftar teman, pencarian pengguna, permintaan pertemanan, hapus teman, blokir/buka blokir, hapus akun permanen, dan sinkronisasi kontak HP (izin `READ_CONTACTS`).
 - Orang terdekat berbasis koordinat kasar (Haversine), bukan pelacakan real-time.
-- Momen multi-foto (maks 9), suka, komentar, hapus momen sendiri, dan pagination "muat momen lama".
+- Momen teks + foto/video (maks 9), suka, komentar, hapus, posting ulang (reshare), bagikan ke chat, dan pagination "muat momen lama".
+- Story 24 jam: teks + media (maks 4), strip story di Momen, viewer geser, hapus otomatis saat kedaluwarsa.
+- Dompet koin: top up, kirim ke teman, riwayat transaksi (koin demo, bukan uang sungguhan).
 - Profil: nama, bio, HP, gender, tanggal lahir, discoverable, dan foto profil.
 - Upload gambar/audio/video/PDF ke `storage/uploads`.
 - Gateway WebSocket PHP CLI tanpa dependency eksternal.
 - Push notification FCM: data-only payload, channel Pesan/Panggilan, registrasi token via `/push/register`.
-- Voice call 1-1 audio via WebRTC (STUN Google) + signaling REST `/calls/*` + realtime `call_*`; tombol telepon di chat langsung.
+- Voice/video call 1-1 via WebRTC (STUN Google) + signaling REST `/calls/*` + realtime `call_*`; tombol telepon dan video di chat langsung.
+- Panggilan grup suara (mesh WebRTC): buat room dari info grup, gabung dari notifikasi, daftar partisipan realtime.
 - Klien Android Compose dengan 4 tab: Obrolan, Kontak, Jelajah, Saya.
 
 ## Stack
@@ -76,7 +79,7 @@ python3 tools/smoke.py      # REST
 python3 tools/ws_smoke.py   # WebSocket
 ```
 
-Status terakhir: REST **26/26** dan WebSocket **6/6** lolos.
+Status terakhir: REST **127/127** dan WebSocket **6/6** lolos.
 
 ## Menjalankan Android
 
@@ -135,8 +138,9 @@ Kode tetap kompatibel dengan PHP 8.3/8.4. Fitur yang hanya ada di 8.3/8.4 belum 
 - SQLite cocok untuk demo; MySQL disarankan untuk produksi. Mode WAL, `busy_timeout`, dan retry singkat di gateway WS menjaga realtime tetap hidup saat API menulis bersamaan.
 - Gateway WebSocket saat ini single-process dan polling database tiap 350 ms. Untuk trafik besar, pindah ke Workerman/Swoole atau pub/sub Redis.
 - Push pakai FCM HTTP v1: taruh service account JSON di `backend/storage/fcm-service-account.json` + isi `FCM_PROJECT_ID` di `.env`. Tanpa itu, push nonaktif dan chat tetap jalan via WS saat app terbuka.
-- Voice call butuh izin Mic + koneksi UDP/STUN (`stun:stun.l.google.com:19302`). Di LAN ketat, siapkan TURN sendiri.
-- Fitur panggilan suara/video dan monetisasi belum tersedia.
+- Voice call butuh izin Mic + koneksi UDP/STUN (`stun:stun.l.google.com:19302`). Di LAN ketat, siapkan TURN sendiri. Video call butuh izin Kamera.
+- Pesan teks terenkripsi end-to-end (AES-GCM + distribusi kunci RSA antar perangkat). Bukan ratchet produksi: tanpa forward secrecy dan rotasi otomatis.
+- Dompet hanya koin demo (top up + transfer antar user), bukan uang sungguhan.
 - `.env` contoh memakai CORS `*`; batasi origin di produksi.
 
 ## Lisensi dan originalitas
