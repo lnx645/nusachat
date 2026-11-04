@@ -21,6 +21,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Izin minimal: baca kode + tulis artifact. Tanpa ini token bawaan
+# mengikuti default repo yang bisa lebih longgar.
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   backend:
     name: Backend (lint + migrate + smoke)
