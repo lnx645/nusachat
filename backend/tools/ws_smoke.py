@@ -8,6 +8,8 @@ Requires the API (PHP built-in server) and the Erlang gateway
 (realtime/nusachat_realtime, port 8091) to be running.
 """
 import base64
+import hashlib
+import hmac
 import json
 import os
 import socket
@@ -247,6 +249,13 @@ def main():
     status, payload = http("POST", "/calls/end", {"call_id": call_id}, token=nusa)
     check("call end", status == 200 and payload.get("ok"), f"status={status} {payload}")
 
+    # Signaling NVP/1 (nusa.call.v1) + relay UDP + echo + budget.
+    if "8091" in WS_URL:
+        run_nvp_checks(nusa, sari, sari_id, ws, ws_sari)
+
+    # Tulis-buta via socket: ack/read/typing tanpa REST (hibrida).
+    run_client_event_checks(nusa, sari, conv_id, ws, ws_sari)
+
     # Live nearby via Erlang (no PHP polling): location.update answers
     # nearby.result, later updates push nearby.changed to subscribers.
     # Gateway satu-satunya adalah Erlang (8091).
@@ -295,6 +304,205 @@ def run_nearby_live_checks(nusa, sari):
     ws_n.send_text(json.dumps({"type": "nearby.unsubscribe"}))
     ws_s.close()
     ws_n.close()
+
+
+def run_client_event_checks(nusa, sari, conv_id, ws, ws_sari):
+    from datetime import datetime, timedelta, timezone
+    body = "WS action " + uuid.uuid4().hex[:8]
+    status, payload = http("POST", "/conversations/send", {
+        "id": conv_id,
+        "type": "text",
+        "body": body,
+        "client_id": "wsev-" + uuid.uuid4().hex,
+    }, token=sari)
+    check("action probe send", status == 201, f"status={status} {payload}")
+    msg_id = payload.get("data", {}).get("message", {}).get("id")
+
+    ws.send_text(json.dumps({
+        "type": "message.ack",
+        "data": {"conversation_id": conv_id, "message_id": msg_id},
+    }))
+    ev = ws_sari.read_json(predicate=lambda e: (
+        e.get("type") == "ack" and e.get("data", {}).get("message_id") == msg_id
+    ))
+    check("ack event via socket", ev["data"].get("user_id") == 1, str(ev)[:200])
+    status, payload = http("GET", f"/conversations/messages?id={conv_id}&after_id={msg_id - 1}", token=nusa)
+    got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+    exp = next((m.get("expires_at") for m in got if m["id"] == msg_id), None)
+    grace_ok = False
+    if exp:
+        exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+        grace_ok = exp_dt <= datetime.now(timezone.utc) + timedelta(hours=24, minutes=5)
+    check("ack via socket graces", status == 200 and grace_ok, f"expires_at={exp}")
+
+    ws.send_text(json.dumps({
+        "type": "message.read",
+        "data": {"conversation_id": conv_id, "message_id": msg_id},
+    }))
+    ev = ws_sari.read_json(predicate=lambda e: (
+        e.get("type") == "read" and e.get("data", {}).get("message_id") == msg_id
+    ))
+    check("read event via socket", ev["data"].get("user_id") == 1, str(ev)[:200])
+    status, payload = http("GET", f"/conversations/show?id={conv_id}", token=nusa)
+    unread = payload.get("data", {}).get("conversation", {}).get("unread_count")
+    check("read via socket clears", status == 200 and unread == 0, f"unread={unread}")
+
+    ws.send_text(json.dumps({
+        "type": "chat.typing",
+        "data": {"conversation_id": conv_id},
+    }))
+    ev = ws_sari.read_json(predicate=lambda e: (
+        e.get("type") == "typing" and e.get("data", {}).get("conversation_id") == conv_id
+    ))
+    check("typing via socket", ev["data"].get("user_id") == 1 and ev["data"].get("display_name"), str(ev)[:200])
+
+    # Frame rusak: diabaikan, koneksi tetap hidup.
+    ws.send_text(json.dumps({"type": "message.ack", "data": {"conversation_id": -5}}))
+    ws.send_text(json.dumps({"type": "ping"}))
+    pong = ws.read_json(predicate=lambda e: e.get("type") == "pong")
+    check("bad frame survives", pong["type"] == "pong", str(pong)[:100])
+
+
+def nvp_secret():
+    """APP_SECRET yang dipakai server: .env backend, else default dev Erlang."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        with open(os.path.join(here, "..", ".env"), encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("APP_SECRET="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return "dev-secret-change-me-please-32-bytes-min"
+
+
+def nvp_token(call_id, user_id, secret):
+    """Cermin nusa_voice_relay:call_token/2 + Calls::nvpToken."""
+    mac = hmac.new(secret.encode(), b"nvp-v1"
+                    + struct.pack("!Q", call_id) + struct.pack("!Q", user_id),
+                    hashlib.sha256).digest()
+    return struct.unpack("!I", mac[:4])[0]
+
+
+def nvp_packet(call_id, slot, token, seq, ts, payload, flags=0):
+    return (struct.pack("!BBIBBIHI", 0x4E, 0x01, call_id, slot, flags,
+                        token & 0xFFFFFFFF, seq & 0xFFFF, ts & 0xFFFFFFFF)
+            + payload)
+
+
+def run_nvp_checks(nusa, sari, sari_id, ws, ws_sari):
+    secret = nvp_secret()
+
+    # 1. offer via WS -> call.prepared (caller) + call_offer (callee).
+    key_ct = base64.urlsafe_b64encode(os.urandom(48)).decode().rstrip("=")
+    salt = base64.urlsafe_b64encode(os.urandom(4)).decode().rstrip("=")
+    codecs = ["opus", "amr-wb"]
+    ws.send_text(json.dumps({"type": "call.offer", "data": {
+        "to_user_id": sari_id, "codecs": codecs, "key_ct": key_ct,
+        "salt": salt, "kind": "audio"}}))
+    prep = ws.read_json(predicate=lambda e: e.get("type") in ("call.prepared", "call.error"))
+    check("nvp offer prepared", prep.get("type") == "call.prepared", str(prep)[:200])
+    if prep.get("type") != "call.prepared":
+        return
+    nvp_id = prep["data"]["call_id"]
+    check("nvp caller slot 0", prep["data"].get("slot") == 0, str(prep["data"])[:200])
+    relay_port = prep["data"].get("relay_port", 8092)
+    offer_ev = ws_sari.read_json(predicate=lambda e: (
+        e.get("type") == "call_offer"
+        and e.get("data", {}).get("call", {}).get("id") == nvp_id))
+    got = offer_ev.get("data", {})
+    check("nvp offer intact", got.get("codecs") == codecs
+          and got.get("key_ct") == key_ct and got.get("salt") == salt,
+          str(offer_ev)[:200])
+
+    # 2. answer via WS -> call.prepared (callee) + call_answer (caller).
+    ws_sari.send_text(json.dumps({"type": "call.answer", "data": {
+        "call_id": nvp_id, "accept": True, "codec": "opus"}}))
+    prep_s = ws_sari.read_json(predicate=lambda e: e.get("type") in ("call.prepared", "call.error"))
+    check("nvp answer prepared", prep_s.get("type") == "call.prepared", str(prep_s)[:200])
+    check("nvp callee slot 1", prep_s.get("data", {}).get("slot") == 1, str(prep_s)[:200])
+    ans_ev = ws.read_json(predicate=lambda e: (
+        e.get("type") == "call_answer"
+        and e.get("data", {}).get("call", {}).get("id") == nvp_id))
+    check("nvp answer codec", ans_ev.get("data", {}).get("codec") == "opus", str(ans_ev)[:200])
+
+    # 3. Token silang 3 implementasi: Erlang == PHP == python.
+    tok_erl_nusa = prep["data"]["token"]
+    tok_erl_sari = prep_s["data"]["token"]
+    _, me_n = http("GET", "/users/me", token=nusa)
+    nusa_id = me_n["data"]["user"]["id"]
+    st, pay = http("POST", "/calls/nvp_join", {"call_id": nvp_id}, token=nusa)
+    php_nusa = pay.get("data", {}) if pay.get("ok") else {}
+    st2, pay2 = http("POST", "/calls/nvp_join", {"call_id": nvp_id}, token=sari)
+    php_sari = pay2.get("data", {}) if pay2.get("ok") else {}
+    check("nvp php join ok", st == 200 and st2 == 200, f"{st} {st2} {pay} {pay2}"[:200])
+    check("nvp token caller xxx", nvp_token(nvp_id, nusa_id, secret) == tok_erl_nusa == php_nusa.get("token"),
+          f"erl={tok_erl_nusa} php={php_nusa.get('token')}")
+    check("nvp token callee xxx", nvp_token(nvp_id, sari_id, secret) == tok_erl_sari == php_sari.get("token"),
+          f"erl={tok_erl_sari} php={php_sari.get('token')}")
+    check("nvp php slots", php_nusa.get("slot") == 0 and php_sari.get("slot") == 1,
+          f"{php_nusa.get('slot')} {php_sari.get('slot')}")
+
+    # 4. Relay UDP: forward dua arah byte-identik (buta media).
+    host = WS_URL.split("://", 1)[1].split("/", 1)[0].split(":")[0]
+    sock_a = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock_b = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock_a.bind(("127.0.0.1", 0))
+    sock_b.bind(("127.0.0.1", 0))
+    sock_a.settimeout(5)
+    sock_b.settimeout(5)
+    tag_a = os.urandom(16) + b"A" * 20  # 16B tag + 20B ct
+    tag_b = os.urandom(16) + b"B" * 20
+    pkt_a = nvp_packet(nvp_id, 0, tok_erl_nusa, 7, 960, tag_a)
+    pkt_b = nvp_packet(nvp_id, 1, tok_erl_sari, 3, 480, tag_b)
+    check("nvp header 18B", len(pkt_a) - len(tag_a) == 18, f"len={len(pkt_a)}")
+    sock_a.sendto(pkt_a, (host, relay_port))
+    time.sleep(0.3)  # slot 1 belum dikenal -> belum ada forward
+    sock_b.sendto(pkt_b, (host, relay_port))
+    fwd_b, _ = sock_a.recvfrom(2048)
+    check("nvp forward B->A identik", fwd_b == pkt_b, f"len={len(fwd_b)}")
+    sock_a.sendto(pkt_a, (host, relay_port))
+    fwd_a, _ = sock_b.recvfrom(2048)
+    check("nvp forward A->B identik", fwd_a == pkt_a, f"len={len(fwd_a)}")
+
+    # 5. Token salah -> drop; sampah -> relay tetap hidup.
+    bad = nvp_packet(nvp_id, 0, tok_erl_nusa ^ 1, 8, 1020, tag_a)
+    sock_a.sendto(bad, (host, relay_port))
+    sock_b.settimeout(1)
+    try:
+        stray, _ = sock_b.recvfrom(2048)
+        check("nvp bad token drop", False, f"lolos {len(stray)}B")
+    except socket.timeout:
+        check("nvp bad token drop", True)
+    finally:
+        sock_b.settimeout(5)
+    sock_a.sendto(b"\x00\x01sampah", (host, relay_port))
+    ws.send_text(json.dumps({"type": "ping"}))
+    pong = ws.read_json(predicate=lambda e: e.get("type") == "pong")
+    check("nvp garbage survives", pong["type"] == "pong")
+
+    # 6. Echo: pantul ke pengirim (uji rantai 1 HP).
+    ws.send_text(json.dumps({"type": "call.echo", "data": {"call_id": nvp_id, "on": True}}))
+    time.sleep(0.2)
+    pkt_e = nvp_packet(nvp_id, 0, tok_erl_nusa, 9, 1920, tag_a)
+    sock_a.sendto(pkt_e, (host, relay_port))
+    echo, _ = sock_a.recvfrom(2048)
+    check("nvp echo identik", echo == pkt_e, f"len={len(echo)}")
+    ws.send_text(json.dumps({"type": "call.echo", "data": {"call_id": nvp_id, "on": False}}))
+
+    # 7. Budget framing profil hemat: 60 ms opus ~105B + tag 16 + header 18.
+    frame = 18 + 16 + 105
+    kbps = frame * 8 / 0.06 / 1000
+    check("nvp budget hemat <20kbps", kbps < 20, f"{frame}B -> {kbps:.1f} kbps")
+
+    # 8. End via WS -> call_end ke peer.
+    ws.send_text(json.dumps({"type": "call.end", "data": {"call_id": nvp_id}}))
+    end_ev = ws_sari.read_json(predicate=lambda e: (
+        e.get("type") == "call_end" and e.get("data", {}).get("call_id") == nvp_id))
+    check("nvp end event", end_ev["data"].get("reason") == "hangup", str(end_ev)[:200])
+    sock_a.close()
+    sock_b.close()
 
 
 def finish():

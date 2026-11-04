@@ -123,7 +123,12 @@ class Messages extends MY_Controller
 
         $messageId = $this->int_param('message_id');
         $message = $this->message_model->find($messageId);
-        if (!$message || $message['revoked_at'] !== null) {
+        if (!$message) {
+            // Relay: bintang atas pesan tersapu = no-op sukses (idempotent,
+            // operasi personal — jangan ganggu pengguna dengan 404).
+            $this->ok(['starred' => true], 201);
+        }
+        if ($message['revoked_at'] !== null) {
             $this->fail('Message not found.', 404, 'not_found');
         }
         if (!$this->conversation_model->isMember((int) $message['conversation_id'], (int) $user['id'])) {
@@ -174,12 +179,10 @@ class Messages extends MY_Controller
 
         $messageId = $this->int_param('message_id');
         $message = $this->message_model->find($messageId);
-        if (!$message) {
-            $this->fail('Message not found.', 404, 'not_found');
-        }
-        if (!$this->conversation_model->isMember((int) $message['conversation_id'], (int) $user['id'])) {
+        if ($message && !$this->conversation_model->isMember((int) $message['conversation_id'], (int) $user['id'])) {
             $this->fail('Conversation not found.', 404, 'not_found');
         }
+        // Relay: sembunyikan pesan tersapu tetap sukses (idempotent).
         $this->message_model->hide($messageId, (int) $user['id']);
         $this->message_model->unstar($messageId, (int) $user['id']);
         $this->ok(['hidden' => true]);

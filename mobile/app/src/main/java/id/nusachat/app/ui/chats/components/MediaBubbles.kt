@@ -3,6 +3,7 @@ package id.nusachat.app.ui.chats.components
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
+import android.util.LruCache
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -73,25 +74,52 @@ fun ImageBubble(url: String, onClick: () -> Unit) {
 }
 
 /**
+ * Cache thumbnail video antar bubble: scroll bolak-balik tidak decode ulang
+ * dari jaringan. Entri yang digusur TIDAK di-recycle (mungkin masih tampil);
+ * GC yang membebaskannya setelah tak direferensi.
+ */
+private const val VIDEO_THUMB_MAX_BYTES = 16 * 1024 * 1024
+
+private val videoThumbCache = object : LruCache<String, Bitmap>(VIDEO_THUMB_MAX_BYTES) {
+    override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+}
+
+private fun decodeVideoThumb(url: String): Bitmap? {
+    val retriever = MediaMetadataRetriever()
+    try {
+        retriever.setDataSource(url, HashMap())
+        val raw = retriever.getFrameAtTime(0) ?: return null
+        if (raw.width <= 0 || raw.height <= 0) {
+            raw.recycle()
+            return null
+        }
+        val targetW = 460
+        val targetH = (targetW.toFloat() / raw.width * raw.height).toInt().coerceIn(1, 800)
+        if (raw.width == targetW && raw.height == targetH) return raw
+        val scaled = Bitmap.createScaledBitmap(raw, targetW, targetH, true)
+        // Frame full-res hanya perantara: bebaskan segera setelah diskala.
+        if (scaled !== raw) raw.recycle()
+        return scaled
+    } finally {
+        runCatching { retriever.release() }
+    }
+}
+
+/**
  * Bubble video ala LINE: thumbnail frame + tombol play + badge, ketuk untuk putar.
  */
 @Composable
 fun VideoBubble(url: String) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    var frame by remember(url) { mutableStateOf<Bitmap?>(null) }
+    var frame by remember(url) { mutableStateOf(videoThumbCache.get(url)) }
     LaunchedEffect(url) {
-        withContext(Dispatchers.IO) {
-            frame = runCatching {
-                val retriever = MediaMetadataRetriever()
-                retriever.setDataSource(url, HashMap())
-                val raw = retriever.getFrameAtTime(0)
-                retriever.release()
-                raw?.let {
-                    val targetW = 460
-                    val targetH = (targetW.toFloat() / it.width * it.height).toInt().coerceIn(1, 800)
-                    Bitmap.createScaledBitmap(it, targetW, targetH, true)
-                }
-            }.getOrNull()
+        if (frame != null) return@LaunchedEffect
+        val bmp = withContext(Dispatchers.IO) {
+            runCatching { decodeVideoThumb(url) }.getOrNull()
+        }
+        if (bmp != null) {
+            videoThumbCache.put(url, bmp)
+            frame = bmp
         }
     }
     Box(

@@ -20,16 +20,26 @@ class Key_model extends CI_Model
     {
         $now = now_iso();
         $existing = $this->store->one(
-            'SELECT id FROM device_keys WHERE user_id = ? AND device_id = ?',
+            'SELECT id, public_key FROM device_keys WHERE user_id = ? AND device_id = ?',
             [$userId, $deviceId]
         );
         if ($existing) {
+            $changed = trim((string) ($existing['public_key'] ?? '')) !== $publicKey;
             $this->store->update(
                 'device_keys',
                 ['public_key' => $publicKey, 'updated_at' => $now],
                 'id = ?',
                 [(int) $existing['id']]
             );
+            if ($changed) {
+                // Reinstall HP sama: RSA baru = blob lama tak terbuka selamanya.
+                // Hapus agar peer tak menunggu holder mati + re-key bisa jalan.
+                $this->store->delete(
+                    'conversation_keys',
+                    'user_id = ? AND device_id = ?',
+                    [$userId, $deviceId]
+                );
+            }
             return;
         }
         $this->store->insert('device_keys', [
@@ -41,11 +51,11 @@ class Key_model extends CI_Model
         ]);
     }
 
-    /** @return array<int, array{device_id: string, public_key: string}> */
+    /** @return array<int, array{device_id: string, public_key: string, updated_at: string}> */
     public function deviceKeys(int $userId): array
     {
         return $this->store->all(
-            'SELECT device_id, public_key FROM device_keys WHERE user_id = ? ORDER BY updated_at DESC',
+            'SELECT device_id, public_key, updated_at FROM device_keys WHERE user_id = ? ORDER BY updated_at DESC',
             [$userId]
         );
     }

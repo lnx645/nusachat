@@ -24,8 +24,26 @@ class ChatCache(context: Context) {
     private fun dao() = ChatDatabase.get(app).chatDao()
 
     suspend fun saveMessages(messages: List<Message>): Unit = withContext(Dispatchers.IO) {
-        if (messages.isEmpty()) return@withContext
-        dao().upsertAll(messages.filter { it.id != 0L }.map { it.toRow() })
+        val rows = messages.filter { it.id != 0L }
+        if (rows.isEmpty()) return@withContext
+        // Hasil dekrip gagal (placeholder/cipher) tak boleh menimpa cache
+        // terbaca — cegah trauma reinstall menular ke cache bagus.
+        val (ok, suspect) = rows.partition { isReadableForCache(it) }
+        val skip = if (suspect.isEmpty()) {
+            emptySet()
+        } else {
+            val existing = dao().byIds(suspect.map { it.id })
+                .mapNotNull { it.toMessage() }.associateBy { it.id }
+            suspect.filter { shouldKeepExisting(existing[it.id], it) }
+                .map { it.id }.toSet()
+        }
+        val final = (ok + suspect.filter { it.id !in skip }).map { it.toRow() }
+        if (final.isNotEmpty()) dao().upsertAll(final)
+    }
+
+    /** Jumlah pesan server di cache (pendeteksi device baru untuk restore). */
+    suspend fun totalCount(): Int = withContext(Dispatchers.IO) {
+        runCatching { dao().totalCount() }.getOrDefault(0)
     }
 
     suspend fun saveMessage(message: Message): Unit = withContext(Dispatchers.IO) {
@@ -79,6 +97,28 @@ class ChatCache(context: Context) {
         if (lastId > current) dao().saveCursor(SyncState(conversationId, lastId))
     }
 
+    companion object {
+        /** Baris layak simpan tanpa syarat (terbaca / non-teks). */
+        fun isReadableForCache(m: Message): Boolean {
+            if (m.type != "text" || m.body == null) return true
+            val b = m.body
+            if (b == id.nusachat.app.data.SessionCrypto.PLACEHOLDER_BROKEN) return false
+            if (b == id.nusachat.app.data.SessionCrypto.PLACEHOLDER_SELF) return false
+            return id.nusachat.app.data.E2eeManager.isReadableBody(b)
+        }
+
+        /**
+         * True = jangan timpa [existing] dengan [incoming] (masuk tak terbaca,
+         * lama terbaca). Tanpa existing selalu simpan.
+         */
+        fun shouldKeepExisting(existing: Message?, incoming: Message): Boolean {
+            if (existing == null) return false
+            if (incoming.type != "text" || incoming.body == null) return false
+            if (isReadableForCache(incoming)) return false
+            return isReadableForCache(existing)
+        }
+    }
+
     private fun Message.toRow(): CachedMessage = CachedMessage(
         id = id,
         conversationId = conversationId,
@@ -100,4 +140,22 @@ class ChatCache(context: Context) {
             )
         }.getOrNull()
     }
+
+    /**
+     * Pangkas cache pesan sementara: baris lebih tua dari jendela grup
+     * dihapus. System tidak ikut (cermin server); antre pending tidak
+     * pernah dihapus (pesan belum terkirim = milik pengguna).
+     */
+    suspend fun pruneDisappearing(conversationId: Long, days: Int): Int =
+        withContext(Dispatchers.IO) {
+            if (days <= 0) return@withContext 0
+            val cutoff = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+                .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+                .format(java.util.Date(System.currentTimeMillis() - days * 86_400_000L))
+            val stale = dao().allForConversation(conversationId).filter { row ->
+                row.createdAt < cutoff && !row.pending && row.toMessage()?.type != "system"
+            }
+            if (stale.isNotEmpty()) dao().deleteByIds(stale.map { it.id })
+            stale.size
+        }
 }

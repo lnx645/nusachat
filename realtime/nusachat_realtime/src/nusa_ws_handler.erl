@@ -1,7 +1,7 @@
 %%%-------------------------------------------------------------------
 %%% @doc Cowboy WebSocket handler. Auth via ?token= (JWT HS256 + users
 %%% lookup), app ping/pong, server ping every 25s, per-user fan-out
-%%% via nusa_registry. Wire-compatible with backend/tools/ws-server.php.
+%%% via nusa_registry. Bentuk kabel v1 didefinisikan nusa_envelope.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(nusa_ws_handler).
@@ -82,6 +82,42 @@ websocket_handle({text, Msg}, State) ->
         #{<<"type">> := <<"nearby.unsubscribe">>} ->
             nusa_nearby:unsubscribe(self()),
             {ok, State};
+        #{<<"type">> := Type, <<"data">> := Data}
+          when Type =:= <<"message.ack">>; Type =:= <<"message.read">>;
+               Type =:= <<"chat.typing">> ->
+            %% Tulis-buta: tanpa respons; callee crash pun koneksi tetap hidup.
+            #{user_id := UserId} = State,
+            try nusa_client_events:handle(UserId, Type, Data) of
+                _ -> ok
+            catch
+                C:R2 ->
+                    error_logger:warning_msg("client event failed ~p:~p~n", [C, R2]),
+                    ok
+            end,
+            {ok, State};
+        %% --- Signaling voice `nusa.call.v1': butuh balasan (token/prepared).
+        #{<<"type">> := Type, <<"data">> := Data}
+          when Type =:= <<"call.offer">>; Type =:= <<"call.answer">>;
+               Type =:= <<"call.reject">>; Type =:= <<"call.end">>;
+               Type =:= <<"call.room_join">>; Type =:= <<"call.room_leave">>;
+               Type =:= <<"call.echo">> ->
+            #{user_id := UserId} = State,
+            Result = try nusa_call:handle(UserId, Type, Data) of
+                         R -> R
+                     catch
+                         C:R2 ->
+                             error_logger:warning_msg(
+                               "call signaling failed ~p:~p~n", [C, R2]),
+                             ok
+                     end,
+            case Result of
+                {reply, RType, RData} ->
+                    Res = jsx:encode(#{<<"type">> => RType,
+                                       <<"data">> => RData}),
+                    {reply, {text, Res}, State};
+                ok ->
+                    {ok, State}
+            end;
         #{<<"type">> := T} ->
             error_logger:info_msg("ws unhandled type=~p~n", [T]),
             {ok, State};

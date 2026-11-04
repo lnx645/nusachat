@@ -53,7 +53,7 @@ import id.nusachat.app.ui.GroupCallUiState
 import id.nusachat.app.ui.components.NusaAvatar
 import id.nusachat.app.ui.components.NusaFilledIconButton
 import id.nusachat.app.ui.components.NusaIconButton
-import id.nusachat.app.ui.theme.NusaGreen
+import id.nusachat.app.ui.theme.NusaTeal
 import id.nusachat.app.ui.theme.NusaIcons
 import kotlinx.coroutines.delay
 
@@ -74,8 +74,8 @@ private fun Modifier.callBackdrop(): Modifier = drawBehind {
     drawCircle(
         brush = Brush.radialGradient(
             colors = listOf(
-                NusaGreen.copy(alpha = 0.28f),
-                NusaGreen.copy(alpha = 0.07f),
+                NusaTeal.copy(alpha = 0.28f),
+                NusaTeal.copy(alpha = 0.07f),
                 Color.Transparent,
             ),
             center = topGlow,
@@ -220,7 +220,7 @@ fun IncomingCallScreen(
             ) {
                 Text(
                     text = if (state.video) "PANGGILAN VIDEO MASUK" else "PANGGILAN MASUK",
-                    color = NusaGreen,
+                    color = NusaTeal,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 2.2.sp,
@@ -273,7 +273,7 @@ fun IncomingCallScreen(
                 IncomingAction(
                     icon = NusaIcons.Call,
                     label = "Jawab",
-                    container = NusaGreen,
+                    container = NusaTeal,
                     contentColor = Color(0xFF04220F),
                     onClick = onAnswer,
                 )
@@ -298,7 +298,7 @@ private fun CallTopBar() {
                 modifier = Modifier
                     .size(8.dp)
                     .clip(CircleShape)
-                    .background(NusaGreen),
+                    .background(NusaTeal),
             )
             Spacer(Modifier.width(8.dp))
             Text(
@@ -320,7 +320,7 @@ private fun CallTopBar() {
             Icon(
                 painter = painterResource(id = NusaIcons.Shield),
                 contentDescription = null,
-                tint = NusaGreen,
+                tint = NusaTeal,
                 modifier = Modifier.size(13.dp),
             )
             Spacer(Modifier.width(6.dp))
@@ -365,7 +365,7 @@ internal fun PulsingAvatar(
                     .size(146.dp + 86.dp * phase)
                     .border(
                         width = 1.dp,
-                        color = NusaGreen.copy(alpha = (1f - phase) * 0.26f),
+                        color = NusaTeal.copy(alpha = (1f - phase) * 0.26f),
                         shape = CircleShape,
                     ),
             )
@@ -411,7 +411,7 @@ private fun CallStatusPill(
             modifier = Modifier
                 .size(7.dp)
                 .clip(CircleShape)
-                .background(if (active) NusaGreen else Color.White.copy(alpha = 0.7f)),
+                .background(if (active) NusaTeal else Color.White.copy(alpha = 0.7f)),
         )
         Spacer(Modifier.width(8.dp))
         Text(
@@ -590,7 +590,7 @@ fun GroupCallScreen(
                     IncomingAction(
                         icon = NusaIcons.Call,
                         label = "Terima",
-                        container = NusaGreen,
+                        container = NusaTeal,
                         contentColor = Color.White,
                         onClick = onAccept,
                     )
@@ -633,11 +633,11 @@ private fun CallAction(
                 .size(56.dp)
                 .clip(CircleShape)
                 .background(
-                    if (active) NusaGreen.copy(alpha = 0.20f) else Color.White.copy(alpha = 0.07f)
+                    if (active) NusaTeal.copy(alpha = 0.20f) else Color.White.copy(alpha = 0.07f)
                 )
                 .border(
                     width = 1.dp,
-                    color = if (active) NusaGreen.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.10f),
+                    color = if (active) NusaTeal.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.10f),
                     shape = CircleShape,
                 ),
         ) {
@@ -648,7 +648,7 @@ private fun CallAction(
                 Icon(
                     painter = painterResource(id = icon),
                     contentDescription = label,
-                    tint = if (active) NusaGreen else Color.White,
+                    tint = if (active) NusaTeal else Color.White,
                     modifier = Modifier.size(24.dp),
                 )
             }
@@ -656,7 +656,7 @@ private fun CallAction(
         Spacer(Modifier.height(8.dp))
         Text(
             text = label,
-            color = if (active) NusaGreen else CallTextDim,
+            color = if (active) NusaTeal else CallTextDim,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
         )

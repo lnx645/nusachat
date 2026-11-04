@@ -38,6 +38,16 @@ data class GroupCallRoom(
     val participants: List<RoomParticipant> = emptyList(),
 )
 
+data class NvpJoinResult(
+    val call: VoiceCall,
+    val slot: Int,
+    val token: Long,
+    val relayPort: Int,
+    /** Hanya untuk room (kunci deterministik server). */
+    val keyCt: String? = null,
+    val salt: String? = null,
+)
+
 internal fun JSONObject.toRoomParticipant(): RoomParticipant = RoomParticipant(
     user = optJSONObject("user")?.toUser() ?: User(0, "", "Pengguna"),
     status = optString("status", "invited"),
@@ -137,6 +147,19 @@ class CallRepository(private val api: ApiClient) {
                 .put("to_user_id", toUserId)
                 .put("sdp", sdp)
                 .put("signal", signal)
+        )
+    }
+
+    /** Kredensial media NVP/1 (cermin WS `call.prepared`). */
+    suspend fun nvpJoin(callId: Long): NvpJoinResult {
+        val data = api.post("/calls/nvp_join", JSONObject().put("call_id", callId))
+        return NvpJoinResult(
+            call = data.getJSONObject("call").toVoiceCall(),
+            slot = data.optInt("slot"),
+            token = data.optLong("token"),
+            relayPort = data.optInt("relay_port", 8092),
+            keyCt = data.optString("key_ct").ifBlank { null },
+            salt = data.optString("salt").ifBlank { null },
         )
     }
 

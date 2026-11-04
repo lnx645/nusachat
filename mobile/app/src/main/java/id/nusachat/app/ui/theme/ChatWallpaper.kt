@@ -30,7 +30,7 @@ data class ResolvedChatTheme(
     val customScrim: Float = 0f,
 )
 
-private val LightMine = NusaGreen
+private val LightMine = NusaTeal
 private val LightMineText = Color.White
 private val LightOther = Color.White
 private val LightOtherText = Color(0xFF111111)
@@ -77,6 +77,17 @@ fun builtinWallpapers(): List<Triple<String, String, Long>> = listOf(
     Triple(ChatWallpapers.SOLID_PEACH, "Persik", 0xFFF3DDD3),
     Triple(ChatWallpapers.SOLID_SLATE, "Batu Tulis", 0xFF272E36),
 )
+
+/**
+ * Warna pil di atas wallpaper (tanggal, sistem, mengetik): (latar, teks).
+ * Mengikuti GELAP WALLPAPER, bukan tema aplikasi — supaya tidak terbalik
+ * saat wallpaper gelap + aplikasi terang atau sebaliknya.
+ */
+fun chatPillColors(dark: Boolean): Pair<Color, Color> = if (dark) {
+    Color(0xFF182229) to Color(0xFF8696A0)
+} else {
+    Color.White to Color(0xFF54656F)
+}
 
 /** Id wallpaper yang dianggap gelap (untuk bubble AUTO). */
 fun isDarkWallpaper(wallpaperId: String, systemDark: Boolean): Boolean = when (wallpaperId) {

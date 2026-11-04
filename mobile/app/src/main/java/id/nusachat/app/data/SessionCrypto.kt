@@ -79,15 +79,15 @@ class SessionCrypto(
         if (!conv.isGroup) {
             val peerId = conv.peer?.id
                 ?: conv.members.firstOrNull { it.id != myUserId }?.id
-                ?: return legacy.encrypt(conv.id, plain)
+                ?: return legacyFallback(conv.id, plain)
             val devices = peerDevices(peerId)
-            if (devices.isEmpty()) return legacy.encrypt(conv.id, plain)
+            if (devices.isEmpty()) return legacyFallback(conv.id, plain)
             val pt = plain.toByteArray(Charsets.UTF_8)
             val parts = mutableMapOf<String, EnvelopeV2.Part>()
             for (dev in devices) {
                 encryptPairwise(peerId, dev, pt)?.let { parts[dev] = it }
             }
-            if (parts.isEmpty()) return legacy.encrypt(conv.id, plain)
+            if (parts.isEmpty()) return legacyFallback(conv.id, plain)
             return checkSize(EnvelopeV2.pairwise(identity.deviceId(), parts))
         }
         val members = conv.members.map { it.id }.filter { it != myUserId }.distinct()
@@ -100,7 +100,7 @@ class SessionCrypto(
             peerDevices(uid).forEach { targets.add(uid to it) }
         }
         // Tanpa target v2 sama sekali: legacy (kompatibilitas).
-        if (targets.isEmpty()) return legacy.encrypt(conv.id, plain)
+        if (targets.isEmpty()) return legacyFallback(conv.id, plain)
         val want = targets.map { "${it.first}:${it.second}" }.toSet()
         var chain = store.loadSendChain(conv.id)
         if (chain == null || store.loadSkdmShared(conv.id) != want) {
@@ -187,6 +187,22 @@ class SessionCrypto(
             delivered.add("$uid:$dev")
         }
         return delivered
+    }
+
+    /**
+     * Fallback legacy yang anti-racun: kunci lokal BARU hanya boleh dibuat
+     * bila server belum punya blob kanonis sama sekali (percakapan baru).
+     * Bila kanonis ada di tempat lain (habis reinstall) → lempar
+     * [KEY_SYNC_NEEDED]: pengirim harus heal dulu, JANGAN buat kunci tandingan
+     * (K2) yang meracuni blob dan mengunci percakapan selamanya.
+     */
+    private suspend fun legacyFallback(convId: Long, plain: String): String {
+        if (legacy.isEnabled(convId)) return legacy.encrypt(convId, plain)
+        val keys = runCatching { repository.convKeys(convId) }.getOrNull()
+        if (keys != null && (keys.devices.isNotEmpty() || keys.holders.isNotEmpty())) {
+            throw SessionCryptoException(KEY_SYNC_NEEDED)
+        }
+        return legacy.encrypt(convId, plain)
     }
 
     private fun checkSize(env: String): String {
@@ -315,8 +331,12 @@ class SessionCrypto(
     }
 
     companion object {
-        const val PLACEHOLDER_BROKEN = "[Pesan terenkripsi tidak dapat dibuka]"
-        const val PLACEHOLDER_SELF = "[Pesan terkirim]"
+        /** v2 tak terbuka permanen (forward secrecy): tanpa kurung, rapi. */
+        const val PLACEHOLDER_BROKEN = "Pesan ini tidak tersedia."
+        /** Gema kiriman sendiri di sesi lain: tanpa kurung, rapi. */
+        const val PLACEHOLDER_SELF = "Pesan terkirim."
+        /** Kunci kanonis ada di pihak lain; heal dulu sebelum kirim legacy. */
+        const val KEY_SYNC_NEEDED = "KEY_SYNC_NEEDED"
         private const val OTPK_BATCH = 100
         private const val OTPK_REFILL_BELOW = 20
         private const val MAX_ENVELOPE = 8000

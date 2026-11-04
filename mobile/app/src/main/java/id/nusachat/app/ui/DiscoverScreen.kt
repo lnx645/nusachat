@@ -149,7 +149,7 @@ fun DiscoverScreen(
                     ServiceCard(
                         icon = NusaIcons.Pin,
                         iconBg = Color(0xFFE0F5E9),
-                        iconTint = Color(0xFF06C755),
+                        iconTint = Color(0xFF009688),
                         title = "Orang Terdekat",
                         subtitle = "Di sekitar kamu",
                         modifier = Modifier.weight(1f),

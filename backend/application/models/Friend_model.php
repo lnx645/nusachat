@@ -28,6 +28,43 @@ class Friend_model extends CI_Model
         return $row !== null && $row['status'] === 'accepted';
     }
 
+    /**
+     * Relasi terbaru viewer vs banyak peer dalam 1 query (cermin findBetween:
+     * baris id terbesar per pasangan).
+     *
+     * @param int[] $peerIds
+     * @return array<int, array> peer_id => baris friendships
+     */
+    public function findBetweenMany(int $viewerId, array $peerIds): array
+    {
+        $peerIds = array_values(array_unique(array_filter(
+            array_map('intval', $peerIds),
+            static fn (int $id): bool => $id > 0 && $id !== $viewerId
+        )));
+        if (!$peerIds) {
+            return [];
+        }
+        $placeholders = implode(',', array_fill(0, count($peerIds), '?'));
+        $rows = $this->store->all(
+            'SELECT * FROM friendships
+             WHERE (requester_id = ? AND addressee_id IN (' . $placeholders . '))
+                OR (addressee_id = ? AND requester_id IN (' . $placeholders . '))
+             ORDER BY id DESC',
+            array_merge([$viewerId], $peerIds, [$viewerId], $peerIds)
+        );
+        $out = [];
+        foreach ($rows as $row) {
+            $peer = (int) $row['requester_id'] === $viewerId
+                ? (int) $row['addressee_id']
+                : (int) $row['requester_id'];
+            // ORDER BY id DESC: yang pertama ditemui = terbaru (semantik findBetween).
+            if (!isset($out[$peer])) {
+                $out[$peer] = $row;
+            }
+        }
+        return $out;
+    }
+
     public function create(int $from, int $to, ?string $message = null): int
     {
         $now = now_iso();

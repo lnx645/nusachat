@@ -48,9 +48,10 @@ socket → unregister saat tutup.
 
 ```text
 Transport (bicara Cowboy/HTTP):
-  nusa_ws_handler      handshake JWT ?token=, connected/ping-pong, slot nearby.*
+  nusa_ws_handler      handshake JWT ?token=, connected/ping-pong, slot nearby.* + client events
   nusa_notify_handler  POST /internal/notify dari PHP (cek x-ws-secret)
 Core (logika, tanpa tahu HTTP):
+  nusa_client_events   tulis-buta klien (message.ack/read, chat.typing) — tanpa respons
   nusa_fanout          antar event outbox ke socket + cursor + prune
   nusa_registry        direktori socket per user (ETS + monitor)
   nusa_nearby          orang-terdekat live (ETS lokasi + persist + push delta)
@@ -77,12 +78,26 @@ versionalisasi):
 {"event_id":123,"type":"message","data":{...},"ts":"2026-..Z"}
 ```
 
+Frame klien→server (fire-and-forget, tanpa balasan; frame rusak
+diabaikan, koneksi tetap hidup):
+
+```json
+{"type":"message.ack","data":{"conversation_id":1,"message_id":42}}
+{"type":"message.read","data":{"conversation_id":1,"message_id":42}}
+{"type":"chat.typing","data":{"conversation_id":1}}
+```
+
+Semantik = cermin endpoint REST (`ack`/`read`/`typing`); event
+diteruskan langsung ke socket online (tanpa outbox — offline pulih
+dari penanda persisten). Kenapa hanya tiga ini: docs/ARCHITECTURE.md
+("Hibrida REST + WS").
+
 ## Perintah harian
 
 ```sh
 cd realtime/nusachat_realtime
 rebar3 compile    # kompilasi
-rebar3 eunit      # 22 unit test modul murni (jwt/geo/envelope/fanout)
+rebar3 eunit      # 27 unit test modul murni (jwt/geo/envelope/fanout/client-events)
 rebar3 dialyzer   # cek tipe statis (PLT di-cache, run pertama lambat)
 ```
 

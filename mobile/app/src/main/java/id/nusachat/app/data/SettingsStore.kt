@@ -71,6 +71,20 @@ class SettingsStore(context: Context) {
         _language.value = value
     }
 
+    private val _recentEmojis = MutableStateFlow(
+        prefs.getString(KEY_RECENT_EMOJI, "").orEmpty()
+            .split(EMOJI_SEP).filter { it.isNotEmpty() }.take(MAX_RECENT_EMOJI)
+    )
+    val recentEmojis: StateFlow<List<String>> = _recentEmojis.asStateFlow()
+
+    /** Emoji terakhir dipakai (panel emoji): paling baru di depan, maks 24. */
+    fun pushRecentEmoji(emoji: String) {
+        val next = (listOf(emoji) + _recentEmojis.value.filter { it != emoji })
+            .take(MAX_RECENT_EMOJI)
+        prefs.edit().putString(KEY_RECENT_EMOJI, next.joinToString(EMOJI_SEP)).apply()
+        _recentEmojis.value = next
+    }
+
     /** Draf per percakapan: tetap ada walau pindah chat. */
     fun draftFor(conversationId: Long): String =
         prefs.getString(KEY_DRAFT + conversationId, "").orEmpty()
@@ -116,5 +130,8 @@ class SettingsStore(context: Context) {
         private const val KEY_DRAFT = "draft:"
         private const val KEY_CALL_SEEN = "calls_seen_upto"
         private const val KEY_LANG = "language"
+        private const val KEY_RECENT_EMOJI = "recent_emoji"
+        private const val EMOJI_SEP = "\u001F"
+        private const val MAX_RECENT_EMOJI = 24
     }
 }

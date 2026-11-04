@@ -71,20 +71,25 @@ class E2eeManager(private val context: Context) {
 
     fun decrypt(conversationId: Long, cipherText: String?): String? {
         if (cipherText == null) return null
-        if (!isEnabled(conversationId)) return cipherText // belum ada kunci = tampil apa adanya
+        // Tanpa kunci: teks biasa (pra-E2EE) tampil apa adanya, blob cipher
+        // JANGAN tampil mentah (bocor membingungkan + trauma reinstall).
+        if (!isEnabled(conversationId)) {
+            return if (looksLikeCiphertext(cipherText)) PLACEHOLDER_SYNC else cipherText
+        }
         return try {
             val raw = Base64.decode(cipherText, Base64.NO_WRAP)
             if (raw.size < 13) return cipherText
             val iv = raw.copyOfRange(0, 12)
             val ct = raw.copyOfRange(12, raw.size)
-            val keyB64 = prefs.getString(keyName(conversationId), null) ?: return cipherText
+            val keyB64 = prefs.getString(keyName(conversationId), null)
+                ?: return if (looksLikeCiphertext(cipherText)) PLACEHOLDER_SYNC else cipherText
             val key = SecretKeySpec(Base64.decode(keyB64, Base64.NO_WRAP), "AES")
             val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
                 init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv, 0, 12))
             }
             String(cipher.doFinal(ct), Charsets.UTF_8)
         } catch (_: Exception) {
-            cipherText
+            if (looksLikeCiphertext(cipherText)) PLACEHOLDER_SYNC else cipherText
         }
     }
 
@@ -173,4 +178,93 @@ class E2eeManager(private val context: Context) {
     }
 
     private fun keyName(id: Long) = "e2ee_key_$id"
+
+    companion object {
+        /** Legacy tak terbaca tapi mungkin pulih (ala WhatsApp, tanpa kurung). */
+        const val PLACEHOLDER_SYNC = "Pesan ini tidak tersedia, atau membutuhkan waktu untuk ditampilkan."
+
+        /** String fallback KURUNG era lama → dipetakan ke gaya baru saat tampil. */
+        const val LEGACY_SYNC = "[Menunggu sinkronisasi kunci…]"
+        const val LEGACY_BROKEN = "[Pesan terenkripsi tidak dapat dibuka]"
+        const val LEGACY_SELF = "[Pesan terkirim]"
+        const val LEGACY_ENCRYPTED = "[Pesan terenkripsi]"
+
+        /**
+         * Heuristik blob cipher legacy: base64 panjang tanpa spasi.
+         * Teks biasa (pendek/ada spasi/tanda baca) → false.
+         */
+        fun looksLikeCiphertext(s: String?): Boolean {
+            if (s == null || s.length < 24) return false
+            if (s.any { it.isWhitespace() }) return false
+            if (s.startsWith("[") && s.endsWith("]")) return false
+            return s.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '+' || it == '/' || it == '=' }
+        }
+
+        /** Isi cache layak tampil (bukan placeholder/cipher). */
+        fun isReadableBody(body: String?): Boolean {
+            if (body == null) return true
+            if (body == PLACEHOLDER_SYNC || body == LEGACY_SYNC) return false
+            if (body == LEGACY_BROKEN || body == LEGACY_SELF || body == LEGACY_ENCRYPTED) return false
+            if (body == SessionCrypto.PLACEHOLDER_BROKEN || body == SessionCrypto.PLACEHOLDER_SELF) return false
+            return !looksLikeCiphertext(body)
+        }
+
+        /**
+         * Teks fallback rapi ala WhatsApp untuk body tak terbaca, atau null
+         * bila body normal. Cipher mentah yang lolos = SYNC (mungkin pulih).
+         */
+        fun fallbackTextFor(body: String?): String? {
+            if (body == null) return null
+            if (body == PLACEHOLDER_SYNC || body == LEGACY_SYNC || body == LEGACY_ENCRYPTED) {
+                return PLACEHOLDER_SYNC
+            }
+            if (looksLikeCiphertext(body)) return PLACEHOLDER_SYNC
+            if (body == SessionCrypto.PLACEHOLDER_BROKEN || body == LEGACY_BROKEN) {
+                return SessionCrypto.PLACEHOLDER_BROKEN
+            }
+            if (body == SessionCrypto.PLACEHOLDER_SELF || body == LEGACY_SELF) {
+                return SessionCrypto.PLACEHOLDER_SELF
+            }
+            return null
+        }
+
+        /** Blob fresh = sidik cocok pubkey pemilik saat ini (holder mungkin hidup). */
+        fun blobIsFresh(holderFp: String, currentFp: String?): Boolean =
+            holderFp.isNotBlank() && currentFp != null && holderFp == currentFp
+
+        /**
+         * Ada holder hidup? Blob device-kosong diabaikan (lookup server
+         * strict per-device → tak terbuka siapa pun).
+         */
+        fun anyFreshHolder(
+            holders: List<KeyHolder>,
+            currentFpOf: (KeyHolder) -> String?,
+        ): Boolean = holders.any { h ->
+            h.deviceId.isNotBlank() && blobIsFresh(h.keyFp, currentFpOf(h))
+        }
+
+        /** Re-key hanya userId terkecil (hindari K2 ganda dua pihak keyless). */
+        fun shouldRekey(myId: Long, memberIds: List<Long>): Boolean {
+            val all = (memberIds + myId).filter { it > 0 }.distinct()
+            if (all.isEmpty()) return true
+            return myId == all.min()
+        }
+
+        /** Batas holder dianggap hidup: publish < 60 hari (ganti HP = basi). */
+        const val FRESH_DEVICE_DAYS = 60L
+
+        /**
+         * Device holder hidup? updatedAt kosong/tak parse = true (konservatif:
+         * server lama tanpa kolom → perilaku tunggu seperti dulu).
+         */
+        fun isFreshDevice(updatedAtIso: String, nowMs: Long): Boolean {
+            if (updatedAtIso.isBlank()) return true
+            val at = runCatching {
+                java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+                    .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+                    .parse(updatedAtIso)?.time
+            }.getOrNull() ?: return true
+            return nowMs - at < FRESH_DEVICE_DAYS * 24 * 3600 * 1000L
+        }
+    }
 }

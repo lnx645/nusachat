@@ -327,7 +327,7 @@ private fun ProfileRow(
     title: String,
     subtitle: String,
     onClick: () -> Unit,
-    tint: Color = MaterialTheme.colorScheme.onSurface,
+    tint: Color = MaterialTheme.colorScheme.primary,
     showChevron: Boolean = true,
 ) {
     Row(

@@ -126,6 +126,43 @@ Socket bisa putus (background, jaringan berubah). Karena itu klien tetap melakuk
 
 Pendekatan ini membuat aplikasi tetap berfungsi walau realtime sempat mati.
 
+### Hibrida REST + WS (keputusan arsitektur)
+
+Operasi tulis dibagi dua berdasarkan satu pertanyaan: **apakah penelepon
+butuh respons?**
+
+- **Tetap REST** — `send`, `messages`, `edit`, `revoke`, `react`,
+  `forward`, `pin`, dsb. Butuh respons tegas: id pesan, flag `duplicate`,
+  error validasi 422. Memindahkan ini ke socket berarti membangun
+  RPC-over-socket (`req_id` + timeout + retry + dedup) — menduplikasi
+  HTTP tanpa gain UX, dan memindahkan ±1500 baris aturan bisnis PHP ke
+  Erlang (melawan tujuan "Erlang tipis + mudah maintenance").
+- **Via socket (fire-and-forget)** — `message.ack`, `message.read`,
+  `chat.typing`. Ketiganya idempotent dan penelepon tak memakai respons:
+  ack/read hanya memajukan penanda, typing efemeral. Hemat satu
+  round-trip HTTP untuk aksi tersering, tanpa RPC.
+
+Garansi yang dipertahankan:
+
+1. **Offline aman.** Event socket tidak dipersist (langsung ke socket
+   online); status dipulihkan dari penanda persisten (`last_read`,
+   `message_recipients`) saat fetch berikut. Typing yang hilang tidak
+   masalah.
+2. **Fallback REST.** Klien (`blindWrite`) selalu jatuh ke endpoint REST
+   bila socket tutup; endpoint REST tidak dihapus. Kegagalan WS tidak
+   pernah fatal.
+3. **Semantik identik.** SQL Erlang (`nusa_client_events`) cermin
+   `Message_model::ackUpTo` / `markReadUpTo` / `markRead` — satu-satunya
+   perbedaan: `markRead` Erlang atomik (`UPDATE ... WHERE last_read < ?`).
+4. **Self-healing.** Ack/read yang hilang (race tutup socket) dikirim
+   ulang saat chat dibuka berikut; badge dihitung ulang dari server.
+
+Yang TIDAK dilakukan (sengaja): `message.send` via socket, outbox
+cursor untuk event klien, dan rate-limit per-frame (cukup throttle
+client-side 2,5 dtk untuk typing). Bila suatu hari butuh satu koneksi
+untuk segalanya (ala WhatsApp), bangun di atas pola ini — bukan dengan
+memindahkan REST yang sudah terbukti.
+
 ## Database
 
 | Tabel | Fungsi |
@@ -153,8 +190,8 @@ Waktu disimpan sebagai string ISO-8601 UTC agar konsisten antara SQLite dan MySQ
 - **Networking**: OkHttp + `JSONObject`/`JSONArray`; tidak ada Retrofit/Room/KSP.
 - **Session**: access token, refresh token, dan snapshot user di SharedPreferences privat.
 - **UI**: Compose Material 3 dengan 4 tab bawah. Halaman chat, momen, nearby, dan edit profil adalah overlay yang menyembunyikan bottom bar.
-- **Optimistic send**: pesan langsung muncul dengan `client_id`; saat respons server datang, pesan sementara diganti pesan asli. Event realtime dengan `client_id` yang sama juga direkonsiliasi. Pesan gagal bisa dikirim ulang dari menu long-press.
-- **Chat lanjutan**: long-press untuk balas/edit/teruskan/reaksi/sematkan/tarik, reply preview di composer, lampiran foto/video/audio/file, info grup (anggota, tambah/keluarkan, bisu, keluar, arsip).
+- **Optimistic send**: pesan langsung muncul dengan `client_id`; saat respons server datang, pesan sementara diganti pesan asli. Event realtime dengan `client_id` yang sama juga direkonsiliasi. Pesan gagal bisa dikirim ulang dari contextual bar long-press.
+- **Chat lanjutan**: long-press menyeleksi pesan (contextual bar ala WA: aksi di app bar + overflow ⋮, tombol Balas/Teruskan + reaksi di bawah) untuk balas/edit/teruskan/reaksi/sematkan/tarik, reply preview di composer, lampiran foto/video/audio/file, info grup (anggota, tambah/keluarkan, bisu, keluar, arsip).
 - **Grup**: tautan undangan (`nusachat://group/<token>`, bisa diputar ulang), gabung tanpa berteman, antrean persetujuan admin, role owner/admin/member (admin keluarkan anggota biasa; owner kelola role).
 - **Kontak**: sinkron kontak HP via `READ_CONTACTS` ke `/contacts/sync`, hapus teman dengan konfirmasi.
 - **Momen**: composer multi-foto/video (maks 9, `VideoView` untuk mp4), hapus momen sendiri, pagination `before_id`, posting ulang (`reshared_from_id` + atribusi), bagikan ke chat (kirim ulang teks/media terenkripsi).

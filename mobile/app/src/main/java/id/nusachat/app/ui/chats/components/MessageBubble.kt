@@ -1,6 +1,5 @@
 package id.nusachat.app.ui.chats.components
 import id.nusachat.app.ui.components.NusaTextButton
-import id.nusachat.app.ui.components.NusaMenu
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
@@ -9,9 +8,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,15 +35,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -56,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
@@ -75,6 +79,7 @@ private val MentionSpanRegex = Regex("@((?:semua|all)\\b|[A-Za-z0-9._]{4,20})", 
 
 fun messagePreviewText(message: Message, maxLen: Int = 80): String {
     if (message.revoked) return "Pesan ini telah ditarik"
+    message.body?.let { id.nusachat.app.data.E2eeManager.fallbackTextFor(it)?.take(maxLen) }?.let { return it }
     message.body?.take(maxLen)?.takeIf { it.isNotBlank() }?.let { return it }
     return when (message.type) {
         "image" -> "[Foto]"
@@ -85,6 +90,26 @@ fun messagePreviewText(message: Message, maxLen: Int = 80): String {
         "redpacket" -> "[Amplop merah]"
         else -> "[Pesan]"
     }
+}
+
+/** Keputusan arbitrasi swipe-vs-scroll per event gerakan. */
+internal enum class SwipeArbitration { CLAIM, ABORT, WAIT }
+
+/**
+ * Arbitrasi swipe-to-reply, dievaluasi KONTINU setiap event gerakan (bukan
+ * sekali saat lepas slop): klaim segera saat gerakan searah reply dominan,
+ * serahkan ke scroll daftar saat vertikal menang atau arah berlawanan,
+ * tunggu bila masih ragu. Arah reply tergantung sisi bubble ([forward]:
+ * +1 geser kanan, -1 geser kiri) — mulai dari ruang lega, dorong ke tepi.
+ */
+internal fun arbitrateSwipe(totalDx: Float, totalDy: Float, slop: Float, forward: Float): SwipeArbitration {
+    val dx = totalDx * forward
+    val adx = abs(totalDx)
+    val ady = abs(totalDy)
+    if (dx < -slop) return SwipeArbitration.ABORT
+    if (ady > slop && ady > adx) return SwipeArbitration.ABORT
+    if (dx > slop && dx > ady) return SwipeArbitration.CLAIM
+    return SwipeArbitration.WAIT
 }
 
 /**
@@ -106,22 +131,8 @@ fun MessageBubble(
     compactBottom: Boolean = false,
     onLongPress: () -> Unit = {},
     onRetry: () -> Unit = {},
-    menuOpen: Boolean = false,
-    onDismissMenu: () -> Unit = {},
+    /** Swipe-to-reply (gesek bubble); terpisah dari contextual bar. */
     onReply: (Message) -> Unit = {},
-    onEdit: (Message) -> Unit = {},
-    onForward: (Message) -> Unit = {},
-    onReact: (Message, String) -> Unit = { _, _ -> },
-    onPin: (Message) -> Unit = {},
-    pinned: Boolean = false,
-    onRevoke: (Message) -> Unit = {},
-    onShowInfo: (Message) -> Unit = {},
-    onStar: (Message) -> Unit = {},
-    onSelect: (Message) -> Unit = {},
-    onHide: (Message) -> Unit = {},
-    onReport: (Message) -> Unit = {},
-    onSave: (Message) -> Unit = {},
-    onShare: (Message) -> Unit = {},
     audioPlayingKey: String? = null,
     onAudioToggle: (String) -> Unit = {},
     onImageClick: (String) -> Unit = {},
@@ -144,24 +155,8 @@ fun MessageBubble(
             message = message,
             mine = mine,
             isGroup = isGroup,
-            menuOpen = menuOpen,
-            onDismissMenu = onDismissMenu,
             onLongPress = onLongPress,
             onBubbleClick = onBubbleClick,
-            pinned = pinned,
-            onReply = onReply,
-            onEdit = onEdit,
-            onForward = onForward,
-            onReact = onReact,
-            onPin = onPin,
-            onRevoke = onRevoke,
-            onRetry = onRetry,
-            onShowInfo = onShowInfo,
-            onStar = onStar,
-            onSelect = onSelect,
-            onHide = onHide,
-            onReport = onReport,
-            onShare = onShare,
             selected = selected,
             wallpaperDark = wallpaperDark,
         )
@@ -202,24 +197,31 @@ fun MessageBubble(
 
     val showAvatar = isGroup && !mine
     val avatarVisible = showAvatar && !compactBottom
-    // Swipe horizontal ala WhatsApp: geser bubble melewati ambang untuk membalas.
+    // Swipe-to-reply searah sisi bubble: milik sendiri (kanan) hanya
+    // kiri→kanan, pesan lawan (kiri) hanya kanan→kiri. Gesek pendek
+    // (40.dp) dari mana saja selebar baris langsung membalas.
     val density = LocalDensity.current
-    val thresholdPx = with(density) { 56.dp.toPx() }
+    val thresholdPx = with(density) { 40.dp.toPx() }
     val maxPx = with(density) { 96.dp.toPx() }
     var dragX by remember { mutableFloatStateOf(0f) }
     var released by remember { mutableStateOf(true) }
+    val currentOnReply by rememberUpdatedState(onReply)
+    val currentMessage by rememberUpdatedState(message)
+    val touchSlop = LocalViewConfiguration.current.touchSlop
+    val fwd = (if (mine) 1f else -1f) *
+        (if (LocalLayoutDirection.current == LayoutDirection.Ltr) 1f else -1f)
     val shownX by animateFloatAsState(
         targetValue = if (released) 0f else dragX,
         animationSpec = if (released) tween(220) else snap(),
         label = "swipeReply",
     )
-    val swipeProgress = (abs(shownX) / thresholdPx).coerceIn(0f, 1f)
+    val swipeProgress = (shownX / thresholdPx).coerceIn(0f, 1f)
     Box(modifier = Modifier.fillMaxWidth()) {
-        // Ikon balas tersingkap di sisi yang terbuka saat digeser.
+        // Ikon balas tersingkap di sisi berlawanan arah geser.
         if (swipeProgress > 0.02f) {
             Box(
                 modifier = Modifier
-                    .align(if (shownX > 0) Alignment.CenterStart else Alignment.CenterEnd)
+                    .align(if (fwd > 0) Alignment.CenterStart else Alignment.CenterEnd)
                     .padding(horizontal = 18.dp)
                     .alpha(swipeProgress),
             ) {
@@ -239,22 +241,65 @@ fun MessageBubble(
         Row(
         modifier = Modifier
             .fillMaxWidth()
-            .offset { IntOffset(shownX.roundToInt(), 0) }
-            .draggable(
-                state = rememberDraggableState { delta ->
-                    dragX = (dragX + delta).coerceIn(-maxPx, maxPx)
-                },
-                orientation = Orientation.Horizontal,
-                onDragStarted = { released = false },
-                onDragStopped = { _ ->
-                    released = true
-                    if (abs(dragX) > thresholdPx) {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onReply(message)
+            .offset { IntOffset((shownX * fwd).roundToInt(), 0) }
+            .pointerInput(message.id, thresholdPx, maxPx, touchSlop, fwd) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    var totalDx = 0f
+                    var totalDy = 0f
+                    var dragging = false
+                    var triggered = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id }
+                        if (change == null || !change.pressed) break
+                        // Scroll daftar sudah mengklaim gerakan ini.
+                        if (change.isConsumed) break
+                        val dx = change.position.x - change.previousPosition.x
+                        val dy = change.position.y - change.previousPosition.y
+                        if (triggered) {
+                            // Balasan sudah dikirim mid-swipe: telan sisa
+                            // gerakan supaya daftar tak ikut scroll di bawah jari.
+                            change.consume()
+                        } else if (!dragging) {
+                            totalDx += dx
+                            totalDy += dy
+                            when (arbitrateSwipe(totalDx, totalDy, touchSlop, fwd)) {
+                                // Vertikal/diagonal/lawan arah: milik daftar,
+                                // keluar tanpa consume apa pun.
+                                SwipeArbitration.ABORT -> break
+                                SwipeArbitration.CLAIM -> {
+                                    dragging = true
+                                    released = false
+                                    dragX = (totalDx * fwd).coerceIn(0f, maxPx)
+                                    change.consume()
+                                }
+                                SwipeArbitration.WAIT -> Unit
+                            }
+                        } else {
+                            dragX = (dragX + dx * fwd).coerceIn(0f, maxPx)
+                            change.consume()
+                            // Reply dikirim SAAT lewati ambang, tanpa menunggu
+                            // jari diangkat; bubble memantul kembali.
+                            if (dragX >= thresholdPx) {
+                                triggered = true
+                                released = true
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                currentOnReply(currentMessage)
+                                dragX = 0f
+                            }
+                        }
                     }
-                    dragX = 0f
-                },
-            )
+                    if (dragging && !triggered) {
+                        released = true
+                        if (dragX >= thresholdPx) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            currentOnReply(currentMessage)
+                        }
+                        dragX = 0f
+                    }
+                }
+            }
             .padding(horizontal = 10.dp, vertical = verticalPad),
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.Top,
@@ -307,7 +352,7 @@ fun MessageBubble(
                     shape = bubbleShape,
                     color = bubbleColor,
                     tonalElevation = 0.dp,
-                    shadowElevation = if (isHighlighted) 6.dp else if (menuOpen) 4.dp else 0.dp,
+                    shadowElevation = if (isHighlighted) 6.dp else 0.dp,
                     border = when {
                         selected -> androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
                         isHighlighted -> androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
@@ -335,40 +380,8 @@ fun MessageBubble(
                         groupName = if (!mine && isGroup && message.sender != null && !compactTop) {
                             message.sender.familiarName
                         } else null,
-                        groupNameColor = memberNameColor(message.sender?.id),
+                        groupNameColor = memberNameColor(message.sender?.id, baseOther.luminance() < 0.5f),
                         myId = myId,
-                    )
-                }
-                // Menu apung custom yang ditempel LANGSUNG ke bubble ini
-                // (DropdownMenu = anchor otomatis, dijamin nempel).
-                NusaMenu(
-                    expanded = menuOpen,
-                    onDismissRequest = onDismissMenu,
-                    shape = RoundedCornerShape(24.dp),
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    shadowElevation = 8.dp,
-                    tonalElevation = 0.dp,
-                    modifier = Modifier.width(216.dp),
-                ) {
-                    MessageMenuContent(
-                        message = message,
-                        mine = mine,
-                        pinned = pinned,
-                        onReply = onReply,
-                        onEdit = onEdit,
-                        onForward = onForward,
-                        onReact = onReact,
-                        onPin = onPin,
-                        onRevoke = onRevoke,
-                        onRetry = onRetry,
-                        onShowInfo = onShowInfo,
-                        onDismiss = onDismissMenu,
-                        onStar = onStar,
-                        onSelect = onSelect,
-                        onHide = onHide,
-                        onReport = onReport,
-                        onSave = onSave,
-                        onShare = onShare,
                     )
                 }
             }
@@ -454,14 +467,11 @@ private fun BubbleContent(
                 Spacer(Modifier.height(2.dp))
             }
             if (quoted != null && message.replyToId != null) {
-                // LINE: kotak reply dengan garis hijau tebal di kiri
+                // Kotak reply diturunkan dari warna teks bubble — sinkron di
+                // semua paket bubble, terang maupun gelap.
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = if (mine) {
-                        MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.18f)
-                    } else {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    },
+                    color = textColor.copy(alpha = 0.12f),
                     modifier = Modifier.fillMaxWidth().clickable(enabled = onQuotedClick != null) { message.replyToId?.let { onQuotedClick?.invoke(it) } },
                 ) {
                     Row {
@@ -470,8 +480,7 @@ private fun BubbleContent(
                                 .width(3.dp)
                                 .height(48.dp)
                                 .background(
-                                    if (mine) MaterialTheme.colorScheme.onPrimary
-                                    else MaterialTheme.colorScheme.primary,
+                                    textColor,
                                     RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp),
                                 )
                         )
@@ -480,21 +489,13 @@ private fun BubbleContent(
                                 text = quoted.sender?.familiarName ?: "Pesan",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
-                                color = if (mine) {
-                                    MaterialTheme.colorScheme.onPrimary
-                                } else {
-                                    MaterialTheme.colorScheme.primary
-                                },
+                                color = textColor,
                                 maxLines = 1,
                             )
                             Text(
                                 text = messagePreviewText(quoted, 90),
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (mine) {
-                                    MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.9f)
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
+                                color = textColor.copy(alpha = 0.75f),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -568,8 +569,10 @@ private fun BubbleContent(
             }
             // Location & redpacket sudah menampilkan judul di kartunya — jangan duplikat.
             if (!message.body.isNullOrBlank() && message.type != "location" && message.type != "redpacket") {
-                val isCipher = message.type == "text" && message.body.length > 24 && message.body.matches(Regex("^[A-Za-z0-9+/=]+$")) && message.body.contains("=")
-                if (isCipher) {
+                val fallback = message.body?.let {
+                    id.nusachat.app.data.E2eeManager.fallbackTextFor(it)
+                }?.takeIf { message.type == "text" }
+                if (fallback != null) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             painter = painterResource(id = NusaIcons.Lock),
@@ -579,7 +582,7 @@ private fun BubbleContent(
                         )
                         Spacer(Modifier.width(4.dp))
                         Text(
-                            text = "[Pesan terenkripsi]",
+                            text = fallback,
                             style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
                             color = textColor.copy(alpha = 0.7f),
                         )
@@ -746,31 +749,15 @@ private fun RedPacketBubble(message: Message, mine: Boolean, textColor: Color, o
     }
 }
 
-/** Stiker: emoji raksasa tanpa bubble + jam/centang + menu yang sama. */
+/** Stiker: emoji raksasa tanpa bubble + jam/centang. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun StickerMessage(
     message: Message,
     mine: Boolean,
     isGroup: Boolean,
-    menuOpen: Boolean,
-    onDismissMenu: () -> Unit,
     onLongPress: () -> Unit,
     onBubbleClick: () -> Unit,
-    pinned: Boolean,
-    onReply: (Message) -> Unit,
-    onEdit: (Message) -> Unit,
-    onForward: (Message) -> Unit,
-    onReact: (Message, String) -> Unit,
-    onPin: (Message) -> Unit,
-    onRevoke: (Message) -> Unit,
-    onRetry: () -> Unit,
-    onShowInfo: (Message) -> Unit,
-    onStar: (Message) -> Unit,
-    onSelect: (Message) -> Unit,
-    onHide: (Message) -> Unit,
-    onReport: (Message) -> Unit,
-    onShare: (Message) -> Unit,
     selected: Boolean,
     wallpaperDark: Boolean?,
 ) {
@@ -811,35 +798,6 @@ private fun StickerMessage(
                     .padding(6.dp),
             ) {
                 Text(text = message.body.orEmpty(), fontSize = 64.sp)
-                NusaMenu(
-                    expanded = menuOpen,
-                    onDismissRequest = onDismissMenu,
-                    shape = RoundedCornerShape(24.dp),
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    shadowElevation = 8.dp,
-                    tonalElevation = 0.dp,
-                    modifier = Modifier.width(216.dp),
-                ) {
-                    MessageMenuContent(
-                        message = message,
-                        mine = mine,
-                        pinned = pinned,
-                        onReply = onReply,
-                        onEdit = onEdit,
-                        onForward = onForward,
-                        onReact = onReact,
-                        onPin = onPin,
-                        onRevoke = onRevoke,
-                        onRetry = onRetry,
-                        onShowInfo = onShowInfo,
-                        onDismiss = onDismissMenu,
-                        onStar = onStar,
-                        onSelect = onSelect,
-                        onHide = onHide,
-                        onReport = onReport,
-                        onShare = onShare,
-                    )
-                }
             }
             Row(
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
@@ -914,11 +872,24 @@ private val GroupNamePalette = listOf(
     Color(0xFF795548),
 )
 
-private fun memberNameColor(seed: Long?): Color {
-    val n = GroupNamePalette.size
-    if (seed == null) return GroupNamePalette[0]
+/** Varian terang untuk bubble lawan yang gelap (palet gelap tak terbaca di sana). */
+private val GroupNamePaletteDark = listOf(
+    Color(0xFFF06292),
+    Color(0xFFBA68C8),
+    Color(0xFF7986CB),
+    Color(0xFF64B5F6),
+    Color(0xFF4DB6AC),
+    Color(0xFFAED581),
+    Color(0xFFFFB74D),
+    Color(0xFFBCAAA4),
+)
+
+private fun memberNameColor(seed: Long?, darkBubble: Boolean): Color {
+    val palette = if (darkBubble) GroupNamePaletteDark else GroupNamePalette
+    val n = palette.size
+    if (seed == null) return palette[0]
     val idx = ((seed % n) + n) % n
-    return GroupNamePalette[idx.toInt()]
+    return palette[idx.toInt()]
 }
 
 /**

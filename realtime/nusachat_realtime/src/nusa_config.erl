@@ -4,7 +4,7 @@
 %%%-------------------------------------------------------------------
 -module(nusa_config).
 
--export([get/2, db_opts/0, secret/0, port/0]).
+-export([get/2, db_opts/0, secret/0, port/0, voice_port/0]).
 
 %%%-------------------------------------------------------------------
 %%% @doc Env var bila ada dan tak kosong, else default. Aturan tunggal
@@ -41,3 +41,8 @@ secret() ->
 -spec port() -> integer().
 port() ->
     get_int("REALTIME_PORT", 8091).
+
+%% @doc Port UDP relay voice NVP/1 (default 8092).
+-spec voice_port() -> integer().
+voice_port() ->
+    get_int("VOICE_UDP_PORT", 8092).

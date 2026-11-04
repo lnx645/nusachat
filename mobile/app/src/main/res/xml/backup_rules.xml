@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!--
+        Kunci E2EE + cache SQLCipher TIDAK ikut backup: kuncinya di Keystore
+        (tidak ikut restore), jadi file-file ini mati sia-sia setelah install
+        ulang dan hanya membingungkan. Device baru = restore dari server
+        (layar "Memulihkan chat") + heal kunci otomatis.
+    -->
+    <exclude domain="sharedpref" path="nusachat.e2ee.xml" />
+    <exclude domain="sharedpref" path="nusa.device.v2.xml" />
+    <exclude domain="sharedpref" path="nusachat.dbkey.enc.xml" />
+    <exclude domain="sharedpref" path="nusa.ratchet.xml" />
+    <exclude domain="database" path="nusachat-chat.db" />
+</full-backup-content>

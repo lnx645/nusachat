@@ -123,6 +123,28 @@ pernah lihat. Mode passphrase: Argon2id → KEK → bungkus kunci backup
 Tanpa HSM: mode passphrase tahan sekuat passphrase (jujur, bukan
 setara WA di titik ini).
 
+## Pemulihan reinstall (bug Nov-2026, sudah diperbaiki)
+
+Fakta: kunci (Keystore) + cache SQLCipher ikut mati saat install ulang;
+backup file-nya mati sia-sia (turut di-exclude via `backup_rules.xml`).
+Aturan pemulihan:
+
+- Blob cipher TAK PERNAH tampil mentah (placeholder sinkronisasi);
+  teks pra-E2EE tetap passthrough.
+- Hasil dekrip gagal TAK PERNAH menimpa cache terbaca.
+- Kirim legacy saat keyless + kanonis ada di pihak lain = DITOLAK
+  (`KEY_SYNC_NEEDED`, "Menunggu sinkronisasi kunci…"), JANGAN buat kunci
+  tandingan K2 (dulu: self-heal K2 meracuni blob + deadlock permanen).
+- Keyless + semua blob basi = tak ada holder hidup → re-key OTOMATIS
+  hanya oleh userId terkecil (hindari K2 ganda); holder hidup (ada blob
+  fresh) = tunggu heal via `keys_updated`.
+- Heal pemicu: buka chat, `device_added` (SEMUA chat bersama, bukan cuma
+  terbuka), sapu launch (10 chat, tutup event terlewat offline).
+- Device baru + riwayat server + cache kosong = layar "Memulihkan chat"
+  0–100% (kunci → pesan → cache per percakapan, bisa dilewati).
+- Riwayat v2 (ratchet/senderkey) device lama memang TAK TERPULIHKAN
+  (forward secrecy, sama seperti Signal) → placeholder jujur.
+
 ## Vektor uji (wajib hijau)
 
 `mobile/app/src/test/.../CryptoVectorsTest`: X3DH deterministik

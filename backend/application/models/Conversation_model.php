@@ -139,6 +139,33 @@ class Conversation_model extends CI_Model
         );
     }
 
+    /**
+     * Anggota banyak percakapan dalam 1 query (anti N+1 untuk daftar).
+     *
+     * @param int[] $conversationIds
+     * @return array<int, array<int, array>> conversation_id => baris members()
+     */
+    public function membersForMany(array $conversationIds): array
+    {
+        $conversationIds = array_values(array_unique(array_map('intval', $conversationIds)));
+        if (!$conversationIds) {
+            return [];
+        }
+        $placeholders = implode(',', array_fill(0, count($conversationIds), '?'));
+        $rows = $this->store->all(
+            'SELECT m.conversation_id, u.*, m.role, m.joined_at, m.last_read_message_id, m.muted
+             FROM conversation_members m JOIN users u ON u.id = m.user_id
+             WHERE m.conversation_id IN (' . $placeholders . ')
+             ORDER BY m.conversation_id ASC, m.role = ? DESC, u.display_name ASC',
+            array_merge($conversationIds, ['owner'])
+        );
+        $grouped = [];
+        foreach ($rows as $row) {
+            $grouped[(int) $row['conversation_id']][] = $row;
+        }
+        return $grouped;
+    }
+
     public function memberIds(int $conversationId): array
     {
         $rows = $this->store->all('SELECT user_id FROM conversation_members WHERE conversation_id = ?', [$conversationId]);

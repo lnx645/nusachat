@@ -26,6 +26,7 @@ object NusaIcons {
     @DrawableRes val GroupAdd: Int = LucideR.drawable.lucide_ic_user_plus
     @DrawableRes val PersonAdd: Int = LucideR.drawable.lucide_ic_user_plus
     @DrawableRes val Delete: Int = LucideR.drawable.lucide_ic_trash_2
+    @DrawableRes val Backspace: Int = LucideR.drawable.lucide_ic_delete
     @DrawableRes val Next: Int = LucideR.drawable.lucide_ic_chevron_right
     @DrawableRes val CallEnd: Int = LucideR.drawable.lucide_ic_phone_off
     @DrawableRes val Call: Int = LucideR.drawable.lucide_ic_phone
@@ -95,4 +96,5 @@ object NusaIcons {
     @DrawableRes val Qr: Int = LucideR.drawable.lucide_ic_qr_code
     @DrawableRes val Scan: Int = LucideR.drawable.lucide_ic_scan
     @DrawableRes val Hourglass: Int = LucideR.drawable.lucide_ic_hourglass
+    @DrawableRes val Smile: Int = LucideR.drawable.lucide_ic_smile
 }

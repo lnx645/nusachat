@@ -16,18 +16,32 @@ import id.nusachat.app.data.GoogleAuthHelper
 import id.nusachat.app.data.GoogleCancelled
 import id.nusachat.app.data.GoogleProfile
 import id.nusachat.app.data.toUserList
+import id.nusachat.app.data.toVoiceCall
 import id.nusachat.app.data.Conversation
 import id.nusachat.app.data.E2eeManager
 import id.nusachat.app.data.FriendRequest
 import id.nusachat.app.data.LocationHelper
 import id.nusachat.app.data.Message
+import id.nusachat.app.data.capChatWindow
 import id.nusachat.app.data.GroupJoinRequest
+import id.nusachat.app.data.KeyHolder
 import id.nusachat.app.data.Moment
 import id.nusachat.app.data.MomentComment
 import id.nusachat.app.data.PinnedMessage
 import id.nusachat.app.data.Reaction
 import id.nusachat.app.data.SessionCrypto
+import id.nusachat.app.data.SessionCryptoException
+import id.nusachat.app.ui.chats.components.renderSystemText
 import id.nusachat.app.data.CallForegroundService
+import id.nusachat.app.data.voice.NusaVoiceEngine
+import id.nusachat.app.data.voice.NvpBase64
+import id.nusachat.app.data.voice.NvpCallParams
+import id.nusachat.app.data.voice.NvpCodec
+import id.nusachat.app.data.voice.NvpCodecs
+import id.nusachat.app.data.voice.NvpMarkers
+import id.nusachat.app.data.voice.NvpOffer
+import java.security.SecureRandom
+import org.json.JSONArray
 import id.nusachat.app.data.CallHistoryItem
 import id.nusachat.app.data.MediaHelper
 import id.nusachat.app.data.NetworkMonitor
@@ -50,7 +64,9 @@ import id.nusachat.app.data.toUser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -69,6 +85,16 @@ data class RequestsState(
     val incoming: List<FriendRequest> = emptyList(),
     val outgoing: List<FriendRequest> = emptyList(),
 )
+
+/** Progres pemulihan chat device baru (ala WhatsApp): 0–100%. */
+data class RestoreState(
+    val done: Int,
+    val total: Int,
+    val label: String,
+) {
+    val fraction: Float = if (total <= 0) 0f else (done.toFloat() / total).coerceIn(0f, 1f)
+    val percent: Int = (fraction * 100).toInt()
+}
 
 data class ChatUiState(
     val conversation: Conversation? = null,
@@ -118,6 +144,15 @@ data class CallUiState(
     val remoteSdp: String? = null,
     val video: Boolean = false,
     val videoMuted: Boolean = false,
+    // --- Jalur NVP/1 (voice tanpa WebRTC; docs/VOICE-PROTOCOL.md).
+    val nvp: Boolean = false,
+    val nvpCodecs: List<String>? = null,
+    val nvpKeyB64: String? = null,
+    val nvpSaltB64: String? = null,
+    val nvpSlot: Int = -1,
+    val nvpToken: Long = 0L,
+    val nvpRelayPort: Int = 8092,
+    val nvpCodec: String? = null,
 )
 
 data class GroupCallUiState(
@@ -127,6 +162,15 @@ data class GroupCallUiState(
     val status: String = "idle", // idle | ringing | active | ended
     val muted: Boolean = false,
     val speaker: Boolean = false,
+    // --- Jalur NVP/1 (room selalu NVP; codec tetap amr-wb).
+    val nvp: Boolean = false,
+    val nvpSlot: Int = -1,
+    val nvpToken: Long = 0L,
+    val nvpRelayPort: Int = 8092,
+    val nvpKeyB64: String? = null,
+    val nvpSaltB64: String? = null,
+    /** userId → slot (dari event room_joined). */
+    val nvpSlots: Map<Long, Int> = emptyMap(),
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -138,6 +182,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val locationHelper = LocationHelper(application)
     private val chatThemeStore = ChatThemeStore(application)
     private val rtc = WebRtcCallManager(application.applicationContext)
+    private val nvpEngine by lazy { NusaVoiceEngine(getApplication()) }
+    private data class PendingNvpOffer(
+        val peer: User,
+        val codecs: List<String>,
+        val keyB64: String,
+        val saltB64: String,
+    )
+    private var pendingNvpOffer: PendingNvpOffer? = null
+    private var nvpPreparedArrived = false
+    private var nvpFallbackUsed = false
+    private var nvpAnswerFallbackUsed = false
+    private var nvpRoomFallbackUsed = false
+
+    /** Host relay UDP = host server (WS/API sama mesin). */
+    private fun relayHost(): String =
+        runCatching { Uri.parse(BuildConfig.WS_URL).host }.getOrNull()
+            ?: runCatching { Uri.parse(BuildConfig.API_BASE_URL).host }.getOrNull()
+            ?: "127.0.0.1"
     val e2ee = E2eeManager(application.applicationContext)
     private val sessCrypto = SessionCrypto(application.applicationContext, repository, e2ee)
     val settings = SettingsStore(application)
@@ -463,6 +525,67 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         publishDeviceKey()
         provisionV2()
         loadCallHistory()
+        startRestoreIfNeeded()
+        healSweep()
+    }
+
+    /**
+     * Sapu heal saat launch: menutup event device_added yang terlewat saat
+     * offline (lawan reinstall selagi aku mati → aku holder yang heal dia).
+     * Restore (bila jalan) sudah mencakup ini → lewati.
+     */
+    private fun healSweep() {
+        viewModelScope.launch(Dispatchers.IO) {
+            delay(8000)
+            if (_restore.value != null) return@launch
+            if (sessionState.value.user == null || !isOnline.value) return@launch
+            for (conv in conversations.value.take(10)) {
+                runCatching { syncKeysNow(conv.id) }
+            }
+        }
+    }
+
+    private val _restore = MutableStateFlow<RestoreState?>(null)
+    val restore = _restore.asStateFlow()
+    private var restoreJob: Job? = null
+
+    /** Lewati pemulihan (lanjut tanpa cache; tiap chat sync saat dibuka). */
+    fun skipRestore() {
+        restoreJob?.cancel()
+        restoreJob = null
+        _restore.value = null
+    }
+
+    /**
+     * Device baru + server punya riwayat + cache kosong (habis reinstall):
+     * pulihkan semua percakapan berprogres (kunci → pesan → cache).
+     * No-op bila cache sudah terisi (buka aplikasi biasa).
+     */
+    private fun startRestoreIfNeeded() {
+        if (restoreJob?.isActive == true || _restore.value != null) return
+        restoreJob = viewModelScope.launch(Dispatchers.IO) {
+            if (!isOnline.value) return@launch
+            var waits = 0
+            while (conversations.value.isEmpty() && waits++ < 30 && isOnline.value) delay(500)
+            val convs = conversations.value.take(50)
+            if (convs.isEmpty()) return@launch
+            if (runCatching { chatCache.totalCount() }.getOrDefault(-1) != 0) return@launch
+            _restore.value = RestoreState(0, convs.size, "Menyiapkan kunci keamanan…")
+            convs.forEachIndexed { i, conv ->
+                ensureActive()
+                runCatching { syncKeysNow(conv.id) }
+                val page = runCatching { repository.messages(conv.id, limit = 40) }.getOrNull()
+                if (page != null) {
+                    val dec = decAll(page.messages)
+                    runCatching { chatCache.saveMessages(dec) }
+                    val maxId = dec.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0L
+                    runCatching { chatCache.saveCursor(conv.id, maxId) }
+                }
+                _restore.value = RestoreState(i + 1, convs.size, conv.displayTitle)
+            }
+            _restore.value = null
+            refreshConversations()
+        }
     }
 
     private fun publishDeviceKey() {
@@ -516,14 +639,61 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val keys = runCatching { repository.convKeys(conversationId, deviceId) }.getOrNull()
         keys ?: return
         val haveKey = keys.myKey != null && e2ee.unwrapSessionKey(conversationId, keys.myKey)
-        if (!haveKey && keys.devices.isEmpty()) {
+        if (haveKey) {
+            // Aku holder: tutup anggota/perangkat yang blob-nya basi.
+            healMissingKeys(conversationId, keys.devices, includeSelf = true)
+            return
+        }
+        if (keys.devices.isEmpty()) {
             // Belum ada kunci kanonis sama sekali: tetapkan kunci lokal untuk semua.
             e2ee.ensureKey(conversationId)
+            healMissingKeys(conversationId, keys.devices, includeSelf = true)
+            return
         }
-        // Selalu heal: menutup perangkat/anggota yang belum punya blob
-        // (termasuk diri sendiri di device baru = self-heal; idempoten bila lengkap).
-        // Bila aku belum punya kunci dan tak bisa membungkus: tunggu keys_updated.
-        healMissingKeys(conversationId, keys.devices, includeSelf = true)
+        // Keyless + blob ada: bungkus self-heal MUSTAHIL (tak punya kunci) —
+        // jangan buang request heal; putuskan menunggu vs re-key.
+        if (anyFreshBlob(keys.devices)) return // holder hidup mungkin ada; tunggu keys_updated
+        // SEMUA blob basi = tak ada holder hidup (basi ⟺ pemilik reinstall =
+        // kunci ikut hilang). Aman re-key, TAPI hanya userId terkecil agar
+        // dua pihak keyless tak re-key bersamaan (K2 ganda = deadlock).
+        val members = rekeyMemberIds(conversationId, me)
+        if (E2eeManager.shouldRekey(me, members)) {
+            e2ee.ensureKey(conversationId)
+            healMissingKeys(conversationId, keys.devices, includeSelf = true)
+        }
+    }
+
+    /**
+     * True bila ada satu blob yang fingerprint-nya cocok pubkey pemilik saat
+     * ini (pemilik mungkin masih memegang kunci kanonis → tunggu heal-nya).
+     * Blob device-kosong (client lama) DIABAIKAN: lookup server strict
+     * per-device sehingga tak bisa dibuka siapa pun (dead weight).
+     */
+    private suspend fun anyFreshBlob(holders: List<KeyHolder>): Boolean {
+        val me = sessionState.value.user?.id ?: session.user?.id ?: 0L
+        val myDevice = e2ee.deviceId()
+        val now = System.currentTimeMillis()
+        val fpNow = mutableMapOf<Pair<Long, String>, String?>()
+        for (userId in holders.map { it.userId }.distinct()) {
+            val devices = runCatching { repository.deviceKeys(userId) }.getOrDefault(emptyList())
+            for (dev in devices) {
+                // Device sendiri yang bukan saat ini: abaikan (tak ada
+                // self-heal lintas-device; menunggu = deadlock).
+                if (userId == me && dev.deviceId != myDevice) continue
+                // Publish >60 hari: ganti HP / mati = holder mati.
+                if (!E2eeManager.isFreshDevice(dev.updatedAt, now)) continue
+                fpNow[userId to dev.deviceId] = e2ee.fingerprint(dev.publicKey)
+            }
+        }
+        return E2eeManager.anyFreshHolder(holders) { h -> fpNow[h.userId to h.deviceId] }
+    }
+
+    private suspend fun rekeyMemberIds(conversationId: Long, me: Long): List<Long> {
+        val detail = runCatching { repository.conversationDetail(conversationId) }.getOrNull()
+        val ids = detail?.members?.map { it.id }.orEmpty()
+        if (ids.isNotEmpty()) return ids.distinct()
+        val peerId = detail?.peer?.id ?: 0L
+        return listOfNotNull(me, peerId.takeIf { it > 0 })
     }
 
     private suspend fun healMissingKeys(
@@ -571,15 +741,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Perangkat baru milik lawan bicara (event device_added via Erlang):
-     * bungkus ulang kunci sesi untuknya bila chat-nya sedang dibuka.
+     * bungkus ulang kunci sesi untuk SEMUA percakapan bersamanya (bukan
+     * cuma chat terbuka) agar pemulihan reinstall otomatis tanpa lawan
+     * harus membuka tiap chat satu per satu.
      */
     private fun onDeviceAdded(userId: Long) {
-        val conv = chat.value.detail ?: chat.value.conversation ?: return
-        if (conv.id != activeChatId) return
-        val involves = conv.peer?.id == userId || conv.members.any { it.id == userId }
-        if (!involves) return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { syncKeysNow(conv.id) }
+            val shared = conversations.value.filter { conv ->
+                conv.peer?.id == userId || conv.members.any { it.id == userId }
+            }.take(20)
+            val open = (chat.value.detail ?: chat.value.conversation)
+                ?.takeIf { it.id == activeChatId }
+                ?.takeIf { shared.none { s -> s.id == it.id } }
+            for (conv in shared + listOfNotNull(open)) {
+                runCatching { syncKeysNow(conv.id) }
+            }
         }
     }
 
@@ -626,6 +802,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         messages = state.messages.map {
                             if (it.sender?.id == session.user?.id && it.id <= messageId) {
                                 it.copy(status = "read")
+                            } else it
+                        }
+                    )
+                }
+            }
+            "ack" -> {
+                val conversationId = data.optLong("conversation_id")
+                val ackerId = data.optLong("user_id")
+                val messageId = data.optLong("message_id")
+                if (conversationId == activeChatId && ackerId != session.user?.id) {
+                    val state = chat.value
+                    chat.value = state.copy(
+                        messages = state.messages.map {
+                            // Naik saja: sent→delivered; read tak pernah turun.
+                            if (it.sender?.id == session.user?.id && it.id <= messageId && it.status == "sent") {
+                                it.copy(status = "delivered")
                             } else it
                         }
                     )
@@ -771,6 +963,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             "call_offer" -> onIncomingOffer(data)
+            "call.prepared" -> onNvpPrepared(data)
+            "call.peer_offline" -> {
+                if (callState.value.nvp && callState.value.status == "dialing") nvpFallbackOffer()
+            }
+            "call.error" -> onNvpError(data)
             "call_answer" -> onCallAnswer(data)
             "call_ice" -> onCallIce(data)
             "call_end" -> onCallEnded(data)
@@ -779,6 +976,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             "call_room_joined", "call_room_left" -> {
                 val callId = data.optJSONObject("call")?.optLong("id") ?: data.optLong("call_id")
                 if (callId > 0) refreshGroupRoom(callId)
+                onNvpRoomMembership(type, data, callId)
             }
             "call_room_ended" -> onRoomEnded(data)
         }
@@ -789,7 +987,195 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val pendingIce = mutableListOf<JSONObject>()
     private var callIceJob: Job? = null
 
-    fun startVoiceCall(peer: User) = startCall(peer, "audio")
+    // ------------------------------------------------------------ NVP/1 voice (tanpa WebRTC)
+
+    fun startVoiceCall(peer: User) {
+        if (callState.value.status in listOf("dialing", "active", "ringing")) {
+            message.value = "Sudah ada panggilan aktif."
+            return
+        }
+        if (groupCall.value.status == "active") {
+            message.value = "Sudah ada panggilan grup aktif."
+            return
+        }
+        val codecs = NvpCodecs.probeEncoders()
+        if (codecs.isEmpty()) {
+            message.value = "Panggilan tidak didukung di perangkat ini."
+            return
+        }
+        val rng = SecureRandom()
+        val keyB64 = NvpBase64.encode(ByteArray(32).also { rng.nextBytes(it) })
+        val saltB64 = NvpBase64.encode(ByteArray(4).also { rng.nextBytes(it) })
+        pendingNvpOffer = PendingNvpOffer(peer, codecs, keyB64, saltB64)
+        nvpFallbackUsed = false
+        nvpPreparedArrived = false
+        callState.value = CallUiState(
+            peer = peer, outgoing = true, status = "dialing",
+            nvp = true, nvpCodecs = codecs, nvpKeyB64 = keyB64, nvpSaltB64 = saltB64,
+        )
+        startCallService()
+        val sent = socket?.send(
+            "call.offer",
+            JSONObject().put("to_user_id", peer.id)
+                .put("codecs", JSONArray(codecs))
+                .put("key_ct", keyB64).put("salt", saltB64),
+        ) == true
+        if (!sent) {
+            nvpFallbackOffer()
+            return
+        }
+        // Server lama/WS putus: tak ada prepared → fallback REST.
+        viewModelScope.launch {
+            delay(8000)
+            if (!nvpPreparedArrived && !nvpFallbackUsed &&
+                callState.value.status == "dialing" && callState.value.nvp
+            ) {
+                nvpFallbackOffer()
+            }
+        }
+    }
+
+    /** Fallback REST offer (WS mati / callee offline): sdp = kurir nvp1:. */
+    private fun nvpFallbackOffer() {
+        val pending = pendingNvpOffer ?: return
+        if (nvpFallbackUsed) return
+        nvpFallbackUsed = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val sdp = NvpMarkers.offerToSdp(pending.codecs, pending.keyB64, pending.saltB64)
+                val created = calls.offer(pending.peer.id, sdp, "audio")
+                val creds = calls.nvpJoin(created.id)
+                withContext(Dispatchers.Main) {
+                    if (callState.value.status != "dialing") return@withContext
+                    callState.value = callState.value.copy(
+                        call = created,
+                        nvpSlot = creds.slot, nvpToken = creds.token,
+                        nvpRelayPort = creds.relayPort,
+                    )
+                    nvpPreparedArrived = true
+                    maybeStartNvpEngine()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    callState.value = CallUiState()
+                    handleError(e)
+                }
+            }
+        }
+    }
+
+    private fun onNvpPrepared(data: JSONObject) {
+        val callJson = data.optJSONObject("call")
+        val callId = callJson?.optLong("id") ?: data.optLong("call_id")
+        if (callId <= 0) return
+        val slot = data.optInt("slot", -1)
+        val token = data.optLong("token")
+        val relayPort = data.optInt("relay_port", 8092)
+        val isRoom = callJson != null && callJson.has("conversation_id") && !callJson.isNull("conversation_id")
+        if (isRoom) {
+            onNvpRoomPrepared(
+                callId, slot, token, relayPort,
+                data.optString("key_ct").ifBlank { null },
+                data.optString("salt").ifBlank { null },
+            )
+            return
+        }
+        if (nvpFallbackUsed) {
+            // Balapan fallback menang duluan: tutup baris WS yatim.
+            socket?.send("call.end", JSONObject().put("call_id", callId).put("reason", "hangup"))
+            return
+        }
+        nvpPreparedArrived = true
+        val current = callState.value
+        if (!current.nvp || current.status !in listOf("dialing", "ringing", "active")) return
+        val call = runCatching { callJson?.toVoiceCall() }.getOrNull() ?: current.call
+        callState.value = current.copy(
+            call = call, nvpSlot = slot, nvpToken = token, nvpRelayPort = relayPort,
+        )
+        // Callee: prepared = jawaban diproses → nyalakan engine.
+        // Caller: tetap dialing sampai call.answer.
+        if (!current.outgoing) maybeStartNvpEngine()
+    }
+
+    private fun onNvpError(data: JSONObject) {
+        val msg = data.optString("message", "Panggilan gagal.").ifBlank { "Panggilan gagal." }
+        message.value = msg
+        if (callState.value.nvp && callState.value.status in listOf("dialing", "ringing")) {
+            endCallLocal()
+        }
+        if (groupCall.value.nvp && groupCall.value.status != "idle") {
+            leaveGroupCall()
+        }
+    }
+
+    /** Nyalakan engine bila (call, slot, codec, kunci) lengkap. Idempoten. */
+    private fun maybeStartNvpEngine() {
+        val s = callState.value
+        if (!s.nvp || s.status !in listOf("dialing", "ringing", "active")) return
+        val codec = s.nvpCodec ?: return
+        val key = NvpBase64.decode(s.nvpKeyB64 ?: return) ?: return
+        val salt = NvpBase64.decode(s.nvpSaltB64 ?: return) ?: return
+        val callId = s.call?.id ?: return
+        if (s.nvpSlot < 0 || s.nvpToken == 0L || key.size != 32 || salt.size != 4) return
+        if (nvpEngine.isRunning()) return
+        nvpEngine.start(
+            NvpCallParams(callId, s.nvpSlot, s.nvpToken, relayHost(), s.nvpRelayPort, key, salt, codec),
+        )
+        nvpEngine.setMuted(s.muted)
+        nvpEngine.setSpeakerphone(s.speaker)
+        markCallActive()
+    }
+
+    private fun answerNvpCall() {
+        val current = callState.value
+        val call = current.call ?: return
+        val offerCodecs = current.nvpCodecs ?: return
+        val codec = NvpCodec.negotiate(offerCodecs, NvpCodecs.probeEncoders())
+        if (codec == null) {
+            message.value = "Codec tidak cocok dengan penelepon."
+            rejectVoiceCall()
+            return
+        }
+        callState.value = current.copy(nvpCodec = codec)
+        nvpAnswerFallbackUsed = false
+        val sent = socket?.send(
+            "call.answer",
+            JSONObject().put("call_id", call.id).put("accept", true).put("codec", codec),
+        ) == true
+        if (!sent) {
+            answerNvpFallback(call.id, codec)
+            return
+        }
+        // WS path: engine nyala saat call.prepared tiba; timeout → REST.
+        viewModelScope.launch {
+            delay(8000)
+            if (!nvpEngine.isRunning() && !nvpAnswerFallbackUsed &&
+                callState.value.status == "ringing" && callState.value.nvp
+            ) {
+                answerNvpFallback(call.id, codec)
+            }
+        }
+    }
+
+    private fun answerNvpFallback(callId: Long, codec: String) {
+        if (nvpAnswerFallbackUsed) return
+        nvpAnswerFallbackUsed = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                calls.answer(callId, NvpMarkers.answerToSdp(codec))
+                val creds = calls.nvpJoin(callId)
+                withContext(Dispatchers.Main) {
+                    callState.value = callState.value.copy(
+                        nvpSlot = creds.slot, nvpToken = creds.token,
+                        nvpRelayPort = creds.relayPort,
+                    )
+                    maybeStartNvpEngine()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { handleError(e); endCallLocal() }
+            }
+        }
+    }
 
     fun startVideoCall(peer: User) = startCall(peer, "video")
 
@@ -870,6 +1256,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun answerVoiceCall() {
+        if (callState.value.nvp) {
+            answerNvpCall()
+            return
+        }
         val current = callState.value
         val call = current.call ?: return
         val sdp = current.remoteSdp ?: return
@@ -919,6 +1309,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rejectVoiceCall() {
         val call = callState.value.call ?: run { endCallLocal(); return }
+        if (callState.value.nvp) {
+            socket?.send("call.reject", JSONObject().put("call_id", call.id))
+        }
         viewModelScope.launch {
             runCatching { calls.reject(call.id) }
             endCallLocal()
@@ -927,6 +1320,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun endVoiceCall() {
         val call = callState.value.call
+        if (callState.value.nvp && call != null) {
+            socket?.send("call.end", JSONObject().put("call_id", call.id).put("reason", "hangup"))
+        }
         viewModelScope.launch {
             if (call != null) runCatching { calls.end(call.id) }
             withContext(Dispatchers.Main) { endCallLocal() }
@@ -935,7 +1331,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleCallMute() {
         val muted = !callState.value.muted
-        rtc.setMuted(muted)
+        if (callState.value.nvp) nvpEngine.setMuted(muted) else rtc.setMuted(muted)
         callState.value = callState.value.copy(muted = muted)
     }
 
@@ -945,14 +1341,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val speaker = !callState.value.speaker
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
         audio.isSpeakerphoneOn = speaker
+        if (callState.value.nvp) nvpEngine.setSpeakerphone(speaker)
         callState.value = callState.value.copy(speaker = speaker)
     }
 
     // ------------------------------------------------------------ group call
 
-    private val mesh by lazy {
-        id.nusachat.app.data.GroupCallMesh(getApplication(), calls, viewModelScope)
-    }
+    // ------------------------------------------------------------ NVP/1 room (codec tetap amr-wb)
 
     fun startGroupCall(conversationId: Long) {
         if (callState.value.status in listOf("dialing", "active", "ringing")) {
@@ -960,7 +1355,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         if (groupCall.value.status == "active") return
-        if (!mesh.isSupported()) {
+        if (NvpCodecs.probeEncoders().isEmpty()) {
             message.value = "Panggilan grup tidak didukung di perangkat ini."
             return
         }
@@ -969,13 +1364,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val room = calls.roomCreate(conversationId)
-                mesh.setRoom(room.call.id)
                 groupCall.value = GroupCallUiState(
                     room = room, conversationId = conversationId,
-                    title = title, status = "active",
+                    title = title, status = "active", nvp = true,
                 )
-                room.participants.filter { it.status == "joined" && it.user.id != session.user?.id }
-                    .forEach { mesh.offerTo(it.user.id) }
+                nvpRoomJoin(room.call.id)
             } catch (e: Exception) {
                 handleError(e)
             }
@@ -985,29 +1378,101 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun acceptGroupCall() {
         val pending = groupCall.value
         val roomId = pending.room?.call?.id ?: return
-        viewModelScope.launch {
+        groupCall.value = pending.copy(nvp = true)
+        nvpRoomFallbackUsed = false
+        val sent = socket?.send("call.room_join", JSONObject().put("call_id", roomId)) == true
+        if (sent) return // engine nyala saat call.prepared tiba
+        nvpRoomJoin(roomId)
+    }
+
+    /** Gabung room NVP: WS-first, fallback REST (roomJoin + nvpJoin). */
+    private fun nvpRoomJoin(callId: Long) {
+        val sent = socket?.send("call.room_join", JSONObject().put("call_id", callId)) == true
+        if (sent) {
+            // Server lama/WS putus: tak ada prepared → fallback REST.
+            viewModelScope.launch {
+                delay(8000)
+                val g = groupCall.value
+                if (g.nvp && g.room?.call?.id == callId && g.nvpSlot < 0 && !nvpRoomFallbackUsed) {
+                    nvpRoomJoinRest(callId)
+                }
+            }
+            return
+        }
+        nvpRoomJoinRest(callId)
+    }
+
+    private fun nvpRoomJoinRest(callId: Long) {
+        if (nvpRoomFallbackUsed) return
+        nvpRoomFallbackUsed = true
+        viewModelScope.launch(Dispatchers.IO) {
             try {
-                val room = calls.roomJoin(roomId)
-                mesh.setRoom(roomId)
-                groupCall.value = pending.copy(room = room, status = "active")
-                room.participants.filter { it.status == "joined" && it.user.id != session.user?.id }
-                    .forEach { mesh.offerTo(it.user.id) }
+                val room = calls.roomJoin(callId)
+                val creds = calls.nvpJoin(callId)
+                withContext(Dispatchers.Main) {
+                    groupCall.value = groupCall.value.copy(room = room)
+                    onNvpRoomPrepared(
+                        callId, creds.slot, creds.token, creds.relayPort,
+                        creds.keyCt, creds.salt,
+                    )
+                }
             } catch (e: Exception) {
-                handleError(e)
-                groupCall.value = GroupCallUiState()
+                withContext(Dispatchers.Main) {
+                    handleError(e)
+                    groupCall.value = GroupCallUiState()
+                }
             }
         }
     }
 
+    private fun onNvpRoomPrepared(
+        callId: Long,
+        slot: Int,
+        token: Long,
+        relayPort: Int,
+        keyB64: String?,
+        saltB64: String?,
+    ) {
+        val current = groupCall.value
+        if (!current.nvp || current.room?.call?.id != callId) return
+        if (keyB64 == null || saltB64 == null || slot < 0 || token == 0L) return
+        groupCall.value = current.copy(
+            nvpSlot = slot, nvpToken = token, nvpRelayPort = relayPort,
+            nvpKeyB64 = keyB64, nvpSaltB64 = saltB64, status = "active",
+        )
+        startNvpRoomEngine()
+    }
+
+    private fun startNvpRoomEngine() {
+        val g = groupCall.value
+        val key = NvpBase64.decode(g.nvpKeyB64 ?: return) ?: return
+        val salt = NvpBase64.decode(g.nvpSaltB64 ?: return) ?: return
+        val callId = g.room?.call?.id ?: return
+        if (g.nvpSlot < 0 || g.nvpToken == 0L || key.size != 32 || salt.size != 4) return
+        if (nvpEngine.isRunning()) return
+        nvpEngine.start(
+            NvpCallParams(
+                callId, g.nvpSlot, g.nvpToken, relayHost(), g.nvpRelayPort,
+                key, salt, id.nusachat.app.data.voice.Nvp.CODEC_AMR_WB,
+            ),
+        )
+        nvpEngine.setMuted(g.muted)
+        nvpEngine.setSpeakerphone(g.speaker)
+    }
+
     fun declineGroupCall() {
-        mesh.closeAll()
+        runCatching { nvpEngine.stop() }
         groupCall.value = GroupCallUiState()
     }
 
     fun leaveGroupCall() {
         val roomId = groupCall.value.room?.call?.id
+        if (groupCall.value.nvp && roomId != null && roomId > 0) {
+            socket?.send("call.room_leave", JSONObject().put("call_id", roomId))
+        }
         groupCall.value = GroupCallUiState(status = "ended")
-        mesh.closeAll()
+        runCatching { nvpEngine.stop() }
+        nvpRoomFallbackUsed = false
         if (roomId != null && roomId > 0) {
             viewModelScope.launch {
                 runCatching { calls.roomLeave(roomId) }
@@ -1021,7 +1486,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleGroupMute() {
         val muted = !groupCall.value.muted
-        mesh.setMuted(muted)
+        nvpEngine.setMuted(muted)
         groupCall.value = groupCall.value.copy(muted = muted)
     }
 
@@ -1031,6 +1496,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val speaker = !groupCall.value.speaker
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
         audio.isSpeakerphoneOn = speaker
+        nvpEngine.setSpeakerphone(speaker)
         groupCall.value = groupCall.value.copy(speaker = speaker)
     }
 
@@ -1064,25 +1530,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun onRoomSignal(data: JSONObject) {
-        val callJson = data.optJSONObject("call") ?: return
-        if (groupCall.value.room?.call?.id != callJson.optLong("id")) return
-        if (groupCall.value.status != "active") return
-        val fromId = data.optLong("from_user_id")
-        when (data.optString("signal")) {
-            "offer" -> mesh.answerTo(fromId, data.optString("sdp"))
-            "answer" -> mesh.onAnswer(fromId, data.optString("sdp"))
-        }
+        // Jalur WebRTC lama: room NVP tak memakai SDP/ICE sama sekali.
+        // Dipertahankan sebagai no-op agar event basi tak merusak state.
     }
 
     /**
      * Kunci E2EE baru dibagikan untukku: unduh lalu dekrip ulang chat yang
-     * sedang dibuka + daftar percakapan (menyembuhkan "[Pesan terenkripsi]").
+     * sedang dibuka + daftar percakapan (menyembuhkan fallback cipher).
      */
     private fun onKeysUpdated(data: JSONObject) {
         val conversationId = data.optLong("conversation_id")
         if (conversationId <= 0) return
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { syncKeysNow(conversationId) }
+            // Antre kirim yang tertahan KEY_SYNC_NEEDED kini bisa jalan.
+            runCatching { flushOutbox() }
             withContext(Dispatchers.Main) {
                 if (conversationId == activeChatId) {
                     val state = chat.value
@@ -1108,15 +1570,46 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             kind = callJson.optString("kind", "audio"),
         )
         val peer = fromJson?.toUser()
+        // Jalur NVP: offer WS langsung (codecs) atau kurir REST (nvp1:).
+        val nvpOffer = data.optJSONArray("codecs")?.let { arr ->
+            val codecs = (0 until arr.length()).mapNotNull {
+                arr.optString(it).takeIf { c -> c.isNotBlank() }
+            }
+            val key = data.optString("key_ct").takeIf { it.isNotBlank() }
+            val salt = data.optString("salt").takeIf { it.isNotBlank() }
+            if (codecs.isNotEmpty() && key != null && salt != null) {
+                NvpOffer(codecs, key, salt)
+            } else {
+                null
+            }
+        } ?: NvpMarkers.parseOfferSdp(sdp)
         callState.value = CallUiState(
             call = call, peer = peer, outgoing = false,
             status = "ringing", remoteSdp = sdp.ifBlank { null },
             video = call.kind == "video",
+            nvp = nvpOffer != null && call.kind == "audio",
+            nvpCodecs = nvpOffer?.codecs,
+            nvpKeyB64 = nvpOffer?.keyB64,
+            nvpSaltB64 = nvpOffer?.saltB64,
         )
         startCallService()
     }
 
     private fun onCallAnswer(data: JSONObject) {
+        // Jalur NVP: jawaban WS ({codec}) atau kurir REST (sdp nvp1:).
+        val nvpCodec = data.optString("codec").takeIf { it.isNotBlank() }
+            ?: NvpMarkers.parseAnswerSdp(data.optString("sdp"))
+        if (nvpCodec != null && callState.value.nvp) {
+            val current = callState.value
+            if (current.status != "dialing" || !current.outgoing) return
+            if (current.nvpCodecs != null && nvpCodec !in current.nvpCodecs) {
+                endVoiceCall() // codec di luar offer → tutup
+                return
+            }
+            callState.value = current.copy(nvpCodec = nvpCodec)
+            maybeStartNvpEngine()
+            return
+        }
         val sdp = data.optString("sdp")
         if (sdp.isBlank()) return
         if (callState.value.status != "dialing") return
@@ -1130,24 +1623,39 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun onCallIce(data: JSONObject) {
         val candidate = data.optJSONObject("candidate") ?: return
-        // Room ICE memakai event yang sama; bedakan lewat call.conversation_id.
+        // Room NVP tak memakai ICE: abaikan kandidat room (jalur WebRTC lama).
         val callJson = data.optJSONObject("call")
-        if (callJson != null && callJson.optLong("conversation_id") != 0L) {
-            val roomId = callJson.optLong("id")
-            if (groupCall.value.room?.call?.id != roomId) return
-            if (groupCall.value.status != "active") return
-            mesh.onIce(data.optLong("from_user_id"), candidate)
-            return
-        }
+        if (callJson != null && callJson.optLong("conversation_id") != 0L) return
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { rtc.handleRemoteIce(candidate) }
+        }
+    }
+
+    /** Sinkron slot engine dari event join/leave room (NVP). */
+    private fun onNvpRoomMembership(type: String, data: JSONObject, callId: Long) {
+        val g = groupCall.value
+        if (!g.nvp || g.room?.call?.id != callId || callId <= 0) return
+        if (type == "call_room_joined") {
+            val userId = data.optJSONObject("user")?.optLong("id") ?: 0L
+            val slot = data.optInt("slot", -1)
+            if (userId > 0 && slot >= 0 && userId != session.user?.id) {
+                groupCall.value = g.copy(nvpSlots = g.nvpSlots + (userId to slot))
+                nvpEngine.addSlot(slot)
+            }
+        } else {
+            val userId = data.optLong("user_id")
+            val slot = g.nvpSlots[userId]
+            if (userId > 0 && slot != null) {
+                nvpEngine.removeSlot(slot)
+                groupCall.value = g.copy(nvpSlots = g.nvpSlots - userId)
+            }
         }
     }
 
     private fun onRoomEnded(data: JSONObject) {
         val callId = data.optJSONObject("call")?.optLong("id") ?: data.optLong("call_id")
         if (callId <= 0 || groupCall.value.room?.call?.id != callId) return
-        mesh.closeAll()
+        runCatching { nvpEngine.stop() }
         groupCall.value = GroupCallUiState(status = "ended")
         viewModelScope.launch {
             delay(800)
@@ -1179,6 +1687,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun endCallLocal() {
         runCatching { rtc.close() }
+        runCatching { nvpEngine.stop() }
+        pendingNvpOffer = null
+        nvpPreparedArrived = false
+        nvpFallbackUsed = false
+        nvpAnswerFallbackUsed = false
         callIceJob?.cancel()
         pendingIce.clear()
         stopCallService()
@@ -1214,9 +1727,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 existing.id == incoming.id ||
                     (incoming.clientId != null && existing.clientId == incoming.clientId)
             }
+            val merged = (cleaned + incoming).distinctBy { it.id }.sortedBy { it.id }
+            val capped = merged.capChatWindow()
             chat.value = current.copy(
-                messages = (cleaned + incoming).distinctBy { it.id }.sortedBy { it.id },
+                messages = capped,
                 typingName = null,
+                // Pesan lama yang terbuang dari RAM tetap bisa digali via beforeId.
+                hasMore = current.hasMore || capped.size < merged.size,
             )
             if (incoming.sender?.id != session.user?.id) {
                 markReadInternal(conversationId, incoming.id)
@@ -1253,6 +1770,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         runCatching { PushManager.cancelForConversation(getApplication(), conversation.id) }
         chat.value = ChatUiState(conversation = conversation, loading = true, keySyncing = true)
         viewModelScope.launch {
+            // 0. Pesan sementara: pangkas cache kedaluwarsa sebelum tampil.
+            if (conversation.disappearingDays > 0) {
+                runCatching { chatCache.pruneDisappearing(conversation.id, conversation.disappearingDays) }
+            }
             // 1. Cache dulu: tampil instan + tetap bisa dibaca saat offline.
             val cached = runCatching { chatCache.recent(conversation.id) }.getOrDefault(emptyList())
             val queuedHere = runCatching {
@@ -1460,10 +1981,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         chat.value = state.copy(messages = state.messages + pending, replyTo = null)
         lastTypingSent = 0L
 
-        // Bila kunci lokal baru dibuat saat mengirim (mis. habis reinstall),
+        // Bila kunci lokal baru dibuat saat mengirim (percakapan baru),
         // sebarkan ke anggota/perangkat lain agar pesan terbaca semua pihak.
+        // Kunci tandingan habis-reinstall TIDAK PERNAH dibuat: encryptText
+        // melempar KEY_SYNC_NEEDED bila kanonis ada di pihak lain.
         val hadKey = e2ee.isEnabled(conversation.id)
         viewModelScope.launch {
+            if (!isOnline.value) {
+                // Antre plaintext langsung TANPA enkripsi: kunci dinilai ulang
+                // saat flush online (hindari kunci tandingan saat offline).
+                val current = chat.value
+                chat.value = current.copy(
+                    messages = current.messages.map {
+                        if (it.clientId == clientId) it.copy(status = "queued", pending = true) else it
+                    }
+                )
+                current.messages.firstOrNull { it.clientId == clientId }?.let { queued ->
+                    runCatching { chatCache.updateQueued(queued.copy(status = "queued", pending = true)) }
+                }
+                message.value = "Offline — pesan dikirim otomatis saat online."
+                return@launch
+            }
             try {
                 val toSend = sessCrypto.encryptText(conversation, me.id, body)
                 val sent = repository.sendMessage(conversation.id, toSend, clientId, replyToId)
@@ -1491,7 +2029,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             if (it.clientId == clientId) it.copy(status = "failed", pending = false) else it
                         }
                     )
-                    handleError(e)
+                    if (e is SessionCryptoException && e.message == SessionCrypto.KEY_SYNC_NEEDED) {
+                        message.value = "Menunggu sinkronisasi kunci keamanan…"
+                        launch(Dispatchers.IO) { runCatching { syncKeysNow(conversation.id) } }
+                    } else {
+                        handleError(e)
+                    }
                 }
             }
         }
@@ -1555,7 +2098,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             if (it.clientId == clientId) it.copy(status = "failed", pending = false) else it
                         }
                     )
-                    handleError(e)
+                    if (e is SessionCryptoException && e.message == SessionCrypto.KEY_SYNC_NEEDED) {
+                        message.value = "Menunggu sinkronisasi kunci keamanan…"
+                        launch(Dispatchers.IO) { runCatching { syncKeysNow(conversation.id) } }
+                    } else {
+                        handleError(e)
+                    }
                 }
             }
         }
@@ -1941,6 +2489,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun updateGroupSettings(conversationId: Long, fields: Map<String, Any>) {
         repository.updateGroupSettings(conversationId, fields)
         val updated = repository.conversationDetail(conversationId)
+        if (updated.disappearingDays > 0) {
+            runCatching { chatCache.pruneDisappearing(conversationId, updated.disappearingDays) }
+        }
         if (chat.value.conversation?.id == conversationId) {
             chat.value = chat.value.copy(conversation = updated, detail = updated)
         }
@@ -1984,8 +2535,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val cleaned = current.messages.filterNot {
             it.clientId == clientId || it.id == sent.id
         }
+        val merged = (cleaned + sent).distinctBy { it.id }.sortedBy { it.id }
+        val capped = merged.capChatWindow()
         chat.value = current.copy(
-            messages = (cleaned + sent).distinctBy { it.id }.sortedBy { it.id }
+            messages = capped,
+            hasMore = current.hasMore || capped.size < merged.size,
         )
         viewModelScope.launch {
             runCatching { chatCache.markSent(clientId, sent) }
@@ -2051,8 +2605,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     current.messages.none { it.id == incoming.id }
                 }
                 if (extra.isNotEmpty()) {
+                    val merged = (current.messages + extra).distinctBy { it.id }.sortedBy { it.id }
+                    val capped = merged.capChatWindow()
                     chat.value = current.copy(
-                        messages = (current.messages + extra).distinctBy { it.id }.sortedBy { it.id }
+                        messages = capped,
+                        hasMore = current.hasMore || capped.size < merged.size,
                     )
                     runCatching { chatCache.saveMessages(extra) }
                     extra.maxOfOrNull { it.id }?.let { runCatching { chatCache.saveCursor(conversation.id, it) } }
@@ -2072,7 +2629,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (now - lastTypingSent < 2_500L) return
         lastTypingSent = now
         viewModelScope.launch {
-            runCatching { repository.typing(conversationId) }
+            val sent = socket?.send(
+                "chat.typing",
+                JSONObject().put("conversation_id", conversationId),
+            ) == true
+            if (!sent) runCatching { repository.typing(conversationId) }
+        }
+    }
+
+    /**
+     * Tulis-buta hibrida: coba socket dulu, fallback REST bila tutup.
+     * Ketiganya idempotent — kirim ganda aman.
+     */
+    private fun blindWrite(
+        wsType: String,
+        conversationId: Long,
+        messageId: Long,
+        restFallback: suspend () -> Unit,
+    ) {
+        val payload = JSONObject()
+            .put("conversation_id", conversationId)
+            .put("message_id", messageId)
+        viewModelScope.launch {
+            val sent = socket?.send(wsType, payload) == true
+            if (!sent) runCatching { restFallback() }
         }
     }
 
@@ -2083,8 +2663,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         conversations.value = conversations.value.map {
             if (it.id == conversationId) it.copy(unreadCount = 0) else it
         }
-        viewModelScope.launch {
-            runCatching { repository.markRead(conversationId, messageId) }
+        blindWrite("message.read", conversationId, messageId) {
+            repository.markRead(conversationId, messageId)
         }
     }
 
@@ -2098,8 +2678,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val previous = ackUpTo[conversationId] ?: 0L
         if (messageId <= previous) return
         ackUpTo[conversationId] = messageId
-        viewModelScope.launch {
-            runCatching { repository.ack(conversationId, messageId) }
+        blindWrite("message.ack", conversationId, messageId) {
+            repository.ack(conversationId, messageId)
         }
     }
 
@@ -2875,6 +3455,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     sent++
                 } catch (e: Exception) {
                     if (isNetworkError(e)) return@launch
+                    // Kunci belum sync: biarkan antre (coba flush berikut),
+                    // jangan failed permanen dan JANGAN buat kunci tandingan.
+                    if (e is SessionCryptoException && e.message == SessionCrypto.KEY_SYNC_NEEDED) {
+                        launch(Dispatchers.IO) { runCatching { syncKeysNow(q.conversationId) } }
+                        return@launch
+                    }
                     runCatching { chatCache.updateQueued(q.copy(status = "failed", pending = false)) }
                     if (q.conversationId == activeChatId) {
                         val current = chat.value
@@ -3342,6 +3928,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 // Relay: server hanya menyimpan antrean — ekspor dari cache perangkat.
                 val cached = runCatching { chatCache.recent(conversation.id, 100) }.getOrDefault(emptyList())
+                val liveNames = runCatching { repository.conversationDetail(conversation.id) }
+                    .getOrNull()?.members.orEmpty()
+                    .associate { it.id to it.displayName }
                 val lines = cached.map { e2ee.decryptMessage(it) }.map { msg ->
                     val name = msg.sender?.familiarName ?: "?"
                     val text = when (msg.type) {
@@ -3352,7 +3941,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         "audio" -> "[Audio]"
                         "location" -> "[Lokasi]"
                         "redpacket" -> "[Amplop merah]"
-                        "system" -> msg.body.orEmpty()
+                        "system" -> renderSystemText(msg.body, liveNames)
                         else -> "[Lampiran]"
                     }
                     "[${msg.createdAt}] $name: $text"

@@ -526,6 +526,78 @@ class Calls extends MY_Controller
         $this->ok(['iceServers' => $this->turn_ice_servers()]);
     }
 
+    /**
+     * Kredensial media NVP/1 (docs/VOICE-PROTOCOL.md §3-4): slot + token
+     * deterministik + port relay. Cermin `call.prepared` untuk jalur
+     * fallback REST (jawab/ruang saat WS mati). Token dihitung IDENTIK
+     * dengan Erlang (`nusa_voice_relay:call_token/2`); uji silang di smoke.
+     */
+    public function nvp_join(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['call_id']);
+
+        $me = (int) $user['id'];
+        $call = $this->call_model->find($this->int_param('call_id'));
+        if (!$call) {
+            $this->fail('Call not found.', 404, 'not_found');
+        }
+        if (!in_array($call['status'], ['ringing', 'active'], true)) {
+            $this->fail('This call is no longer active.', 422, 'gone');
+        }
+        $convId = $call['conversation_id'] ?? null;
+        if ($convId === null) {
+            if ((int) $call['caller_id'] !== $me && (int) $call['callee_id'] !== $me) {
+                $this->fail('You are not a participant of this call.', 403, 'forbidden');
+            }
+            $slot = ((int) $call['caller_id'] === $me) ? 0 : 1;
+        } else {
+            if (!$this->conversation_model->isMember((int) $convId, $me)) {
+                $this->fail('You are not a member of this group.', 403, 'forbidden');
+            }
+            $ids = array_map('intval', array_column($this->call_model->participants((int) $call['id']), 'user_id'));
+            $slot = array_search($me, $ids, true);
+            if ($slot === false) {
+                if (count($ids) >= 8) {
+                    $this->fail('Room is full.', 422, 'room_full');
+                }
+                $this->call_model->setParticipant((int) $call['id'], $me, 'joined');
+                $slot = count($ids);
+            }
+        }
+        $resp = [
+            'call' => $this->call_dto($call),
+            'slot' => $slot,
+            'token' => self::nvpToken((int) $call['id'], $me),
+            'relay_port' => (int) (getenv('VOICE_UDP_PORT') ?: 8092),
+        ];
+        if ($convId !== null) {
+            // Kunci media room (cermin Erlang `nusa_call:room_key/salt`).
+            $resp['key_ct'] = self::nvpB64Url(hash_hmac('sha256', 'nvp-room-key' . pack('J', (int) $call['id']), self::nvpSecret(), true));
+            $resp['salt'] = self::nvpB64Url(substr(hash_hmac('sha256', 'nvp-room-salt' . pack('J', (int) $call['id']), self::nvpSecret(), true), 0, 4));
+        }
+        $this->ok($resp);
+    }
+
+    private static function nvpSecret(): string
+    {
+        return (string) (getenv('APP_SECRET') ?: 'dev-secret-change-me-please-32-bytes-min');
+    }
+
+    private static function nvpB64Url(string $bin): string
+    {
+        return rtrim(strtr(base64_encode($bin), '+/', '-_'), '=');
+    }
+
+    /** Token sesi NVP: 4 byte pertama HMAC-SHA256(APP_SECRET, "nvp-v1"|call:64|user:64). */
+    public static function nvpToken(int $callId, int $userId): int
+    {
+        $mac = hash_hmac('sha256', "nvp-v1" . pack('J', $callId) . pack('J', $userId), self::nvpSecret(), true);
+        $parts = unpack('N', substr($mac, 0, 4));
+        return $parts[1];
+    }
+
     private function turn_ice_servers(): array
     {
         $fallback = [['urls' => ['stun:stun.cloudflare.com:3478']]];

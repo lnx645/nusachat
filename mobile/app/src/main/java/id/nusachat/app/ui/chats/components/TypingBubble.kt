@@ -14,14 +14,17 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 
 /**
  * Gelembung "sedang mengetik..." — gaya bubble text masuk: berekor, tanpa avatar.
+ * Warna bubble + teks dioper dari tema chat (bukan tema aplikasi) supaya
+ * sinkron dengan wallpaper & paket bubble pilihan user.
  */
 @Composable
-fun TypingBubble(name: String) {
+fun TypingBubble(name: String, bubble: Color, text: Color) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -31,20 +34,20 @@ fun TypingBubble(name: String) {
         Box(modifier = Modifier.padding(start = 6.dp)) {
             BubbleTail(
                 mine = false,
-                color = MaterialTheme.colorScheme.surface,
+                color = bubble,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .offset(x = (-6).dp, y = 0.dp),
             )
             Surface(
                 shape = RoundedCornerShape(topStart = 2.dp, topEnd = 18.dp, bottomEnd = 18.dp, bottomStart = 18.dp),
-                color = MaterialTheme.colorScheme.surface,
+                color = bubble,
             ) {
                 Text(
                     text = "sedang mengetik...",
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
                     style = MaterialTheme.typography.bodySmall.copy(fontStyle = FontStyle.Italic),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = text,
                 )
             }
         }
@@ -52,7 +55,7 @@ fun TypingBubble(name: String) {
         Text(
             text = name,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = text,
             modifier = Modifier.align(Alignment.CenterVertically),
         )
     }

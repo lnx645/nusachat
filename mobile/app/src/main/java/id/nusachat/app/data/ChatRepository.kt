@@ -495,7 +495,13 @@ class ChatRepository(
         val result = mutableListOf<DeviceKey>()
         for (i in 0 until array.length()) {
             array.optJSONObject(i)?.let {
-                result.add(DeviceKey(it.optString("device_id"), it.optString("public_key")))
+                result.add(
+                    DeviceKey(
+                        it.optString("device_id"),
+                        it.optString("public_key"),
+                        it.optString("updated_at", ""),
+                    )
+                )
             }
         }
         return result

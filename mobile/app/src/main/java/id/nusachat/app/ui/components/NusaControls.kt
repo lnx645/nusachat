@@ -62,7 +62,7 @@ import androidx.compose.ui.unit.sp
 /**
  * Design system NusaChat — semua komponen Material dibungkus di sini supaya
  * warna, radius, dan ukuran font konsisten mengikuti tema aplikasi
- * (LINE green #06C755, teks body 15sp, label 14sp, radius 14dp).
+ * (teal #009688, teks body 15sp, label 14sp, radius 14dp).
  * Jangan pakai Button/IconButton/Switch/dll. bawaan langsung di layar.
  */
 
@@ -584,13 +584,15 @@ fun NusaBottomSheet(
     content: @Composable () -> Unit,
 ) {
     val sheetContent: @Composable () -> Unit = content
+    val resolvedShape = shape ?: RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+    val resolvedContainer = containerColor ?: MaterialTheme.colorScheme.surface
     if (sheetState != null) {
         ModalBottomSheet(
             onDismissRequest = onDismissRequest,
             modifier = modifier,
             sheetState = sheetState,
-            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-            containerColor = MaterialTheme.colorScheme.surface,
+            shape = resolvedShape,
+            containerColor = resolvedContainer,
             dragHandle = dragHandle,
             content = { sheetContent() },
         )
@@ -598,8 +600,8 @@ fun NusaBottomSheet(
         ModalBottomSheet(
             onDismissRequest = onDismissRequest,
             modifier = modifier,
-            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-            containerColor = MaterialTheme.colorScheme.surface,
+            shape = resolvedShape,
+            containerColor = resolvedContainer,
             dragHandle = dragHandle,
             content = { sheetContent() },
         )

@@ -40,6 +40,8 @@ data class GroupJoinRequest(
 data class DeviceKey(
     val deviceId: String,
     val publicKey: String,
+    /** ISO-8601 publish terakhir ("", bila server lama). */
+    val updatedAt: String = "",
 )
 
 data class KeyHolder(
@@ -255,6 +257,24 @@ data class MessagesPage(
     val messages: List<Message>,
     val hasMore: Boolean,
 )
+
+/** Jumlah pesan terbaru yang ditahan di RAM per chat terbuka. */
+const val CHAT_MEMORY_WINDOW = 300
+
+/**
+ * Jendela memori daftar pesan: hanya [max] pesan terbaru + semua pending.
+ * Input diasumsikan sudah dedup + urut naik (id negatif = pending di depan).
+ * Pesan lama yang dibuang tetap ada di cache/server dan bisa dimuat lagi
+ * lewat beforeId, jadi pemanggil wajib menyalakan hasMore bila ada yang
+ * terbuang (return lebih pendek dari input).
+ */
+fun List<Message>.capChatWindow(max: Int = CHAT_MEMORY_WINDOW): List<Message> {
+    if (size <= max) return this
+    val pending = filter { it.pending }
+    val rest = filterNot { it.pending }.takeLast(max)
+    if (rest.size + pending.size >= size) return this
+    return (pending + rest).sortedBy { it.id }
+}
 
 internal fun JSONObject.stringOrNull(key: String): String? {
     if (!has(key) || isNull(key)) return null

@@ -9,6 +9,14 @@ class Message_model extends CI_Model
     /** Masa tenggang setelah semua penerima ack (jendela revoke/edit 24 jam). */
     private const GRACE_FULLY_ACKED = 86400;
 
+    private static function isUniqueViolation(PDOException $e): bool
+    {
+        // SQLSTATE 23000: MySQL (1062) + SQLite (19) — keduanya integritas.
+        return $e->getCode() === '23000'
+            || str_contains($e->getMessage(), 'UNIQUE')
+            || str_contains($e->getMessage(), 'Duplicate entry');
+    }
+
     private Store $store;
 
     public function __construct()
@@ -38,32 +46,61 @@ class Message_model extends CI_Model
         }
 
         $now = now_iso();
-        $id = $this->store->insert('messages', [
-            'uuid' => uuid4(),
-            'conversation_id' => (int) $data['conversation_id'],
-            'sender_id' => (int) $data['sender_id'],
-            'type' => $data['type'],
-            'body' => $data['body'] ?? null,
-            'attachment_url' => $data['attachment_url'] ?? null,
-            'attachment_meta' => !empty($data['attachment_meta']) ? json_encode($data['attachment_meta'], JSON_UNESCAPED_SLASHES) : null,
-            'reply_to_id' => !empty($data['reply_to_id']) ? (int) $data['reply_to_id'] : null,
-            'forwarded_from_id' => !empty($data['forwarded_from_id']) ? (int) $data['forwarded_from_id'] : null,
-            'mentions' => !empty($data['mentions']) ? json_encode(array_values($data['mentions']), JSON_UNESCAPED_SLASHES) : null,
-            'status' => 'sent',
-            'client_id' => $data['client_id'] ?? null,
-            'created_at' => $now,
-            'expires_at' => gmdate('Y-m-d\TH:i:s\Z', time() + self::TTL_UNDELIVERED),
-        ]);
+        try {
+            $id = $this->store->insert('messages', [
+                'uuid' => uuid4(),
+                'conversation_id' => (int) $data['conversation_id'],
+                'sender_id' => (int) $data['sender_id'],
+                'type' => $data['type'],
+                'body' => $data['body'] ?? null,
+                'attachment_url' => $data['attachment_url'] ?? null,
+                'attachment_meta' => !empty($data['attachment_meta']) ? json_encode($data['attachment_meta'], JSON_UNESCAPED_SLASHES) : null,
+                'reply_to_id' => !empty($data['reply_to_id']) ? (int) $data['reply_to_id'] : null,
+                'forwarded_from_id' => !empty($data['forwarded_from_id']) ? (int) $data['forwarded_from_id'] : null,
+                'mentions' => !empty($data['mentions']) ? json_encode(array_values($data['mentions']), JSON_UNESCAPED_SLASHES) : null,
+                'status' => 'sent',
+                'client_id' => $data['client_id'] ?? null,
+                'created_at' => $now,
+                'expires_at' => gmdate('Y-m-d\TH:i:s\Z', time() + self::TTL_UNDELIVERED),
+            ]);
+        } catch (PDOException $e) {
+            // Race kirim-ganda: cek-duplikat lolos di dua request bersamaan,
+            // yang kalah menabrak UNIQUE(sender_id, client_id) — perlakukan
+            // sebagai duplikat (200 + duplicate:true), bukan 500.
+            if (!empty($data['client_id']) && self::isUniqueViolation($e)) {
+                $existing = $this->store->one(
+                    'SELECT m.*, u.display_name AS sender_display_name, u.username AS sender_username,
+                            u.avatar_url AS sender_avatar_url
+                     FROM messages m JOIN users u ON u.id = m.sender_id
+                     WHERE m.sender_id = ? AND m.client_id = ?',
+                    [(int) $data['sender_id'], $data['client_id']]
+                );
+                if ($existing) {
+                    return ['row' => $existing, 'duplicate' => true];
+                }
+            }
+            throw $e;
+        }
 
         // Snapshot penerima saat kirim; pengirim langsung dianggap ack.
         // Anggota yang masuk belakangan tidak melihat pesan lama (ala WhatsApp).
-        $memberIds = $data['member_ids'] ?? [];
-        foreach ($memberIds as $memberId) {
-            $this->store->insert('message_recipients', [
-                'message_id' => $id,
-                'user_id' => (int) $memberId,
-                'acked_at' => (int) $memberId === (int) $data['sender_id'] ? $now : null,
-            ]);
+        // Satu INSERT multi-baris (bukan N round-trip) — SQLite + MySQL sama.
+        $memberIds = array_values(array_unique(array_map(
+            'intval',
+            (array) ($data['member_ids'] ?? [])
+        )));
+        if ($memberIds) {
+            $placeholders = implode(',', array_fill(0, count($memberIds), '(?, ?, ?)'));
+            $params = [];
+            foreach ($memberIds as $memberId) {
+                $params[] = $id;
+                $params[] = $memberId;
+                $params[] = $memberId === (int) $data['sender_id'] ? $now : null;
+            }
+            $this->store->run(
+                'INSERT INTO message_recipients (message_id, user_id, acked_at) VALUES ' . $placeholders,
+                $params
+            );
         }
 
         return ['row' => $this->find($id), 'duplicate' => false];
@@ -164,8 +201,10 @@ class Message_model extends CI_Model
                     u.avatar_url AS sender_avatar_url
              FROM messages m JOIN users u ON u.id = m.sender_id
              WHERE m.id IN (
-                SELECT MAX(id) FROM messages WHERE conversation_id IN (' . $placeholders . ') GROUP BY conversation_id
-             ) AND m.expires_at > ?',
+                SELECT MAX(id) FROM messages
+                WHERE conversation_id IN (' . $placeholders . ') AND expires_at > ?
+                GROUP BY conversation_id
+             )',
             array_merge(
                 array_map(static fn (int|string $id): int => (int) $id, $conversationIds),
                 [now_iso()]

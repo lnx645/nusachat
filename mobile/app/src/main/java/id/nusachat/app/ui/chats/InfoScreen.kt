@@ -30,6 +30,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -410,6 +414,7 @@ fun GroupInfoScreen(
                 item(key = "members") {
                     var memberQuery by remember(conversation.id) { mutableStateOf("") }
                     var transferTarget by remember { mutableStateOf<User?>(null) }
+                    var memberMenuFor by remember { mutableStateOf<Long?>(null) }
                     val shownMembers = remember(conversation.members, memberQuery) {
                         if (memberQuery.isBlank()) conversation.members
                         else conversation.members.filter {
@@ -532,21 +537,39 @@ fun GroupInfoScreen(
                                         )
                                     }
                                     if (member.id != myId && isOwner && member.id != conversation.createdBy) {
-                                        Column(horizontalAlignment = Alignment.End) {
-                                            if (member.role == "admin") {
-                                                NusaTextButton(onClick = { onSetRole(member.id, "member") }) {
-                                                    Text("Cabut admin")
-                                                }
-                                            } else {
-                                                NusaTextButton(onClick = { onSetRole(member.id, "admin") }) {
-                                                    Text("Jadikan admin")
-                                                }
+                                        Box {
+                                            IconButton(onClick = { memberMenuFor = member.id }) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.MoreVert,
+                                                    contentDescription = "Kelola anggota",
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
                                             }
-                                            NusaTextButton(onClick = { transferTarget = member }) {
-                                                Text("Alihkan pemilik")
-                                            }
-                                            NusaTextButton(onClick = { confirmRemove = member }) {
-                                                Text("Keluarkan", color = MaterialTheme.colorScheme.error)
+                                            DropdownMenu(
+                                                expanded = memberMenuFor == member.id,
+                                                onDismissRequest = { memberMenuFor = null },
+                                            ) {
+                                                DropdownMenuItem(
+                                                    text = { Text(if (member.role == "admin") "Cabut admin" else "Jadikan admin") },
+                                                    onClick = {
+                                                        memberMenuFor = null
+                                                        onSetRole(member.id, if (member.role == "admin") "member" else "admin")
+                                                    },
+                                                )
+                                                DropdownMenuItem(
+                                                    text = { Text("Alihkan pemilik") },
+                                                    onClick = {
+                                                        memberMenuFor = null
+                                                        transferTarget = member
+                                                    },
+                                                )
+                                                DropdownMenuItem(
+                                                    text = { Text("Keluarkan", color = MaterialTheme.colorScheme.error) },
+                                                    onClick = {
+                                                        memberMenuFor = null
+                                                        confirmRemove = member
+                                                    },
+                                                )
                                             }
                                         }
                                     }
@@ -697,15 +720,6 @@ fun GroupInfoScreen(
                             onDismiss = { confirmClear = false },
                         )
                     }
-                }
-            }
-            item(key = "archive-direct") {
-                var archived by remember(conversation.id, conversation.archived) {
-                    mutableStateOf(conversation.archived)
-                }
-                ArchiveRow(archived = archived) {
-                    vm?.archiveActiveChat(!archived)
-                    archived = !archived
                 }
             }
             item(key = "note") {

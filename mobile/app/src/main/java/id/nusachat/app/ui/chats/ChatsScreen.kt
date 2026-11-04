@@ -451,9 +451,9 @@ private fun conversationPreview(conversation: Conversation, currentUserId: Long?
         "redpacket" -> "[Amplop merah]"
         else -> message.body.orEmpty()
     }
-    // Jika body masih ciphertext base64 (gagal dekrip karena ganti HP/reinstall), jangan tampilkan raw base64
-    val body = if (message.type == "text" && raw.length > 24 && raw.matches(Regex("^[A-Za-z0-9+/=\\n\\r]+$")) && raw.contains("=")) {
-        "[Pesan terenkripsi]"
+    // Cipher/placeholder tak terbaca → fallback rapi ala WhatsApp (satu sumber).
+    val body = if (message.type == "text") {
+        id.nusachat.app.data.E2eeManager.fallbackTextFor(raw) ?: raw
     } else raw
     val prefix = when {
         message.sender?.id == currentUserId -> "Kamu: "

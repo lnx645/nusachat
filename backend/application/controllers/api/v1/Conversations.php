@@ -27,12 +27,27 @@ class Conversations extends MY_Controller
         ));
         $ids = array_map('intval', array_column($rows, 'id'));
         $latest = $this->message_model->latestForConversations($ids);
+        // Preload anti N+1: 3 query untuk seluruh daftar (bukan 3 per baris).
+        $membersByConv = $this->conversation_model->membersForMany($ids);
+        $peerIds = [];
+        foreach ($membersByConv as $members) {
+            foreach ($members as $member) {
+                if ((int) $member['id'] !== (int) $user['id']) {
+                    $peerIds[] = (int) $member['id'];
+                }
+            }
+        }
+        $preloaded = [
+            'members' => $membersByConv,
+            'remarks' => $this->friend_model->remarksFor((int) $user['id']),
+            'friendships' => $this->friend_model->findBetweenMany((int) $user['id'], $peerIds),
+        ];
 
         $conversations = [];
         foreach ($rows as $row) {
             $lastRow = $latest[(int) $row['id']] ?? null;
             $row['last_message'] = $lastRow ? message_dto($lastRow) : null;
-            $conversations[] = $this->present($row, (int) $user['id']);
+            $conversations[] = $this->present($row, (int) $user['id'], false, $preloaded);
         }
         $last = end($rows);
         $this->ok([
@@ -119,7 +134,7 @@ class Conversations extends MY_Controller
         }
 
         $id = $this->conversation_model->createGroup((int) $user['id'], $title, $memberIds);
-        $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " membuat grup \"" . $title . "\"");
+        $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'group_create', [], ['title' => $title]);
         $row = $this->conversation_model->forUser($id, (int) $user['id']);
         $this->ok(['conversation' => $this->present($row, (int) $user['id'], true)], 201);
     }
@@ -138,6 +153,9 @@ class Conversations extends MY_Controller
         $afterId = $this->param('after_id') !== null ? $this->int_param('after_id') : null;
         $limit = $this->int_param('limit', 30);
         $rows = $this->message_model->list($id, $beforeId, $afterId, $limit, (int) $user['id']);
+        // has_more dari hitungan pra-filter: filter clear/disappearing/hide
+        // di bawah menyusutkan $rows dan dulu memalsukan "tidak ada lagi".
+        $hasMore = count($rows) >= max(1, min(100, $limit));
         // Per-user clear history & disappearing
         $clearedAt = $this->store->value('SELECT cleared_at FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [$id, (int) $user['id']]);
         if (!empty($clearedAt)) {
@@ -177,7 +195,7 @@ class Conversations extends MY_Controller
         $messages = array_map('message_dto', $rows);
         $this->ok([
             'messages' => $messages,
-            'has_more' => count($rows) >= max(1, min(100, $limit)),
+            'has_more' => $hasMore,
             'conversation_id' => $id,
         ]);
     }
@@ -246,6 +264,7 @@ class Conversations extends MY_Controller
         }
 
         $mentions = $type === 'text' ? $this->extractMentions($id, (int) $user['id'], $body) : [];
+        $memberIds = $this->conversation_model->memberIds($id);
         $result = $this->message_model->create([
             'conversation_id' => $id,
             'sender_id' => (int) $user['id'],
@@ -256,7 +275,7 @@ class Conversations extends MY_Controller
             'reply_to_id' => $replyTo,
             'mentions' => $mentions,
             'client_id' => $clientId !== '' ? $clientId : null,
-            'member_ids' => $this->conversation_model->memberIds($id),
+            'member_ids' => $memberIds,
         ]);
 
         $rows = $this->message_model->withExtras([$result['row']], (int) $user['id']);
@@ -264,7 +283,7 @@ class Conversations extends MY_Controller
         // silent: pesan mesin (SKDM E2EE) — tetap event realtime, tanpa push.
         $silent = $this->bool_param('silent');
         if (!$result['duplicate']) {
-            $this->broadcastNewMessage($id, $user, $result['row'], $message, $body, $type, $silent);
+            $this->broadcastNewMessage($id, $user, $result['row'], $message, $body, $type, $silent, $memberIds);
         }
 
         $this->ok(['message' => $message, 'duplicate' => $result['duplicate']], $result['duplicate'] ? 200 : 201);
@@ -346,30 +365,17 @@ class Conversations extends MY_Controller
             $this->fail('user_ids must be a non-empty array.', 422, 'validation_error');
         }
         $valid = [];
+        $targets = [];
         foreach (array_unique(array_map('intval', $userIds)) as $userId) {
             $member = $this->user_model->find($userId);
             if ($member && (int) $member['is_active'] === 1) {
                 $valid[] = $userId;
+                $targets[$userId] = $member['display_name'];
             }
         }
         $this->conversation_model->addMembers($id, $valid);
         if ($valid) {
-            $names = [];
-            foreach ($valid as $uid) {
-                $u = $this->user_model->find($uid);
-                if ($u) $names[] = $u['display_name'];
-            }
-            $count = count($names);
-            if ($count === 1) {
-                $label = $names[0];
-            } elseif ($count === 2) {
-                $label = $names[0] . " dan " . $names[1];
-            } elseif ($count === 3) {
-                $label = $names[0] . ", " . $names[1] . " dan " . $names[2];
-            } else {
-                $label = $names[0] . ", " . $names[1] . " dan " . ($count - 2) . " lainnya";
-            }
-            $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " menambahkan " . $label);
+            $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'member_add', $targets);
         }
         $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', [
             'conversation_id' => $id,
@@ -420,9 +426,9 @@ class Conversations extends MY_Controller
         $this->conversation_model->removeMember($id, $targetId);
 
         if ((int) $targetId === (int) $user['id']) {
-            $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " keluar");
+            $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'member_leave');
         } else {
-            $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " mengeluarkan " . $targetName);
+            $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'member_remove', [$targetId => $targetName]);
         }
 
         if ($isOwner && $targetId === (int) $user['id']) {
@@ -735,8 +741,9 @@ class Conversations extends MY_Controller
         }
         $messageId = $this->param('message_id') !== null ? $this->int_param('message_id') : 0;
         if ($messageId > 0) {
+            // Relay: penanda boleh menunjuk pesan tersapu (cermin read()).
             $message = $this->message_model->find($messageId);
-            if (!$message || (int) $message['conversation_id'] !== $id) {
+            if ($message && (int) $message['conversation_id'] !== $id) {
                 $this->fail('Message not found.', 404, 'not_found');
             }
         }
@@ -835,7 +842,7 @@ class Conversations extends MY_Controller
         $this->conversation_model->transferOwnership($id, $targetId);
         $targetUser = $this->user_model->find($targetId);
         $targetName = $targetUser['display_name'] ?? ('#' . $targetId);
-        $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . ' mengalihkan kepemilikan grup ke ' . $targetName);
+        $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'owner_transfer', [$targetId => $targetName]);
         $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', [
             'conversation_id' => $id,
         ]);
@@ -914,7 +921,7 @@ class Conversations extends MY_Controller
             }
             $this->ok(['status' => 'pending', 'request_id' => (int) ($result['request']['id'] ?? 0)], 202);
         }
-        $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " bergabung via tautan undangan");
+        $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'join_link');
         $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', [
             'conversation_id' => $id,
         ]);
@@ -980,7 +987,7 @@ class Conversations extends MY_Controller
         if ($action === 'approve') {
             $newMember = $this->user_model->find((int) $pending['user_id']);
             $name = $newMember['display_name'] ?? ("#" . (int) $pending['user_id']);
-            $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " menyetujui " . $name . " bergabung");
+            $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'approve_join', [(int) $pending['user_id'] => $name]);
         }
         $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', [
             'conversation_id' => $id,
@@ -1024,11 +1031,7 @@ class Conversations extends MY_Controller
         $this->conversation_model->setRole($id, $targetId, $role);
         $targetUser = $this->user_model->find($targetId);
         $targetName = $targetUser['display_name'] ?? ("#" . $targetId);
-        $this->pushSystemEvent(
-            $id,
-            (int) $user['id'],
-            $user['display_name'] . ($role === 'admin' ? " mengangkat " . $targetName . " menjadi admin" : " mencabut admin " . $targetName)
-        );
+        $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'role_change', [$targetId => $targetName], ['role' => $role]);
         $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', [
             'conversation_id' => $id,
         ]);
@@ -1189,7 +1192,7 @@ class Conversations extends MY_Controller
         $fields['updated_at'] = now_iso();
         $this->store->update('conversations', $fields, 'id = ?', [$id]);
         $updated = $this->conversation_model->forUser($id, (int) $user['id']);
-        $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " mengubah info grup");
+        $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'info_update');
         $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', ['conversation_id' => $id]);
         $this->ok(['conversation' => $this->present($updated, (int) $user['id'], true)]);
     }
@@ -1243,7 +1246,7 @@ class Conversations extends MY_Controller
         // System event for audit
         $change = [];
         foreach ($fields as $k => $v) { if ($k !== 'updated_at') $change[] = $k; }
-        $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . " mengubah pengaturan grup");
+        $this->sysEvent($id, (int) $user['id'], (string) $user['display_name'], 'settings_update');
         $updated = $this->conversation_model->find($id);
         $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', ['conversation_id' => $id]);
         $this->ok(['settings' => [
@@ -1287,10 +1290,10 @@ class Conversations extends MY_Controller
         }
     }
 
-    private function broadcastNewMessage(int $id, array $user, array $row, array $message, string $body, string $type, bool $silent = false): void
+    private function broadcastNewMessage(int $id, array $user, array $row, array $message, string $body, string $type, bool $silent = false, ?array $memberIds = null): void
     {
         $this->conversation_model->setLastMessage($id, (int) $row['id'], $row['created_at']);
-        $memberIds = $this->conversation_model->memberIds($id);
+        $memberIds ??= $this->conversation_model->memberIds($id);
         $this->realtime_model->push($memberIds, 'message', [
             'conversation_id' => $id,
             'message' => $message,
@@ -1379,6 +1382,35 @@ class Conversations extends MY_Controller
         return array_values(array_unique($ids));
     }
 
+    /**
+     * Event sistem terstruktur: body = JSON {"sys":kode,"by":aktor,
+     * "targets":[id],"names":{id:nama},"title"?,"role"?}. Klien me-render
+     * teks dengan nama TERKINI (ganti nama tercermin di riwayat); "names"
+     * hanya snapshot cadangan bila user tak dikenal lagi. Badan plaintext
+     * lama tetap dirender apa adanya oleh klien (fallback).
+     */
+    private function sysEvent(
+        int $conversationId,
+        int $actorId,
+        string $actorName,
+        string $code,
+        array $targets = [],
+        array $extra = []
+    ): void {
+        $names = [(string) $actorId => $actorName];
+        foreach ($targets as $id => $name) {
+            $names[(string) (int) $id] = (string) $name;
+        }
+        $body = json_encode(
+            array_merge(
+                ['sys' => $code, 'by' => $actorId, 'targets' => array_map('intval', array_keys($targets)), 'names' => $names],
+                $extra
+            ),
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+        );
+        $this->pushSystemEvent($conversationId, $actorId, $body);
+    }
+
     private function pushSystemEvent(int $conversationId, int $actorId, string $body): void
     {
         $result = $this->message_model->create([
@@ -1403,9 +1435,28 @@ class Conversations extends MY_Controller
      * Convert a conversation row into the API shape, including the peer for
      * direct chats and the member list for group chats.
      */
-    private function present(array $row, int $viewerId, bool $includeMembers = false): array
+    private function present(array $row, int $viewerId, bool $includeMembers = false, ?array $preloaded = null): array
     {
-        $members = $this->conversation_model->members((int) $row['id']);
+        // $preloaded dari index(): members/remarks/friendships tanpa query
+        // tambahan. Penelepon tunggal (show/create/join) memakai jalur malas.
+        if ($preloaded !== null) {
+            $members = $preloaded['members'][(int) $row['id']] ?? [];
+            $remarkFor = static function (int $friendId) use ($preloaded): ?string {
+                $remark = $preloaded['remarks'][$friendId] ?? null;
+                return is_string($remark) && $remark !== '' ? $remark : null;
+            };
+            $fsFor = static function (int $friendId) use ($preloaded): ?array {
+                return $preloaded['friendships'][$friendId] ?? null;
+            };
+        } else {
+            $members = $this->conversation_model->members((int) $row['id']);
+            $remarkFor = function (int $friendId) use ($viewerId): ?string {
+                return $this->friend_model->remark($viewerId, $friendId);
+            };
+            $fsFor = function (int $friendId) use ($viewerId): ?array {
+                return $this->friend_model->findBetween($viewerId, $friendId);
+            };
+        }
         $dto = conversation_dto($row);
         if ($row['type'] === 'direct') {
             // E2EE key healing butuh daftar anggota walau chat 1-1.
@@ -1419,13 +1470,13 @@ class Conversations extends MY_Controller
             );
             foreach ($members as $member) {
                 if ((int) $member['id'] !== $viewerId) {
-                    $remark = $this->friend_model->remark($viewerId, (int) $member['id']);
+                    $remark = $remarkFor((int) $member['id']);
                     $dto['title'] = $remark ?? $member['display_name'];
                     $dto['avatar_url'] = $member['avatar_url'];
                     $peer = user_dto($member);
                     $peer['remark'] = $remark;
                     // Attach friendship status for public profile / button
-                    $fs = $this->friend_model->findBetween($viewerId, (int) $member['id']);
+                    $fs = $fsFor((int) $member['id']);
                     if ($fs) {
                         $peer['friend_status'] = $fs['status'];
                         $peer['request_id'] = (int) $fs['id'];
@@ -1457,6 +1508,69 @@ class Conversations extends MY_Controller
                 );
             }
         }
+        // Pratinjau daftar: render event sistem dengan nama live di sini —
+        // klien tak punya anggota saat me-render daftar (cermin renderSystemText).
+        if (($dto['last_message']['type'] ?? null) === 'system') {
+            $live = [];
+            foreach ($members as $member) {
+                $live[(int) $member['id']] = (string) ($member['display_name'] ?? '');
+            }
+            $dto['last_message']['body'] = $this->renderSystemPreview(
+                (string) ($dto['last_message']['body'] ?? ''),
+                $live
+            );
+        }
         return $dto;
+    }
+
+    /**
+     * Cermin server dari renderSystemText() Android: event sistem
+     * {"sys","by","targets","names",...} → kalimat Indonesia dengan nama
+     * live, snapshot sebagai cadangan, plaintext lama apa adanya.
+     */
+    private function renderSystemPreview(string $body, array $live): string
+    {
+        $raw = trim($body);
+        if (!str_starts_with($raw, '{"sys":')) {
+            return $raw;
+        }
+        $event = json_decode($raw, true);
+        if (!is_array($event) || empty($event['sys']) || (int) ($event['by'] ?? 0) <= 0) {
+            return $raw;
+        }
+        $snap = is_array($event['names'] ?? null) ? $event['names'] : [];
+        $name = static function (int $id) use ($live, $snap): string {
+            if (!empty($live[$id])) {
+                return (string) $live[$id];
+            }
+            if (!empty($snap[(string) $id])) {
+                return (string) $snap[(string) $id];
+            }
+            return '#' . $id;
+        };
+        $by = $name((int) $event['by']);
+        $targets = array_values(array_map('intval', (array) ($event['targets'] ?? [])));
+        $label = match (count($targets)) {
+            0 => '',
+            1 => $name($targets[0]),
+            2 => $name($targets[0]) . ' dan ' . $name($targets[1]),
+            3 => $name($targets[0]) . ', ' . $name($targets[1]) . ' dan ' . $name($targets[2]),
+            default => $name($targets[0]) . ', ' . $name($targets[1]) . ' dan ' . (count($targets) - 2) . ' lainnya',
+        };
+        return match ($event['sys']) {
+            'group_create' => $by . ' membuat grup "' . (string) ($event['title'] ?? '') . '"',
+            'member_add' => $by . ' menambahkan ' . $label,
+            'member_leave' => $by . ' keluar',
+            'member_remove' => $by . ' mengeluarkan ' . $label,
+            'owner_transfer' => $by . ' mengalihkan kepemilikan grup ke ' . $label,
+            'join_link' => $by . ' bergabung via tautan undangan',
+            'approve_join' => $by . ' menyetujui ' . $label . ' bergabung',
+            'role_change' => ($event['role'] ?? '') === 'admin'
+                ? $by . ' mengangkat ' . $label . ' menjadi admin'
+                : $by . ' mencabut admin ' . $label,
+            'info_update' => $by . ' mengubah info grup',
+            'settings_update' => $by . ' mengubah pengaturan grup',
+            default => $by . ' memperbarui grup',
+        };
     }
 }

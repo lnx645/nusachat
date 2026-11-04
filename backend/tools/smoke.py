@@ -659,6 +659,27 @@ def main():
         status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": "L" * 8193}, token=nusa)
         check("body 8193 rejected", status == 422, f"status={status} {payload}")
 
+        # Idempotency + toleransi relay + has_more pra-filter.
+        dup_cid = f"dup-{suffix}"
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": "sekali saja", "client_id": dup_cid}, token=nusa)
+        first_id = payload.get("data", {}).get("message", {}).get("id")
+        check("send with client_id", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": "beda isi", "client_id": dup_cid}, token=nusa)
+        check("duplicate client_id", status == 200 and payload["data"]["duplicate"] is True and payload["data"]["message"]["id"] == first_id, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/mark_unread", {"id": new_conv, "message_id": 999999999}, token=nusa)
+        check("mark unread unknown", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/mark_unread", {"id": new_conv, "message_id": first_id}, token=nusa)
+        check("unread restores marker", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/messages/hide", {"message_id": 999999999}, token=nusa)
+        check("hide unknown", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/messages/star", {"message_id": 999999998}, token=nusa)
+        check("star unknown", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/messages/hide", {"message_id": first_id}, token=nusa)
+        check("hide newest", status == 200, f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/messages?id={new_conv}&limit=1", token=nusa)
+        page = payload.get("data", {}) if payload.get("ok") else {}
+        check("has_more prefilter", status == 200 and page.get("messages") == [] and page.get("has_more") is True, f"status={status} {payload}")
+
         # Mention semua + deskripsi + alih kepemilikan grup.
         status, payload = request("POST", "/conversations/send", {"id": group_id, "type": "text", "body": "@semua kumpul"}, token=nusa)
         mentions = payload.get("data", {}).get("message", {}).get("mentions", []) if payload.get("ok") else []
@@ -667,6 +688,14 @@ def main():
         check("group description", status == 200 and payload["data"]["conversation"]["description"] == "Grup smoke test", f"status={status} {payload}")
         status, payload = request("POST", "/conversations/update_group", {"id": group_id, "description": "x" * 301}, token=nusa)
         check("description too long", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/update_group_settings", {"id": group_id, "disappearing_days": 7}, token=nusa)
+        check("disappearing set", status == 200, f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/show?id={group_id}", token=nusa)
+        check("disappearing shown", status == 200 and payload["data"]["conversation"]["disappearing_days"] == 7, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/update_group_settings", {"id": group_id, "disappearing_days": 5}, token=nusa)
+        check("disappearing invalid", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/update_group_settings", {"id": group_id, "disappearing_days": 0}, token=nusa)
+        check("disappearing off", status == 200, f"status={status} {payload}")
         status, payload = request("POST", "/conversations/transfer_owner", {"id": group_id, "user_id": 1}, token=sari)
         check("transfer by non-owner", status == 403, f"status={status} {payload}")
         status, payload = request("POST", "/conversations/transfer_owner", {"id": group_id, "user_id": 999999}, token=nusa)
@@ -677,6 +706,23 @@ def main():
         check("new owner shown", status == 200 and payload["data"]["conversation"]["created_by"] == 2, f"status={status} {payload}")
         status, payload = request("POST", "/conversations/transfer_owner", {"id": group_id, "user_id": 1}, token=sari)
         check("transfer back", status == 200 and payload["data"]["owner_id"] == 1, f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/messages?id={group_id}&limit=100", token=nusa)
+        sys_msgs = [m for m in payload.get("data", {}).get("messages", []) if m.get("type") == "system"] if payload.get("ok") else []
+        parsed = []
+        for m in sys_msgs:
+            try:
+                parsed.append(json.loads(m.get("body") or ""))
+            except Exception:
+                parsed.append(None)
+        codes = {p.get("sys") for p in parsed if isinstance(p, dict)}
+        check("system structured", status == 200 and "owner_transfer" in codes and "info_update" in codes, f"codes={codes}")
+        ot = next((p for p in parsed if isinstance(p, dict) and p.get("sys") == "owner_transfer"), {})
+        check("system targets+names", ot.get("by") in (1, 2) and all(t in (1, 2) for t in ot.get("targets", [])) and str(ot.get("by")) in (ot.get("names") or {}), f"event={ot}")
+        status, payload = request("GET", "/conversations?limit=100", token=nusa)
+        convs = payload.get("data", {}).get("conversations", []) if payload.get("ok") else []
+        grp = next((c for c in convs if c["id"] == group_id), {})
+        preview = ((grp.get("last_message") or {}).get("body") or "")
+        check("preview renders system", status == 200 and '{"sys"' not in preview and "mengalihkan" in preview, f"preview={preview[:80]}")
 
         # Sapaan pertemanan + remark.
         status, payload = request("POST", "/auth/register", {"username": f"gsap{suffix}", "password": "secret123", "display_name": "Sapa"})
@@ -693,6 +739,12 @@ def main():
         check("set remark", status == 200 and payload["data"]["remark"] == "Kawan Lama", f"status={status} {payload}")
         status, payload = request("GET", "/friends", token=nusa)
         check("remark listed", status == 200 and any(f["id"] == greet_id and f.get("remark") == "Kawan Lama" for f in payload["data"]["friends"]), f"status={status}")
+        status, payload = request("POST", "/conversations/create_direct", {"user_id": greet_id}, token=nusa)
+        check("direct for remark", status in (200, 201), f"status={status} {payload}")
+        status, payload = request("GET", "/conversations?limit=100", token=nusa)
+        convs = payload.get("data", {}).get("conversations", []) if payload.get("ok") else []
+        mine = [c for c in convs if c.get("peer", {}).get("id") == greet_id]
+        check("batch present remark", status == 200 and len(mine) == 1 and mine[0]["title"] == "Kawan Lama" and mine[0]["peer"].get("friend_status") == "accepted", f"status={status}")
         status, payload = request("POST", "/friends/remark", {"user_id": greet_id, "remark": "x" * 41}, token=nusa)
         check("remark too long", status == 422, f"status={status} {payload}")
         status, payload = request("POST", "/friends/remove", {"user_id": greet_id}, token=nusa)

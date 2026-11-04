@@ -93,6 +93,7 @@ private enum class Overlay { MOMENTS, NEARBY, FRIENDS, EDIT_PROFILE, HISTORY, ST
 @Composable
 fun NusaChatApp(vm: AppViewModel = viewModel()) {
     val session by vm.sessionState.collectAsStateWithLifecycle()
+    val restore by vm.restore.collectAsStateWithLifecycle()
     val themeMode by vm.settings.themeMode.collectAsStateWithLifecycle()
     val fontScale by vm.settings.fontScale.collectAsStateWithLifecycle()
     val language by vm.settings.language.collectAsStateWithLifecycle()
@@ -113,6 +114,7 @@ fun NusaChatApp(vm: AppViewModel = viewModel()) {
             when {
                 !session.checked -> SplashScreen()
                 session.user == null -> AuthScreen(vm)
+                restore != null -> RestoreScreen(state = restore!!, onSkip = vm::skipRestore)
                 else -> MainShell(vm, session.user!!)
             }
         }

@@ -155,10 +155,11 @@ write_cursor(Cursor) ->
 
 %%%-------------------------------------------------------------------
 %%% @doc Cutoff ISO-8601 UTC untuk klausa `kolom_waktu < ?'.
-%%% Diekspor agar bisa di-unit-test (format kabel vs MySQL VARCHAR).
+%%% Diekspor agar bisa di-unit-test (format kabel vs MySQL VARCHAR)
+%%% dan dipakai nusa_client_events. Negatif = masa depan (tenggang).
 %%% @end
 %%%-------------------------------------------------------------------
--spec cutoff_seconds_back(non_neg_integer()) -> binary().
+-spec cutoff_seconds_back(integer()) -> binary().
 cutoff_seconds_back(Seconds) ->
     {{Y, Mo, D}, {H, Mi, S}} =
         calendar:system_time_to_universal_time(erlang:system_time(second) - Seconds, second),
@@ -193,6 +194,23 @@ prune_events() ->
     end,
     ok.
 
+%% Pesan sementara: yang lebih tua dari jendela grup langsung
+%% kedaluwarsa di sini; penghapusan + anak-anaknya ikut RELAY_SWEEP
+%% di bawah. System dikecualikan (cermin filter fetch PHP).
+%% MySQL-only (modul ini memang hanya bicara MySQL); created_at/expires_at
+%% ISO-8601 UTC sehingga perbandingan string = kronologis.
+-spec expire_disappearing(binary()) -> ok.
+expire_disappearing(Now) ->
+    _ = nusa_mysql:query(
+          <<"UPDATE messages m JOIN conversations c ON c.id = m.conversation_id "
+            "SET m.expires_at = ? "
+            "WHERE c.disappearing_days > 0 AND m.type <> 'system' "
+            "AND m.created_at < DATE_FORMAT(DATE_SUB(UTC_TIMESTAMP(), "
+            "INTERVAL c.disappearing_days DAY), '%Y-%m-%dT%H:%i:%SZ') "
+            "AND (m.expires_at IS NULL OR m.expires_at > ?)">>,
+          [Now, Now]),
+    ok.
+
 %% Tabel anak dulu, induk `messages' terakhir (tanpa FK eksplisit).
 -define(RELAY_SWEEP, [
     <<"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE expires_at < ?)">>,
@@ -206,6 +224,7 @@ prune_events() ->
 -spec prune_relay() -> ok.
 prune_relay() ->
     Now = cutoff_seconds_back(0),
+    expire_disappearing(Now),
     Results = [nusa_mysql:query(Sql, [Now]) || Sql <- ?RELAY_SWEEP],
     case lists:filter(fun(R) -> R =/= ok end, Results) of
         [] ->

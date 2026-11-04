@@ -57,12 +57,15 @@ class ChatSocket(
         onStateChange(false)
     }
 
-    /** Kirim pesan client->server (mis. location.update). Best-effort. */
-    fun send(type: String, data: JSONObject = JSONObject()) {
-        val ws = socket ?: return
-        runCatching {
+    /**
+     * Kirim pesan client->server (mis. location.update, message.ack).
+     * Best-effort; false = socket tutup, penelepon fallback ke REST.
+     */
+    fun send(type: String, data: JSONObject = JSONObject()): Boolean {
+        val ws = socket ?: return false
+        return runCatching {
             ws.send(JSONObject().put("type", type).put("data", data).toString())
-        }
+        }.getOrDefault(false)
     }
 
     val isOpen: Boolean get() = socket != null

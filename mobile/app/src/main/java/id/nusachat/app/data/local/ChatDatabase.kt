@@ -68,6 +68,12 @@ interface ChatDao {
     @Query("SELECT * FROM messages WHERE client_id = :clientId LIMIT 1")
     suspend fun byClientId(clientId: String): CachedMessage?
 
+    @Query("SELECT * FROM messages WHERE id IN (:ids)")
+    suspend fun byIds(ids: List<Long>): List<CachedMessage>
+
+    @Query("SELECT COUNT(*) FROM messages WHERE id > 0")
+    suspend fun totalCount(): Int
+
     @Query("DELETE FROM messages WHERE client_id = :clientId")
     suspend fun deleteByClientId(clientId: String)
 
@@ -76,6 +82,12 @@ interface ChatDao {
 
     @Query("DELETE FROM messages WHERE id = :messageId")
     suspend fun deleteMessage(messageId: Long)
+
+    @Query("SELECT * FROM messages WHERE conversation_id = :conversationId")
+    suspend fun allForConversation(conversationId: Long): List<CachedMessage>
+
+    @Query("DELETE FROM messages WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>)
 
     @Query("SELECT * FROM sync_state WHERE conversation_id = :conversationId LIMIT 1")
     suspend fun cursor(conversationId: Long): SyncState?

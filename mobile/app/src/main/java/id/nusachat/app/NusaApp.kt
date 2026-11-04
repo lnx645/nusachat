@@ -6,6 +6,10 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
+import coil.memory.MemoryCache
+
+/** Batas bitmap Coil di RAM (default Coil persen dari memori app). */
+private const val IMAGE_MEMORY_CACHE_BYTES = 32 * 1024 * 1024
 
 /**
  * ImageLoader global Coil dengan decoder GIF animasi
@@ -19,8 +23,9 @@ class NusaApp : Application(), ImageLoaderFactory {
         )
     }
 
-    override fun newImageLoader(): ImageLoader =
-        ImageLoader.Builder(this)
+    override fun newImageLoader(): ImageLoader {
+        val app = this
+        return ImageLoader.Builder(app)
             .components {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     add(ImageDecoderDecoder.Factory())
@@ -28,6 +33,12 @@ class NusaApp : Application(), ImageLoaderFactory {
                     add(GifDecoder.Factory())
                 }
             }
+            .memoryCache {
+                MemoryCache.Builder(app)
+                    .maxSizeBytes(IMAGE_MEMORY_CACHE_BYTES)
+                    .build()
+            }
             .respectCacheHeaders(false)
             .build()
+    }
 }
