@@ -9,7 +9,7 @@ $config['app'] = [
     'access_ttl'    => (int) (getenv('JWT_TTL') ?: 604800),
     'refresh_ttl'   => (int) (getenv('REFRESH_TTL') ?: 2592000),
     'upload_max_mb' => (int) (getenv('UPLOAD_MAX_MB') ?: 25),
-    'ws_url'        => getenv('WS_PUBLIC_URL') ?: 'ws://localhost:8090',
+    'ws_url'        => getenv('WS_PUBLIC_URL') ?: 'ws://localhost:8091',
     'cors'          => getenv('CORS_ORIGINS') ?: '*',
     'cors_origins'  => array_values(array_filter(array_map(
         'trim',

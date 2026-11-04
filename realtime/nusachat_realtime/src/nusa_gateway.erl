@@ -11,9 +11,11 @@
 
 -define(SERVER, ?MODULE).
 
+-spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
+-spec init([]) -> {ok, map()}.
 init([]) ->
     Port = nusa_config:port(),
     Dispatch = cowboy_router:compile(
@@ -24,15 +26,19 @@ init([]) ->
     error_logger:info_msg("nusa_gateway listening on 0.0.0.0:~p~n", [Port]),
     {ok, #{port => Port}}.
 
+-spec handle_call(term(), term(), map()) -> {reply, term(), map()}.
 handle_call(_Req, _From, State) ->
     {reply, {error, bad_request}, State}.
 
+-spec handle_cast(term(), map()) -> {noreply, map()}.
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+-spec handle_info(term(), map()) -> {noreply, map()}.
 handle_info(_Info, State) ->
     {noreply, State}.
 
+-spec terminate(term(), map()) -> ok.
 terminate(_Reason, _State) ->
     catch cowboy:stop_listener(nusa_http),
     ok.

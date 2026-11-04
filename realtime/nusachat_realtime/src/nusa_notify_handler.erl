@@ -11,6 +11,7 @@
 
 -export([init/2]).
 
+-spec init(cowboy_req:req(), map()) -> {ok, cowboy_req:req(), map()}.
 init(Req0, State) ->
     case cowboy_req:method(Req0) of
         <<"POST">> ->
@@ -27,7 +28,7 @@ handle_post(Req0, State) ->
             {ok, Body, Req} = cowboy_req:read_body(Req0),
             Reply = try jsx:decode(Body, [return_maps]) of
                 #{<<"events">> := Events} when is_list(Events) ->
-                    nusa_poller:notify(Events),
+                    nusa_fanout:notify(Events),
                     200;
                 _ ->
                     400

@@ -13,18 +13,18 @@
 
 -define(SERVER, ?MODULE).
 
+-spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 %% sup_flags() = #{strategy => strategy(),         % optional
 %%                 intensity => non_neg_integer(), % optional
 %%                 period => pos_integer()}        % optional
-%% child_spec() = #{id => child_id(),       % mandatory
-%%                  start => mfargs(),      % mandatory
-%%                  restart => restart(),   % optional
-%%                  shutdown => shutdown(), % optional
-%%                  type => worker(),       % optional
-%%                  modules => modules()}   % optional
+%% Urutan start = urutan dependensi: mysql dulu (auth + fanout +
+%% nearby butuh DB), registry sebelum gateway (socket register saat
+%% connect), gateway terakhir (buka port hanya bila semua siap).
+%% one_for_one: satu anak crash tidak menjatuhkan yang lain.
+-spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
     SupFlags = #{strategy => one_for_one,
                  intensity => 5,
@@ -42,8 +42,8 @@ init([]) ->
           start => {nusa_nearby, start_link, []},
           restart => permanent,
           type => worker},
-        #{id => nusa_poller,
-          start => {nusa_poller, start_link, []},
+        #{id => nusa_fanout,
+          start => {nusa_fanout, start_link, []},
           restart => permanent,
           type => worker},
         #{id => nusa_gateway,

@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   backend:
-    name: Backend (lint + migrate + smoke)
+    name: Backend (lint + migrate + REST smoke)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -62,42 +62,125 @@ jobs:
           php tools/migrate.php --fresh
           php tools/seed.php
 
-      - name: Jalankan API + WS gateway
+      - name: Jalankan API
         run: |
           php -S 127.0.0.1:8080 router.php > /tmp/nusachat-api.log 2>&1 &
           echo $! > /tmp/nusachat-api.pid
-          php tools/ws-server.php > /tmp/nusachat-ws.log 2>&1 &
-          echo $! > /tmp/nusachat-ws.pid
-          for port in 8080 8090; do
-            for i in $(seq 1 30); do
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/8080) 2>/dev/null && break
+            sleep 1
+          done
+          (echo > /dev/tcp/127.0.0.1/8080) 2>/dev/null || { echo "port 8080 tidak menyala"; exit 1; }
+
+      - name: Smoke test REST
+        run: python3 tools/smoke.py
+
+      - name: Log server saat gagal
+        if: failure()
+        run: tail -n 60 /tmp/nusachat-api.log || true
+
+      - name: Hentikan server
+        if: always()
+        run: kill "$(cat /tmp/nusachat-api.pid)" 2>/dev/null || true
+
+  realtime-e2e:
+    name: Realtime E2E (MySQL + Erlang + WS smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DB_DRIVER: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_NAME: nusachat
+      DB_USER: root
+      DB_PASS: root
+      REALTIME_PORT: 8091
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: nusachat
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          extensions: mbstring, pdo_mysql
+          coverage: none
+
+      - name: Setup Erlang/OTP + rebar3
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          rebar3-version: "3.24"
+
+      - name: Cache rebar3 deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            realtime/nusachat_realtime/_build
+          key: ${{ runner.os }}-otp27-rebar-${{ hashFiles('realtime/nusachat_realtime/rebar.lock') }}
+
+      - name: Migrate fresh + seed (MySQL)
+        working-directory: backend
+        run: |
+          cp .env.example .env
+          sed -i 's/^GOOGLE_CLIENT_IDS=.*/GOOGLE_CLIENT_IDS=ci-test.apps.googleusercontent.com/' .env
+          php tools/migrate.php --fresh
+          php tools/seed.php
+
+      - name: Build Erlang gateway
+        working-directory: realtime/nusachat_realtime
+        run: rebar3 compile
+
+      - name: Jalankan API + Erlang gateway
+        run: |
+          cd backend
+          php -S 127.0.0.1:8080 router.php > /tmp/nusachat-api.log 2>&1 &
+          echo $! > /tmp/nusachat-api.pid
+          cd ../realtime/nusachat_realtime
+          APP_SECRET=dev-secret-change-me-please-32-bytes-min \
+            erl -noshell -pa _build/default/lib/*/ebin \
+            -eval 'application:ensure_all_started(nusachat_realtime), receive after infinity -> ok end.' \
+            > /tmp/nusachat-erl.log 2>&1 &
+          echo $! > /tmp/nusachat-erl.pid
+          for port in 8080 8091; do
+            for i in $(seq 1 60); do
               (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null && break
               sleep 1
             done
             (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null || { echo "port $port tidak menyala"; exit 1; }
           done
 
-      - name: Smoke test REST
-        run: python3 tools/smoke.py
-
-      - name: Smoke test WebSocket
-        run: python3 tools/ws_smoke.py
+      - name: Smoke test WebSocket (Erlang)
+        working-directory: backend
+        run: python3 tools/ws_smoke.py http://127.0.0.1:8080/api/v1 ws://127.0.0.1:8091
 
       - name: Log server saat gagal
         if: failure()
         run: |
-          echo "===== api ====="; tail -n 60 /tmp/nusachat-api.log || true
-          echo "===== ws ====="; tail -n 60 /tmp/nusachat-ws.log || true
+          echo "===== api ====="; tail -n 40 /tmp/nusachat-api.log || true
+          echo "===== erlang ====="; tail -n 40 /tmp/nusachat-erl.log || true
 
       - name: Hentikan server
         if: always()
         run: |
           kill "$(cat /tmp/nusachat-api.pid)" 2>/dev/null || true
-          kill "$(cat /tmp/nusachat-ws.pid)" 2>/dev/null || true
+          kill "$(cat /tmp/nusachat-erl.pid)" 2>/dev/null || true
 
   realtime:
-    name: Realtime gateway (rebar3 compile)
+    name: Realtime gateway (compile + eunit + dialyzer)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: realtime/nusachat_realtime
@@ -110,8 +193,22 @@ jobs:
           otp-version: "27"
           rebar3-version: "3.24"
 
+      - name: Cache rebar3 deps + dialyzer PLT
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            realtime/nusachat_realtime/_build
+          key: ${{ runner.os }}-otp27-rebar-${{ hashFiles('realtime/nusachat_realtime/rebar.lock') }}
+
       - name: Compile
         run: rebar3 compile
+
+      - name: Unit tests
+        run: rebar3 eunit
+
+      - name: Dialyzer
+        run: rebar3 dialyzer
 
   android:
     name: Android (assembleDebug)

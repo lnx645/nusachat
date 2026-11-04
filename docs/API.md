@@ -355,7 +355,7 @@ Ringkasan untuk badge dan reconnect:
     "pending_friend_requests": 1,
     "friend_count": 4,
     "new_moments_since": 2,
-    "ws_url": "ws://localhost:8090"
+    "ws_url": "ws://localhost:8091"
   }
 }
 ```
@@ -520,7 +520,7 @@ Chat direct menambahkan `peer`. Grup menambahkan `member_count`; `members` diisi
 
 ## WebSocket
 
-URL: `ws://<host>:8090/?token=<access_token>`
+URL: `ws://<host>:8091/?token=<access_token>`
 
 Handshake gagal dengan HTTP `401` bila token tidak valid, kedaluwarsa, atau `token_version` tidak cocok.
 

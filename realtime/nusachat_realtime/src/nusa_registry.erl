@@ -11,22 +11,41 @@
 
 -define(SERVER, ?MODULE).
 
+-spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
+%%%-------------------------------------------------------------------
+%%% @doc Daftarkan socket `Pid' sebagai milik `UserId' (async).
+%%% @end
+%%%-------------------------------------------------------------------
+-spec register(integer(), pid()) -> ok.
 register(UserId, Pid) ->
     gen_server:cast(?SERVER, {register, UserId, Pid}).
 
+%%%-------------------------------------------------------------------
+%%% @doc Lepaskan socket dari user (async; DOWN monitor membersihkan
+%%% sisanya bila terminate tak terpanggil).
+%%% @end
+%%%-------------------------------------------------------------------
+-spec unregister(integer(), pid()) -> ok.
 unregister(UserId, Pid) ->
     gen_server:cast(?SERVER, {unregister, UserId, Pid}).
 
+%%%-------------------------------------------------------------------
+%%% @doc Daftar socket hidup milik user (sync, untuk fan-out).
+%%% @end
+%%%-------------------------------------------------------------------
+-spec members(integer()) -> [pid()].
 members(UserId) ->
     gen_server:call(?SERVER, {members, UserId}).
 
+-spec init([]) -> {ok, map()}.
 init([]) ->
     Tab = ets:new(?MODULE, [set, protected, {read_concurrency, true}]),
     {ok, #{tab => Tab, mons => #{}}}.
 
+-spec handle_call(term(), term(), map()) -> {reply, term(), map()}.
 handle_call({members, UserId}, _From, #{tab := Tab} = State) ->
     Pids = case ets:lookup(Tab, UserId) of
         [{_, Ps}] -> Ps;
@@ -36,6 +55,7 @@ handle_call({members, UserId}, _From, #{tab := Tab} = State) ->
 handle_call(_Req, _From, State) ->
     {reply, {error, bad_request}, State}.
 
+-spec handle_cast(term(), map()) -> {noreply, map()}.
 handle_cast({register, UserId, Pid}, #{tab := Tab, mons := Mons} = State) ->
     Mons2 = case maps:is_key(Pid, Mons) of
         true -> Mons;
@@ -72,6 +92,7 @@ handle_cast({unregister, UserId, Pid}, #{tab := Tab, mons := Mons} = State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+-spec handle_info(term(), map()) -> {noreply, map()}.
 handle_info({'DOWN', Ref, process, Pid, _}, #{tab := Tab, mons := Mons} = State) ->
     case maps:get(Pid, Mons, undefined) of
         {Ref, UserId} ->
@@ -90,5 +111,6 @@ handle_info({'DOWN', Ref, process, Pid, _}, #{tab := Tab, mons := Mons} = State)
 handle_info(_Info, State) ->
     {noreply, State}.
 
+-spec terminate(term(), map()) -> ok.
 terminate(_Reason, _State) ->
     ok.

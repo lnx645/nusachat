@@ -26,30 +26,44 @@
 -define(FRESH_CUTOFF_DAYS, 7).
 -define(MAX_ROWS, 300).
 -define(MAX_RESULTS, 50).
--define(EARTH_KM, 6371.0).
 
 -record(state, {subs = #{}, mons = #{}}).
 
+-spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
-%% @returns {ok, [UserDto]} | {error, invalid_location}
+%%%-------------------------------------------------------------------
+%%% @doc Simpan lokasi user + daftarkan socket sebagai subscriber,
+%%% jawab daftar awal. Sync 20 dtk (ada beberapa query MySQL).
+%%% @end
+%%%-------------------------------------------------------------------
+-spec update(integer(), term(), term(), term(), pid()) ->
+    {ok, [map()]} | {error, invalid_location}.
 update(UserId, Lat, Lng, Radius, Pid) when is_integer(UserId), is_pid(Pid) ->
     gen_server:call(?SERVER, {update, UserId, Lat, Lng, Radius, Pid}, 20000).
 
+%%%-------------------------------------------------------------------
+%%% @doc Berhenti subscribe (async). Socket mati otomatis dibersihkan
+%%% via monitor, tapi unsubscribe eksplisit lebih cepat.
+%%% @end
+%%%-------------------------------------------------------------------
+-spec unsubscribe(pid()) -> ok.
 unsubscribe(Pid) when is_pid(Pid) ->
     gen_server:cast(?SERVER, {unsubscribe, Pid}).
 
+-spec init([]) -> {ok, tuple()}.
 init([]) ->
     _ = ets:new(?LOC_TAB, [set, protected, named_table, {read_concurrency, true}]),
     {ok, #state{}}.
 
+-spec handle_call(term(), term(), tuple()) -> {reply, term(), tuple()}.
 handle_call({update, UserId, Lat, Lng, Radius, Pid}, _From, State) ->
-    case valid_coords(Lat, Lng) of
+    case nusa_geo:valid_coords(Lat, Lng) of
         false ->
             {reply, {error, invalid_location}, State};
         true ->
-            R = clamp_radius(Radius),
+            R = nusa_geo:clamp_radius(Radius),
             Now = erlang:system_time(second),
             ets:insert(?LOC_TAB, {UserId, Lat, Lng, Now}),
             State1 = monitor_sub(Pid, UserId, Lat, Lng, R, State),
@@ -61,11 +75,13 @@ handle_call({update, UserId, Lat, Lng, Radius, Pid}, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, {error, bad_request}, State}.
 
+-spec handle_cast(term(), tuple()) -> {noreply, tuple()}.
 handle_cast({unsubscribe, Pid}, State) ->
     {noreply, drop_sub(Pid, State)};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+-spec handle_info(term(), tuple()) -> {noreply, tuple()}.
 handle_info({'DOWN', Ref, process, Pid, _}, #state{subs = Subs, mons = Mons} = State) ->
     case maps:get(Pid, Mons, undefined) of
         Ref -> {noreply, State#state{subs = maps:remove(Pid, Subs),
@@ -75,23 +91,13 @@ handle_info({'DOWN', Ref, process, Pid, _}, #state{subs = Subs, mons = Mons} = S
 handle_info(_Info, State) ->
     {noreply, State}.
 
+-spec terminate(term(), tuple()) -> ok.
 terminate(_Reason, _State) ->
     ok.
 
 %%-------------------------------------------------------------------
-%% internal
+%% internal (geometri murni tinggal di nusa_geo agar bisa di-unit-test)
 %%-------------------------------------------------------------------
-
-valid_coords(Lat, Lng) when is_number(Lat), is_number(Lng) ->
-    Lat >= -90 andalso Lat =< 90 andalso Lng >= -180 andalso Lng =< 180;
-valid_coords(_, _) ->
-    false.
-
-clamp_radius(R) when is_number(R) ->
-    Rounded = round(R),
-    min(100, max(1, Rounded));
-clamp_radius(_) ->
-    25.
 
 monitor_sub(Pid, UserId, Lat, Lng, Radius, #state{subs = Subs, mons = Mons} = State) ->
     Mons1 = case maps:is_key(Pid, Mons) of
@@ -111,10 +117,8 @@ persist_location(UserId, Lat, Lng) ->
     Now = server_time(),
     _ = nusa_mysql:query(
           <<"UPDATE users SET last_seen_at = ?, latitude = ?, longitude = ?, location_updated_at = ? WHERE id = ?">>,
-          [Now, round3(Lat), round3(Lng), Now, UserId]),
+          [Now, nusa_geo:round3(Lat), nusa_geo:round3(Lng), Now, UserId]),
     ok.
-
-round3(X) -> round(X * 1000) / 1000.
 
 %% Daftar awal: mirror PHP User_model::nearby (300 kandidat segar,
 %% kecuali diri + blokir, filter haversine di sini, urut jarak).
@@ -139,11 +143,11 @@ candidate(UserId, [Id, _U, _D, _A, _B, _G, _S, CandLat, CandLng], Lat, Lng, Radi
     case lists:member(Id, Hidden) of
         true -> false;
         false ->
-            case {to_float(CandLat), to_float(CandLng)} of
+            case {nusa_geo:to_float(CandLat), nusa_geo:to_float(CandLng)} of
                 {undefined, _} -> false;
                 {_, undefined} -> false;
                 {CLat, CLng} ->
-                    Dist = haversine(Lat, Lng, CLat, CLng),
+                    Dist = nusa_geo:haversine(Lat, Lng, CLat, CLng),
                     case Dist =< Radius of
                         true -> {true, {Id, round(Dist * 100) / 100}};
                         false -> false
@@ -214,7 +218,7 @@ notify_subscribers(ChangedId, Lat, Lng, #state{subs = Subs}) ->
           case SubUid =:= ChangedId of
               true -> ok;
               false ->
-                  case haversine(SubLat, SubLng, Lat, Lng) =< SubRadius of
+                  case nusa_geo:haversine(SubLat, SubLng, Lat, Lng) =< SubRadius of
                       true -> push_changed(Pid, SubUid, ChangedId, Lat, Lng);
                       false -> ok
                   end
@@ -227,8 +231,8 @@ push_changed(Pid, SubUid, ChangedId, Lat, Lng) ->
         Dto ->
             {SubLat, SubLng} = sub_point(SubUid),
             Dist = case {SubLat, SubLng} of
-                {undefined, _} -> haversine(Lat, Lng, Lat, Lng);
-                _ -> haversine(SubLat, SubLng, Lat, Lng)
+                {undefined, _} -> nusa_geo:haversine(Lat, Lng, Lat, Lng);
+                _ -> nusa_geo:haversine(SubLat, SubLng, Lat, Lng)
             end,
             Full = (enrich_friend(SubUid, Dto, friendship(SubUid, ChangedId)))#{<<"distance_km">> => round(Dist * 100) / 100},
             Payload = jsx:encode(#{<<"type">> => <<"nearby.changed">>,
@@ -247,27 +251,6 @@ sub_point(SubUid) ->
             end;
         [] -> {undefined, undefined}
     end.
-
-haversine(Lat1, Lng1, Lat2, Lng2) ->
-    DLat = deg2rad(Lat2 - Lat1),
-    DLng = deg2rad(Lng2 - Lng1),
-    A = math:sin(DLat / 2) * math:sin(DLat / 2)
-        + math:cos(deg2rad(Lat1)) * math:cos(deg2rad(Lat2))
-        * math:sin(DLng / 2) * math:sin(DLng / 2),
-    2 * ?EARTH_KM * math:asin(math:sqrt(A)).
-
-deg2rad(D) -> D * math:pi() / 180.
-
-to_float(V) when is_float(V) -> V;
-to_float(V) when is_integer(V) -> V * 1.0;
-to_float(V) when is_binary(V) ->
-    try binary_to_float(V)
-    catch _:_ ->
-        try binary_to_integer(V) * 1.0
-        catch _:_ -> undefined
-        end
-    end;
-to_float(_) -> undefined.
 
 str(V) when is_binary(V) -> V;
 str(V) when is_list(V) -> list_to_binary(V);

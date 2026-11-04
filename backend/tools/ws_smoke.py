@@ -4,7 +4,8 @@
 Usage:
     python3 tools/ws_smoke.py [api_base] [ws_url]
 
-Requires the API (PHP built-in server) and tools/ws-server.php to be running.
+Requires the API (PHP built-in server) and the Erlang gateway
+(realtime/nusachat_realtime, port 8091) to be running.
 """
 import base64
 import json
@@ -17,7 +18,7 @@ import urllib.request
 import uuid
 
 API = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080/api/v1").rstrip("/")
-WS_URL = sys.argv[2] if len(sys.argv) > 2 else "ws://127.0.0.1:8090"
+WS_URL = sys.argv[2] if len(sys.argv) > 2 else "ws://127.0.0.1:8091"
 PASSWORD = "password123"
 
 failures = []
@@ -248,7 +249,7 @@ def main():
 
     # Live nearby via Erlang (no PHP polling): location.update answers
     # nearby.result, later updates push nearby.changed to subscribers.
-    # Requires the Erlang gateway (8091); skipped on the PHP fallback.
+    # Gateway satu-satunya adalah Erlang (8091).
     if "8091" in WS_URL:
         run_nearby_live_checks(nusa, sari)
 

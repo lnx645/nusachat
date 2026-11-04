@@ -19,15 +19,15 @@ Dokumen ini menjelaskan bagaimana backend, gateway realtime, database, dan klien
           │                                              │ polling 350 ms
           ▼                                              ▼
 ┌───────────────────────────────────────────────────────────────────────┐
-│  PHP CLI WebSocket gateway (`tools/ws-server.php`)                    │
-│  stream_socket_server + stream_select, fan-out per user_id            │
+│  Erlang/OTP WebSocket gateway (`realtime/nusachat_realtime`, :8091)   │
+│  Cowboy + supervisor OTP, fan-out per user_id (tanpa polling)         │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-Ada dua proses PHP yang terpisah:
+Ada dua proses yang terpisah:
 
-1. **API** melayani request HTTP. Di produksi dijalankan lewat PHP-FPM + nginx; di lokal memakai `php -S`.
-2. **Gateway WebSocket** adalah daemon CLI yang memegang koneksi panjang. Proses ini tidak ikut melayani request HTTP, sehingga tidak memblokir API.
+1. **API** (PHP) melayani request HTTP. Di produksi dijalankan lewat PHP-FPM + nginx; di lokal memakai `php -S`.
+2. **Gateway WebSocket** (Erlang/OTP) adalah daemon yang memegang koneksi panjang. Proses ini tidak ikut melayani request HTTP, sehingga tidak memblokir API. Gateway PHP lama sudah dihapus total.
 
 Keduanya berkomunikasi lewat database, bukan lewat panggilan langsung. API menulis event ke `realtime_events`, gateway membaca tabel itu dan mengirim frame ke socket milik user yang sesuai.
 
@@ -57,24 +57,22 @@ Keduanya berkomunikasi lewat database, bukan lewat panggilan langsung. API menul
 
 ### Gateway
 
-`tools/ws-server.php`:
+Gateway Erlang/OTP (`realtime/nusachat_realtime`, port 8091, detail di
+`realtime/README.md`):
 
-- Listen di `WS_BIND` (default `0.0.0.0:8090`).
-- Handshake RFC 6455 manual, validasi `Sec-WebSocket-Key`.
-- Token diambil dari query `?token=<access_token>`; token diverifikasi dengan secret yang sama dan `token_version` dicek ke database.
-- `stream_set_blocking(false)` + `stream_select()` dengan timeout 400 ms; koneksi idle tidak memblokir koneksi lain.
-- Menangani frame text, continuation, ping, pong, dan close.
-- Mengirim ping server tiap 25 detik.
-- Polling `realtime_events` tiap 350 ms dengan cursor `id`.
-- Menghapus event lebih lama dari 24 jam setiap 5 menit.
+- Supervisor OTP menaungi koneksi MySQL, registry socket per user (ETS),
+  fan-out push, lokasi live, dan listener Cowboy.
+- Token diambil dari query `?token=<access_token>`; JWT HS256
+  diverifikasi dengan secret yang sama dan `token_version` dicek ke database.
+- Ping server tiap 25 detik; ping client kapan pun juga dijawab.
+- Tanpa polling: PHP menulis outbox lalu POST baris baru ke
+  `/internal/notify`; node fan-out seketika ke socket tujuan.
+- Cursor persisten (kirim-ulang setelah restart, bukan hilang) dan prune
+  event > 24 jam tiap 5 menit.
+- Bentuk kabel: `{"event_id":N,"type":"...","data":{...},"ts":"..."}`.
 
-Sejak migrasi, pengantar realtime utama adalah gateway Erlang/OTP
-(`realtime/nusachat_realtime`, port 8091, detail di `realtime/README.md`):
-supervisor OTP menaungi koneksi MySQL, registry socket per user (ETS),
-poller outbox 350 ms, dan handler Cowboy — wire-compatible sehingga klien
-(Android `WS_URL`) tidak berubah. Gateway PHP di 8090 tetap jalan sebagai
-fallback. Database utama kini MySQL (`DB_DRIVER=mysql`); SQLite hanya arsip
-di `/tmp/nusachat.sqlite.bak`.
+Database utama kini MySQL (`DB_DRIVER=mysql`); SQLite hanya untuk CI job
+backend (REST smoke).
 
 ### Event yang dikirim
 

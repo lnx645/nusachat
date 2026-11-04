@@ -62,11 +62,14 @@ php tools/seed.php
 php -S 127.0.0.1:8080 router.php
 ```
 
-Di terminal lain, jalankan gateway WebSocket:
+Di terminal lain, jalankan gateway WebSocket Erlang (satu-satunya gateway;
+gateway PHP sudah dihapus):
 
 ```bash
-cd backend
-php tools/ws-server.php
+cd realtime/nusachat_realtime
+DB_USER=nusa DB_PASS='<isi>' REALTIME_PORT=8091 \
+  erl -noshell -pa _build/default/lib/*/ebin \
+  -eval 'application:ensure_all_started(nusachat_realtime), receive after infinity -> ok end.'
 ```
 
 Akun demo (password `password123`): `nusa`, `sari`, `budi`, `dewi`.
@@ -86,9 +89,9 @@ Status terakhir: REST **265/265** dan WebSocket **13/13** lolos (termasuk 2 cek 
 Debug build saat ini diarahkan ke host lewat LAN agar bisa dipakai di perangkat fisik:
 
 - API: `http://192.168.70.92:8080/api/v1`
-- WebSocket: `ws://192.168.70.92:8090`
+- WebSocket (Erlang): `ws://192.168.70.92:8091`
 
-Ubah `API_BASE_URL` dan `WS_URL` di `mobile/app/build.gradle.kts` jika IP host berubah. Untuk Android Emulator, gunakan `http://10.0.2.2:8080/api/v1` dan `ws://10.0.2.2:8090`.
+Ubah `API_BASE_URL` dan `WS_URL` di `mobile/app/build.gradle.kts` jika IP host berubah. Untuk Android Emulator, gunakan `http://10.0.2.2:8080/api/v1` dan `ws://10.0.2.2:8091`.
 
 ```bash
 cd mobile
@@ -98,7 +101,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 GIF memakai Giphy API (key default sudah tertanam di `build.gradle.kts`, bisa dioverride via `-PGIF_API_KEY=...` atau env `GIF_API_KEY`). Pengaturan → Bahasa menyediakan Indonesia/English untuk shell aplikasi (tab + pengaturan) dan locale sistem; layar lain masih Indonesia. Layar ≥840dp (tablet/landscape) memakai mode dua-panel daftar + isi chat, dan umpan momen dibatasi 680dp.
 
-Pastikan HP dan komputer berada di jaringan yang sama, API listen di `0.0.0.0:8080` (bukan `127.0.0.1`), dan firewall mengizinkan TCP `8080` serta `8090`.
+Pastikan HP dan komputer berada di jaringan yang sama, API listen di `0.0.0.0:8080` (bukan `127.0.0.1`), dan firewall mengizinkan TCP `8080` serta `8091`.
 
 Status build: `assembleDebug` **berhasil** dan APK sudah diuji di perangkat Infinix X6532. Login, daftar teman, terima permintaan, kirim pesan, terima pesan realtime, unread badge, serta unggah/tampilkan gambar momen berjalan. Build berikutnya tinggal menjalankan perintah di atas.
 
@@ -116,8 +119,9 @@ Salin `.env.example` menjadi `.env`. Variabel penting:
 | `DB_DRIVER` | `sqlite` atau `mysql` |
 | `DB_PATH` | Lokasi SQLite, default `storage/nusachat.sqlite` |
 | `UPLOAD_MAX_MB` | Batas ukuran upload, default 25 MB |
-| `WS_PUBLIC_URL` | URL WS yang dikembalikan `/config` dan `/sync` |
-| `WS_BIND` | Alamat listen gateway, default `tcp://0.0.0.0:8090` |
+| `WS_PUBLIC_URL` | URL WS Erlang yang dikembalikan `/config` dan `/sync` |
+| `REALTIME_PORT` | Port listen gateway Erlang, default `8091` |
+| `WS_SECRET` | Secret header `/internal/notify` PHP→Erlang (harus sama di kedua sisi) |
 
 Catatan: file `.env` memakai komentar `;`, bukan `#`, karena dibaca dengan `parse_ini_file()`.
 

@@ -13,6 +13,8 @@
 
 -define(PING_MS, 25000).
 
+-spec init(cowboy_req:req(), map()) -> {cowboy_websocket, cowboy_req:req(), map()}
+                                          | {ok, cowboy_req:req(), map()}.
 init(Req, State) ->
     Qs = cowboy_req:parse_qs(Req),
     Token = proplists:get_value(<<"token">>, Qs, <<>>),
@@ -27,6 +29,7 @@ init(Req, State) ->
             {ok, Req2, State}
     end.
 
+-spec websocket_init(map()) -> {reply, {text, binary()}, map()}.
 websocket_init(#{user_id := UserId} = State) ->
     nusa_registry:register(UserId, self()),
     Now = server_time(),
@@ -38,6 +41,7 @@ websocket_init(#{user_id := UserId} = State) ->
     erlang:send_after(?PING_MS, self(), send_ping),
     {reply, {text, Connected}, State}.
 
+-spec websocket_handle(term(), map()) -> {reply, {text, binary()}, map()} | {ok, map()}.
 websocket_handle({text, Msg}, State) ->
     try jsx:decode(Msg, [return_maps]) of
         #{<<"type">> := <<"ping">>} ->
@@ -90,6 +94,8 @@ websocket_handle({text, Msg}, State) ->
 websocket_handle(_Frame, State) ->
     {ok, State}.
 
+-spec websocket_info(term(), map()) ->
+    {reply, {text | ping, binary()}, map()} | {ok, map()}.
 websocket_info({deliver, Payload}, State) ->
     {reply, {text, Payload}, State};
 websocket_info(send_ping, State) ->
@@ -98,6 +104,7 @@ websocket_info(send_ping, State) ->
 websocket_info(_Info, State) ->
     {ok, State}.
 
+-spec terminate(term(), cowboy_req:req(), map()) -> ok.
 terminate(_Reason, _Req, #{user_id := UserId}) ->
     nusa_registry:unregister(UserId, self()),
     nusa_nearby:unsubscribe(self()),
