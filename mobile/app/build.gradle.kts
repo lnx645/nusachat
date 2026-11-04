@@ -3,6 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.gms.google-services")
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -32,8 +33,8 @@ android {
             "GOOGLE_SERVER_CLIENT_ID",
             "\"719918438607-u9092qoccu5l7dsksoi1f54ok87gr1ac.apps.googleusercontent.com\"",
         )
-        // Realtime pindah ke gateway Erlang/OTP (realtime/nusachat_realtime).
-        // Gateway PHP di 8090 tetap jalan sebagai fallback.
+        // Realtime hanya via gateway Erlang/OTP (realtime/nusachat_realtime).
+        // Gateway PHP sudah dihapus total.
         buildConfigField("String", "WS_URL", "\"ws://192.168.70.92:8091\"")
         // GIF Giphy: default key proyek, bisa dioverride via
         // -PGIF_API_KEY=... atau env GIF_API_KEY. Kosong = picker GIF
@@ -85,7 +86,9 @@ android {
                 "META-INF/NOTICE",
                 "META-INF/NOTICE.txt",
                 "META-INF/ASL2.0",
-                "META-INF/*.kotlin_module"
+                "META-INF/*.kotlin_module",
+                // BouncyCastle vs jspecify: manifest OSGi duplikat, tak dipakai runtime.
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
             )
         }
     }
@@ -143,4 +146,19 @@ dependencies {
     implementation("com.google.mlkit:barcode-scanning:17.2.0")
     // Tampilkan QR profil (encode saja, tanpa kamera).
     implementation("com.google.zxing:core:3.5.3")
+
+    // Cache chat lokal: Room + SQLCipher (DB terenkripsi, kunci di Keystore).
+    // Buka chat instan + baca offline; server tetap sumber kebenaran.
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
+    implementation("net.zetetic:android-database-sqlcipher:4.5.4")
+
+    // Primitif kripto E2EE per device (X25519/Ed25519/HKDF). Protokol
+    // (X3DH/ratchet/sender-key) ditulis sendiri di data/crypto, primitif
+    // TIDAK PERNAH ditulis sendiri — lihat docs/E2EE-PROTOCOL.md.
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+
+    // Unit test JVM stok (protokol kripto murni, tanpa Android).
+    testImplementation("junit:junit:4.13.2")
 }

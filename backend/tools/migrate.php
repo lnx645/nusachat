@@ -74,7 +74,8 @@ $run = static function (string $statement) use ($pdo, &$count): void {
     } catch (PDOException $e) {
         // ALTER TABLE ... ADD COLUMN gagal bila kolom sudah ada (database lama
         // yang dimigrasi lalu migrate dijalankan ulang). Itu aman diabaikan.
-        if (preg_match('/duplicate column/i', $e->getMessage())) {
+        // Sama untuk CREATE INDEX yang sudah ada (MySQL tak punya IF NOT EXISTS).
+        if (preg_match('/duplicate (column|key name)/i', $e->getMessage())) {
             return;
         }
         throw $e;

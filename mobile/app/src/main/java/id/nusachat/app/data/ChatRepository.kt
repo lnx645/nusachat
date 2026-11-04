@@ -156,6 +156,7 @@ class ChatRepository(
         body: String,
         clientId: String,
         replyToId: Long? = null,
+        silent: Boolean = false,
     ): Message {
         val payload = JSONObject()
             .put("id", conversationId)
@@ -163,6 +164,8 @@ class ChatRepository(
             .put("body", body)
             .put("client_id", clientId)
         if (replyToId != null) payload.put("reply_to_id", replyToId)
+        // SKDM E2EE: tetap event realtime, tanpa push (bukan untuk manusia).
+        if (silent) payload.put("silent", true)
         val data = api.post("/conversations/send", payload)
         return data.getJSONObject("message").toMessage()
     }
@@ -234,12 +237,15 @@ class ChatRepository(
         toConversationId: Long,
         clientId: String,
         body: String? = null,
+        type: String? = null,
     ): Message {
         val payload = JSONObject()
             .put("message_id", messageId)
             .put("to_id", toConversationId)
             .put("client_id", clientId)
+        // Relay: isi dari cache agar forward tetap jalan walau sumber tersapu.
         if (!body.isNullOrEmpty()) payload.put("body", body)
+        if (!type.isNullOrEmpty()) payload.put("type", type)
         val data = api.post("/conversations/forward", payload)
         return data.getJSONObject("message").toMessage()
     }
@@ -407,6 +413,14 @@ class ChatRepository(
         )
     }
 
+    /** Ack relay: pesan ≤ messageId sudah tersimpan di cache perangkat. */
+    suspend fun ack(conversationId: Long, messageId: Long) {
+        api.post(
+            "/conversations/ack",
+            JSONObject().put("id", conversationId).put("message_id", messageId)
+        )
+    }
+
     suspend fun typing(conversationId: Long) {
         api.post("/conversations/typing", JSONObject().put("id", conversationId))
     }
@@ -485,6 +499,88 @@ class ChatRepository(
             }
         }
         return result
+    }
+
+    // ------------------------------------------------- direktori device v2
+    // E2EE per device (docs/E2EE-PROTOCOL.md). Hanya kunci PUBLIK yang
+    // pernah transit; privat tidak pernah keluar HP.
+
+    suspend fun registerDevice(
+        deviceId: String,
+        platform: String,
+        deviceName: String,
+        signPubB64: String,
+        dhPubB64: String,
+    ): JSONObject {
+        val data = api.post(
+            "/devices/register",
+            JSONObject()
+                .put("device_id", deviceId)
+                .put("platform", platform)
+                .put("device_name", deviceName)
+                .put("identity_sign_pub", signPubB64)
+                .put("identity_dh_pub", dhPubB64),
+        )
+        return data.getJSONObject("device")
+    }
+
+    suspend fun myDevices(): List<JSONObject> {
+        val array = api.get("/devices/mine").optJSONArray("devices") ?: JSONArray()
+        return List(array.length()) { array.getJSONObject(it) }
+    }
+
+    suspend fun revokeDevice(deviceId: String): Boolean {
+        val data = api.post("/devices/revoke", JSONObject().put("device_id", deviceId))
+        return data.optBoolean("revoked", false)
+    }
+
+    suspend fun uploadPrekeys(
+        deviceId: String,
+        signedKeyId: Int,
+        signedPubB64: String,
+        signedSigB64: String,
+        onetime: List<Pair<Int, String>>,
+    ): Int {
+        val otpk = JSONArray()
+        onetime.forEach { (id, pub) ->
+            otpk.put(JSONObject().put("key_id", id).put("public_key", pub))
+        }
+        val data = api.post(
+            "/devices/prekeys",
+            JSONObject()
+                .put("device_id", deviceId)
+                .put(
+                    "signed_prekey",
+                    JSONObject()
+                        .put("key_id", signedKeyId)
+                        .put("public_key", signedPubB64)
+                        .put("signature", signedSigB64),
+                )
+                .put("onetime_prekeys", otpk),
+        )
+        return data.optInt("stored_onetime", 0)
+    }
+
+    /** Bundle handshake 1 device (one-time dikonsumsi server). Null = tak ada. */
+    suspend fun deviceBundle(userId: Long, deviceId: String): JSONObject? {
+        return try {
+            api.get(
+                "/devices/bundle",
+                mapOf("user_id" to userId.toString(), "device_id" to deviceId),
+            ).optJSONObject("bundle")
+        } catch (e: ApiException) {
+            if (e.statusCode == 404) null else throw e
+        }
+    }
+
+    suspend fun userDevices(userId: Long): List<JSONObject> {
+        return try {
+            val array = api.get("/devices/list", mapOf("user_id" to userId.toString()))
+                .optJSONArray("devices") ?: JSONArray()
+            List(array.length()) { array.getJSONObject(it) }
+        } catch (e: ApiException) {
+            if (e.statusCode == 404) emptyList() else throw e
+        }
     }
 
     suspend fun convKeys(conversationId: Long, deviceId: String = ""): ConvKeys {

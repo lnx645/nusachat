@@ -482,3 +482,49 @@ CREATE TABLE IF NOT EXISTS comment_likes (
     UNIQUE KEY uq_comment_likes (comment_id, user_id),
     KEY idx_comment_likes_comment (comment_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS devices (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    device_id VARCHAR(64) NOT NULL,
+    platform VARCHAR(32) NOT NULL DEFAULT '',
+    device_name VARCHAR(64) NOT NULL DEFAULT '',
+    identity_sign_pub VARCHAR(128) NOT NULL DEFAULT '',
+    identity_dh_pub VARCHAR(128) NOT NULL DEFAULT '',
+    created_at VARCHAR(32) NOT NULL,
+    last_seen_at VARCHAR(32) NULL,
+    revoked_at VARCHAR(32) NULL,
+    UNIQUE KEY uq_devices_user_device (user_id, device_id),
+    KEY idx_devices_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS signed_prekeys (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    device_id VARCHAR(64) NOT NULL,
+    key_id INT UNSIGNED NOT NULL,
+    public_key VARCHAR(128) NOT NULL,
+    signature VARCHAR(128) NOT NULL,
+    created_at VARCHAR(32) NOT NULL,
+    UNIQUE KEY uq_spk (user_id, device_id, key_id),
+    KEY idx_spk_lookup (user_id, device_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS onetime_prekeys (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    device_id VARCHAR(64) NOT NULL,
+    key_id INT UNSIGNED NOT NULL,
+    public_key VARCHAR(128) NOT NULL,
+    created_at VARCHAR(32) NOT NULL,
+    UNIQUE KEY uq_otpk (user_id, device_id, key_id),
+    KEY idx_otpk_lookup (user_id, device_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+-- Fase 1 (relay): penerima snapshot per pesan + kedaluwarsa antrean.
+CREATE TABLE IF NOT EXISTS message_recipients (
+    message_id BIGINT UNSIGNED NOT NULL,
+    user_id BIGINT UNSIGNED NOT NULL,
+    acked_at VARCHAR(32) NULL,
+    PRIMARY KEY (message_id, user_id),
+    KEY idx_recipients_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+ALTER TABLE messages ADD COLUMN expires_at VARCHAR(32) NULL;
+CREATE INDEX idx_messages_expires ON messages (expires_at);

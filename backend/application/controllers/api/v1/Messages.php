@@ -60,8 +60,8 @@ class Messages extends MY_Controller
             $this->fail('Conversation not found.', 404, 'not_found');
         }
         $body = trim($this->str_param('body'));
-        if ($body === '' || mb_strlen($body) > 4000) {
-            $this->fail('Message must be 1-4000 characters.', 422, 'invalid_body');
+        if ($body === '' || mb_strlen($body) > 8192) {
+            $this->fail('Message must be 1-8192 characters.', 422, 'invalid_body');
         }
         if (!$this->message_model->edit($messageId, (int) $user['id'], $body)) {
             $this->fail('This message can no longer be edited (24 hour limit).', 422, 'edit_failed');

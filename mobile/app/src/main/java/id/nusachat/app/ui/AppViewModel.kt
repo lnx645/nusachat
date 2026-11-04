@@ -26,10 +26,14 @@ import id.nusachat.app.data.Moment
 import id.nusachat.app.data.MomentComment
 import id.nusachat.app.data.PinnedMessage
 import id.nusachat.app.data.Reaction
+import id.nusachat.app.data.SessionCrypto
 import id.nusachat.app.data.CallForegroundService
 import id.nusachat.app.data.CallHistoryItem
 import id.nusachat.app.data.MediaHelper
+import id.nusachat.app.data.NetworkMonitor
 import id.nusachat.app.data.PushManager
+import id.nusachat.app.data.local.ChatCache
+import id.nusachat.app.data.local.ChatDatabase
 import id.nusachat.app.data.RedPacket
 import id.nusachat.app.data.ReportItem
 import id.nusachat.app.data.SessionItem
@@ -135,7 +139,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val chatThemeStore = ChatThemeStore(application)
     private val rtc = WebRtcCallManager(application.applicationContext)
     val e2ee = E2eeManager(application.applicationContext)
+    private val sessCrypto = SessionCrypto(application.applicationContext, repository, e2ee)
     val settings = SettingsStore(application)
+    // Cache chat lokal terenkripsi + monitor koneksi (buka instan, baca offline).
+    private val chatCache = ChatCache(application)
+    private val networkMonitor = NetworkMonitor(application)
+    val isOnline = networkMonitor.online
 
     val sessionState = MutableStateFlow(SessionState())
     val authLoading = MutableStateFlow(false)
@@ -207,8 +216,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var typingResetJob: Job? = null
     private var lastTypingSent = 0L
     private val readUpTo = mutableMapOf<Long, Long>()
+    private val ackUpTo = mutableMapOf<Long, Long>()
 
     init {
+        networkMonitor.start()
+        // Online kembali → kirim antre offline.
+        viewModelScope.launch {
+            var wasOnline = true
+            networkMonitor.online.collect { online ->
+                if (online && !wasOnline) flushOutbox()
+                wasOnline = online
+            }
+        }
         val saved = session.user
         if (session.isLoggedIn) {
             sessionState.value = SessionState(saved, false)
@@ -386,10 +405,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 PushManager.unregister(api, getApplication())
             }
+            // Cabut device v2 + buang materi kripto lokal (sebelum sesi mati).
+            runCatching { sessCrypto.revokeAndWipe() }
             runCatching { repository.logout() }
             stopRealtime()
             endCallLocal()
             resetLocalState()
+            // Hapus cache chat agar tak tertinggal untuk akun berikutnya.
+            runCatching { ChatDatabase.delete(getApplication()) }
             sessionState.value = SessionState(null, true)
         }
     }
@@ -419,6 +442,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         commentsMomentId.value = null
         callState.value = CallUiState()
         readUpTo.clear()
+        ackUpTo.clear()
         globalSearchResults.value = emptyList()
         starredMessages.value = emptyList()
         selectedMessages.value = emptySet()
@@ -437,6 +461,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         refreshMoments()
         registerPush()
         publishDeviceKey()
+        provisionV2()
         loadCallHistory()
     }
 
@@ -446,6 +471,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 repository.publishDeviceKey(e2ee.deviceId(), e2ee.publicKeyB64())
             }
         }
+    }
+
+    /** Provision E2EE v2 per-device (registrasi + prekey + rotasi/isi ulang). */
+    private fun provisionV2() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { sessCrypto.provision() }
+        }
+    }
+
+    private fun myId(): Long = session.user?.id ?: 0L
+
+    /** Dekrip satu pesan jaringan; null = SKDM (sembunyikan). */
+    private fun dec(msg: Message): Message? = sessCrypto.decryptOne(msg, myId())
+
+    /** Dekrip daftar jaringan (SKDM dibuang). */
+    private fun decAll(list: List<Message>): List<Message> = sessCrypto.processIncoming(list, myId())
+
+    /** Enkripsi teks untuk percakapan (v2, fallback legacy). */
+    private suspend fun encryptFor(conversationId: Long, plain: String): String {
+        val me = session.user?.id ?: return e2ee.encrypt(conversationId, plain)
+        val conv = conversations.value.firstOrNull { it.id == conversationId }
+            ?: runCatching { repository.conversationDetail(conversationId) }.getOrNull()
+            ?: return e2ee.encrypt(conversationId, plain)
+        return sessCrypto.encryptText(conv, me, plain)
     }
 
     /**
@@ -564,7 +613,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             "message" -> {
                 val conversationId = data.optLong("conversation_id")
                 val raw = data.optJSONObject("message")?.toMessage() ?: return
-                val message = e2ee.decryptMessage(raw)
+                val message = dec(raw) ?: return
                 incomingMessage(conversationId, message)
             }
             "read" -> {
@@ -604,7 +653,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             "message_edited" -> {
                 val conversationId = data.optLong("conversation_id")
                 val raw = data.optJSONObject("message")?.toMessage() ?: return
-                val message = e2ee.decryptMessage(raw)
+                val message = dec(raw) ?: return
+                if (message.id > 0) {
+                    viewModelScope.launch { runCatching { chatCache.saveMessage(message) } }
+                }
                 if (conversationId == activeChatId) {
                     val state = chat.value
                     chat.value = state.copy(
@@ -637,6 +689,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             if (it.id == messageId) it.copy(reactions = reactions) else it
                         }
                     )
+                    state.messages.firstOrNull { it.id == messageId }?.let { original ->
+                        viewModelScope.launch {
+                            runCatching { chatCache.saveMessage(original.copy(reactions = reactions)) }
+                        }
+                    }
                 }
             }
             "conversation_pinned", "conversation_unpinned" -> {
@@ -1029,7 +1086,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.Main) {
                 if (conversationId == activeChatId) {
                     val state = chat.value
-                    chat.value = state.copy(messages = state.messages.map { e2ee.decryptMessage(it) })
+                    chat.value = state.copy(messages = decAll(state.messages))
                 }
                 refreshConversations()
             }
@@ -1142,6 +1199,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun incomingMessage(conversationId: Long, incoming: Message) {
+        // Gema kiriman sendiri dari jaringan: jangan timpa cache plaintext
+        // (pengirim adalah sumber kebenaran plaintext-nya sendiri).
+        val own = incoming.sender?.id != null && incoming.sender?.id == session.user?.id
+        if (incoming.id > 0 && !own) {
+            viewModelScope.launch {
+                runCatching { chatCache.saveMessage(incoming) }
+                runCatching { chatCache.saveCursor(conversationId, incoming.id) }
+            }
+        }
         val current = chat.value
         if (current.conversation?.id == conversationId) {
             val cleaned = current.messages.filterNot { existing ->
@@ -1170,7 +1236,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 conversations.value = list.map { conv ->
                     val last = conv.lastMessage
                     if (last != null && last.type == "text") {
-                        conv.copy(lastMessage = e2ee.decryptMessage(last))
+                        conv.copy(lastMessage = dec(last))
                     } else conv
                 }
             } catch (e: Exception) {
@@ -1187,32 +1253,66 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         runCatching { PushManager.cancelForConversation(getApplication(), conversation.id) }
         chat.value = ChatUiState(conversation = conversation, loading = true, keySyncing = true)
         viewModelScope.launch {
+            // 1. Cache dulu: tampil instan + tetap bisa dibaca saat offline.
+            val cached = runCatching { chatCache.recent(conversation.id) }.getOrDefault(emptyList())
+            val queuedHere = runCatching {
+                chatCache.queued().filter { it.conversationId == conversation.id }
+            }.getOrDefault(emptyList())
+            if (cached.isNotEmpty() || queuedHere.isNotEmpty()) {
+                chat.value = chat.value.copy(
+                    messages = (cached + queuedHere).distinctBy { it.id }.sortedBy { it.id },
+                    loading = false,
+                    hasMore = cached.size >= 40,
+                )
+            }
             try {
                 // Tunggu kunci E2EE siap dulu (device baru!) sebelum mendekrip,
                 // kalau tidak pesan terlanjur tampil terenkripsi.
                 runCatching { syncKeysNow(conversation.id) }
                 chat.value = chat.value.copy(keySyncing = false)
-                val page = repository.messages(conversation.id, limit = 40)
-                val dec = page.messages.map { e2ee.decryptMessage(it) }
+                // 2. Delta dari cursor bila cache ada; kalau tidak, halaman penuh.
+                val cursor = runCatching { chatCache.cursor(conversation.id) }.getOrNull()
+                val useDelta = cursor != null && cursor > 0 && cached.isNotEmpty()
+                val page = if (useDelta) {
+                    repository.messages(conversation.id, afterId = cursor, limit = 100)
+                } else {
+                    repository.messages(conversation.id, limit = 40)
+                }
+                val dec = decAll(page.messages)
+                runCatching { chatCache.saveMessages(dec) }
+                val current = chat.value
+                if (current.conversation?.id != conversation.id) return@launch
+                val keepPending = current.messages.filter { it.pending }
+                val base = if (useDelta) current.messages.filterNot { it.pending } else emptyList()
+                val merged = (base + dec + keepPending).distinctBy { it.id }.sortedBy { it.id }
+                val maxId = merged.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0L
+                runCatching { chatCache.saveCursor(conversation.id, maxId) }
                 chat.value = ChatUiState(
                     conversation = conversation,
-                    messages = dec,
+                    messages = merged,
                     loading = false,
-                    hasMore = page.hasMore,
+                    hasMore = if (useDelta) current.hasMore else page.hasMore,
                     initialUnread = conversation.unreadCount,
                 )
+                if (maxId > 0) ackInternal(conversation.id, maxId)
                 page.messages.lastOrNull()?.let { markReadInternal(conversation.id, it.id) }
                 refreshConversations()
                 loadPins()
                 // Anggota + username untuk saran @mention (juga dipakai header grup).
                 loadConversationDetail()
             } catch (e: Exception) {
-                handleError(e)
-                chat.value = chat.value.copy(
-                    loading = false,
-                    keySyncing = false,
-                    error = e.message ?: "Gagal memuat pesan.",
-                )
+                // Offline + ada cache = tetap tampil, tanpa error menakutkan.
+                if (isNetworkError(e) && chat.value.messages.isNotEmpty()) {
+                    chat.value = chat.value.copy(loading = false, keySyncing = false, error = null)
+                    message.value = "Offline — menampilkan pesan tersimpan."
+                } else {
+                    handleError(e)
+                    chat.value = chat.value.copy(
+                        loading = false,
+                        keySyncing = false,
+                        error = e.message ?: "Gagal memuat pesan.",
+                    )
+                }
             }
         }
     }
@@ -1365,22 +1465,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val hadKey = e2ee.isEnabled(conversation.id)
         viewModelScope.launch {
             try {
-                val toSend = e2ee.encrypt(conversation.id, body)
+                val toSend = sessCrypto.encryptText(conversation, me.id, body)
                 val sent = repository.sendMessage(conversation.id, toSend, clientId, replyToId)
-                val dec = e2ee.decryptMessage(sent)
-                mergeSentMessage(clientId, dec)
+                mergeSentMessage(clientId, sent.copy(body = body))
                 refreshConversations()
                 if (!hadKey) {
                     launch(Dispatchers.IO) { runCatching { syncKeysNow(conversation.id) } }
                 }
             } catch (e: Exception) {
                 val current = chat.value
-                chat.value = current.copy(
-                    messages = current.messages.map {
-                        if (it.clientId == clientId) it.copy(status = "failed", pending = false) else it
+                if (isNetworkError(e)) {
+                    // Offline: antrekan, kirim otomatis saat online.
+                    chat.value = current.copy(
+                        messages = current.messages.map {
+                            if (it.clientId == clientId) it.copy(status = "queued", pending = true) else it
+                        }
+                    )
+                    current.messages.firstOrNull { it.clientId == clientId }?.let { queued ->
+                        runCatching { chatCache.updateQueued(queued.copy(status = "queued", pending = true)) }
                     }
-                )
-                handleError(e)
+                    message.value = "Offline — pesan dikirim otomatis saat online."
+                } else {
+                    chat.value = current.copy(
+                        messages = current.messages.map {
+                            if (it.clientId == clientId) it.copy(status = "failed", pending = false) else it
+                        }
+                    )
+                    handleError(e)
+                }
             }
         }
     }
@@ -1398,7 +1510,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val sentRaw = when (pending.type) {
                     "text" -> {
-                        val enc = e2ee.encrypt(conversation.id, pending.body.orEmpty())
+                        val enc = sessCrypto.encryptText(conversation, myId(), pending.body.orEmpty())
                         repository.sendMessage(conversation.id, enc, clientId, pending.replyToId)
                     }
                     "location" -> {
@@ -1412,17 +1524,39 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         repository.sendAttachment(conversation.id, url, pending.type, clientId, pending.body.orEmpty(), pending.replyToId)
                     }
                 }
-                val sent = e2ee.decryptMessage(sentRaw)
+                val sent = sentRaw.copy(body = pending.body.orEmpty())
                 mergeSentMessage(clientId, sent)
                 refreshConversations()
             } catch (e: Exception) {
                 val current = chat.value
-                chat.value = current.copy(
-                    messages = current.messages.map {
-                        if (it.clientId == clientId) it.copy(status = "failed", pending = false) else it
+                if (isNetworkError(e)) {
+                    // Tetap antre (media tanpa URL tak bisa antre → failed biasa).
+                    val queued = current.messages.firstOrNull { it.clientId == clientId }
+                    val canQueue = queued != null && (queued.type == "text" || queued.type == "location")
+                    if (canQueue) {
+                        chat.value = current.copy(
+                            messages = current.messages.map {
+                                if (it.clientId == clientId) it.copy(status = "queued", pending = true) else it
+                            }
+                        )
+                        runCatching { chatCache.updateQueued(queued.copy(status = "queued", pending = true)) }
+                        message.value = "Offline — pesan dikirim otomatis saat online."
+                    } else {
+                        chat.value = current.copy(
+                            messages = current.messages.map {
+                                if (it.clientId == clientId) it.copy(status = "failed", pending = false) else it
+                            }
+                        )
+                        handleError(e)
                     }
-                )
-                handleError(e)
+                } else {
+                    chat.value = current.copy(
+                        messages = current.messages.map {
+                            if (it.clientId == clientId) it.copy(status = "failed", pending = false) else it
+                        }
+                    )
+                    handleError(e)
+                }
             }
         }
     }
@@ -1458,6 +1592,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             replyTo = current.replyTo?.let(scrubbed),
             searchResults = current.searchResults.map(scrubbed),
         )
+        // Samarkan juga di cache agar isi tarikan tak tersisa di device.
+        current.messages.firstOrNull { it.id == messageId }?.let { original ->
+            viewModelScope.launch { runCatching { chatCache.saveMessage(scrubbed(original)) } }
+        }
     }
 
     fun setEditing(message: Message?) {
@@ -1472,12 +1610,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val conversation = chat.value.conversation ?: return
         viewModelScope.launch {
             try {
-                val encrypted = e2ee.encrypt(conversation.id, text)
-                val updated = e2ee.decryptMessage(repository.editMessage(target.id, encrypted))
+                val encrypted = sessCrypto.encryptText(conversation, myId(), text)
+                val updated = repository.editMessage(target.id, encrypted).copy(body = text)
                 chat.value = chat.value.copy(
                     editing = null,
                     messages = chat.value.messages.map { if (it.id == updated.id) updated else it }
                 )
+                runCatching { chatCache.saveMessage(updated) }
                 refreshConversations()
             } catch (e: Exception) {
                 handleError(e)
@@ -1495,6 +1634,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         if (it.id == message.id) it.copy(reactions = reactions) else it
                     }
                 )
+                runCatching { chatCache.saveMessage(message.copy(reactions = reactions)) }
             } catch (e: Exception) {
                 handleError(e)
             }
@@ -1507,15 +1647,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 runCatching { e2ee.ensureKey(toConversationId) }
                 // Enkripsi ulang isi untuk kunci percakapan tujuan bila beda obrolan.
-                val plain = e2ee.decryptMessage(msg).body
+                // Relay: sertakan tipe agar fallback cache jalan; se-obrolan tanpa
+                // body (server menyalin ciphertext asli — jangan plaintext tampilan).
+                val plain = dec(msg)?.body
                 val activeId = chat.value.conversation?.id
-                val bodyOverride = if (toConversationId != activeId && msg.type == "text" && plain != null) {
-                    e2ee.encrypt(toConversationId, plain)
+                val target = runCatching { repository.conversationDetail(toConversationId) }.getOrNull()
+                val bodyOverride = if (toConversationId != activeId && msg.type == "text" && plain != null && target != null) {
+                    sessCrypto.encryptText(target, myId(), plain)
                 } else null
-                val sent = repository.forwardMessage(msg.id, toConversationId, UUID.randomUUID().toString(), bodyOverride)
+                val sent = repository.forwardMessage(msg.id, toConversationId, UUID.randomUUID().toString(), bodyOverride, msg.type)
                 if (toConversationId == activeId) {
-                    val dec = if (bodyOverride != null) e2ee.decryptMessage(sent) else sent
-                    mergeSentMessage(sent.clientId.orEmpty(), dec)
+                    val decSent = if (bodyOverride != null) sent.copy(body = plain) else dec(sent) ?: sent
+                    mergeSentMessage(sent.clientId.orEmpty(), decSent)
                 }
                 refreshConversations()
                 message.value = "Pesan diteruskan."
@@ -1530,7 +1673,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val pins = repository.pins(conversation.id).map { pin ->
-                    pin.copy(message = e2ee.decryptMessage(pin.message))
+                    pin.copy(message = dec(pin.message) ?: pin.message.copy(body = SessionCrypto.PLACEHOLDER_BROKEN))
                 }
                 chat.value = chat.value.copy(pins = pins)
             } catch (e: Exception) {
@@ -1545,7 +1688,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val pins = repository.pinMessage(conversation.id, message.id).map { pin ->
-                    pin.copy(message = e2ee.decryptMessage(pin.message))
+                    pin.copy(message = dec(pin.message) ?: pin.message.copy(body = SessionCrypto.PLACEHOLDER_BROKEN))
                 }
                 chat.value = chat.value.copy(pins = pins)
             } catch (e: Exception) {
@@ -1590,7 +1733,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         chat.value = chat.value.copy(searching = true, searchQuery = q)
         viewModelScope.launch {
             try {
-                val remote = repository.searchMessages(conversation.id, q).map { e2ee.decryptMessage(it) }
+                val remote = decAll(repository.searchMessages(conversation.id, q))
                 val local = chat.value.messages.filter {
                     !it.revoked && it.body?.contains(q, ignoreCase = true) == true && remote.none { r -> r.id == it.id }
                 }
@@ -1822,6 +1965,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 repository.clearHistory(conversationId)
+                runCatching { chatCache.deleteConversation(conversationId) }
                 if (chat.value.conversation?.id == conversationId) {
                     chat.value = chat.value.copy(messages = emptyList(), hasMore = false)
                 }
@@ -1834,6 +1978,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun mergeSentMessage(clientId: String, sent: Message) {
+        // Ingat plaintext kiriman sendiri (gema server tak bisa didekrip).
+        if (sent.type == "text" && sent.body != null) sessCrypto.rememberPlain(sent.id, sent.body)
         val current = chat.value
         val cleaned = current.messages.filterNot {
             it.clientId == clientId || it.id == sent.id
@@ -1841,6 +1987,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         chat.value = current.copy(
             messages = (cleaned + sent).distinctBy { it.id }.sortedBy { it.id }
         )
+        viewModelScope.launch {
+            runCatching { chatCache.markSent(clientId, sent) }
+            if (sent.id > 0) runCatching { chatCache.saveCursor(sent.conversationId, sent.id) }
+        }
     }
 
     fun loadOlderMessages() {
@@ -1852,7 +2002,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val page = repository.messages(conversation.id, beforeId = oldest, limit = 30)
-                val dec = page.messages.map { e2ee.decryptMessage(it) }
+                val dec = decAll(page.messages)
+                runCatching { chatCache.saveMessages(dec) }
+                dec.filter { it.id > 0 }.maxOfOrNull { it.id }?.let { ackInternal(conversation.id, it) }
                 val current = chat.value
                 chat.value = current.copy(
                     messages = (dec + current.messages)
@@ -1862,6 +2014,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     hasMore = page.hasMore,
                 )
             } catch (e: Exception) {
+                // Offline: gali cache lokal dulu sebelum menyerah.
+                if (isNetworkError(e)) {
+                    val cached = runCatching {
+                        chatCache.older(conversation.id, oldest)
+                    }.getOrDefault(emptyList())
+                    if (cached.isNotEmpty()) {
+                        val current = chat.value
+                        chat.value = current.copy(
+                            messages = (cached + current.messages)
+                                .distinctBy { it.id }
+                                .sortedBy { it.id },
+                            loadingOlder = false,
+                            hasMore = cached.size >= 30,
+                        )
+                        return@launch
+                    }
+                }
                 chat.value = chat.value.copy(loadingOlder = false)
                 handleError(e)
             }
@@ -1875,7 +2044,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val page = repository.messages(conversation.id, afterId = afterId, limit = 50)
-                val dec = page.messages.map { e2ee.decryptMessage(it) }
+                val dec = decAll(page.messages)
                 val current = chat.value
                 if (current.conversation?.id != conversation.id || dec.isEmpty()) return@launch
                 val extra = dec.filter { incoming ->
@@ -1885,6 +2054,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     chat.value = current.copy(
                         messages = (current.messages + extra).distinctBy { it.id }.sortedBy { it.id }
                     )
+                    runCatching { chatCache.saveMessages(extra) }
+                    extra.maxOfOrNull { it.id }?.let { runCatching { chatCache.saveCursor(conversation.id, it) } }
+                    extra.maxOfOrNull { it.id }?.let { ackInternal(conversation.id, it) }
                     extra.lastOrNull()?.let { markReadInternal(conversation.id, it.id) }
                     refreshConversations()
                 }
@@ -1913,6 +2085,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             runCatching { repository.markRead(conversationId, messageId) }
+        }
+    }
+
+    /**
+     * Ack relay: pesan ≤ messageId sudah tersimpan di cache perangkat.
+     * Hanya dari chat yang DIBUKA (foreground); pesan realtime latar
+     * tidak di-ack agar badge unread server tetap akurat sampai dibuka.
+     */
+    private fun ackInternal(conversationId: Long, messageId: Long) {
+        if (messageId <= 0) return
+        val previous = ackUpTo[conversationId] ?: 0L
+        if (messageId <= previous) return
+        ackUpTo[conversationId] = messageId
+        viewModelScope.launch {
+            runCatching { repository.ack(conversationId, messageId) }
         }
     }
 
@@ -2423,11 +2610,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 runCatching { e2ee.ensureKey(conversationId) }
                 if (moment.body.isNotBlank()) {
-                    val encrypted = e2ee.encrypt(conversationId, moment.body)
+                    val encrypted = encryptFor(conversationId, moment.body)
                     val clientId = java.util.UUID.randomUUID().toString()
                     val sent = repository.sendMessage(conversationId, encrypted, clientId, null)
                     if (conversationId == chat.value.conversation?.id) {
-                        mergeSentMessage(clientId, e2ee.decryptMessage(sent))
+                        mergeSentMessage(clientId, sent.copy(body = moment.body))
                     }
                 }
                 moment.media.forEach { url ->
@@ -2436,7 +2623,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         conversationId, type, url, null, java.util.UUID.randomUUID().toString()
                     )
                     if (conversationId == chat.value.conversation?.id) {
-                        mergeSentMessage(sent.clientId.orEmpty(), e2ee.decryptMessage(sent))
+                        mergeSentMessage(sent.clientId.orEmpty(), dec(sent) ?: sent)
                     }
                 }
                 refreshConversations()
@@ -2639,6 +2826,75 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         message.value = null
     }
 
+    override fun onCleared() {
+        networkMonitor.stop()
+        super.onCleared()
+    }
+
+    /** Gagal jaringan (bukan salah server) → layak antre offline / fallback cache. */
+    private fun isNetworkError(error: Throwable): Boolean =
+        error is ApiException && error.code == "network_error"
+
+    /**
+     * Kirim semua pesan antre offline. Berhenti di gagal-jaringan pertama
+     * (dicoba lagi saat online berikutnya); gagal permanen (validasi/ditolak)
+     * ditandai failed agar tidak diulang selamanya.
+     */
+    private fun flushOutbox() {
+        if (sessionState.value.user == null) return
+        viewModelScope.launch {
+            val queued = runCatching { chatCache.queued() }.getOrDefault(emptyList())
+            if (queued.isEmpty()) return@launch
+            var sent = 0
+            for (q in queued) {
+                val clientId = q.clientId ?: continue
+                try {
+                    val sentRaw = when (q.type) {
+                        "text" -> {
+                            repository.sendMessage(
+                                q.conversationId,
+                                encryptFor(q.conversationId, q.body.orEmpty()),
+                                clientId,
+                                q.replyToId,
+                            )
+                        }
+                        "location" -> {
+                            val lat = q.lat ?: throw IllegalStateException("Lokasi tidak valid.")
+                            val lng = q.lng ?: throw IllegalStateException("Lokasi tidak valid.")
+                            repository.sendLocation(
+                                q.conversationId, lat, lng, q.body.orEmpty(), clientId, q.replyToId
+                            )
+                        }
+                        // Media butuh upload dulu (mustahil offline) → jangan antre.
+                        else -> throw IllegalStateException("Lampiran harus dikirim manual.")
+                    }
+                    val dec = sentRaw.copy(body = q.body.orEmpty())
+                    if (dec.body != null) sessCrypto.rememberPlain(dec.id, dec.body)
+                    runCatching { chatCache.markSent(clientId, dec) }
+                    if (q.conversationId == activeChatId) mergeSentMessage(clientId, dec)
+                    sent++
+                } catch (e: Exception) {
+                    if (isNetworkError(e)) return@launch
+                    runCatching { chatCache.updateQueued(q.copy(status = "failed", pending = false)) }
+                    if (q.conversationId == activeChatId) {
+                        val current = chat.value
+                        chat.value = current.copy(
+                            messages = current.messages.map {
+                                if (it.clientId == clientId) it.copy(status = "failed", pending = false) else it
+                            }
+                        )
+                    }
+                }
+            }
+            if (sent > 0) {
+                refreshConversations()
+                if (queued.any { it.conversationId == activeChatId }) {
+                    message.value = if (sent == 1) "Pesan offline terkirim." else "$sent pesan offline terkirim."
+                }
+            }
+        }
+    }
+
     private fun handleError(error: Throwable) {
         if (error is ApiException && error.statusCode == 401) {
             onSessionExpired()
@@ -2652,6 +2908,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         stopRealtime()
         session.clear()
         resetLocalState()
+        runCatching { ChatDatabase.delete(getApplication()) }
         sessionState.value = SessionState(null, true)
         message.value = "Sesi berakhir. Silakan masuk kembali."
     }
@@ -2764,6 +3021,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 repository.clearHistory(conversation.id)
+                runCatching { chatCache.deleteConversation(conversation.id) }
                 refreshConversations()
                 message.value = "Riwayat dihapus untuk saya."
             } catch (e: Exception) {
@@ -2810,7 +3068,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         globalSearching.value = true
         viewModelScope.launch {
             try {
-                globalSearchResults.value = repository.searchAll(query.trim()).map { e2ee.decryptMessage(it) }
+                globalSearchResults.value = decAll(repository.searchAll(query.trim()))
             } catch (e: Exception) {
                 handleError(e)
             } finally {
@@ -2841,11 +3099,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val state = chat.value
         viewModelScope.launch {
             try {
+                val target = runCatching { repository.conversationDetail(toConversationId) }.getOrNull()
                 ids.mapNotNull { id -> state.messages.firstOrNull { it.id == id } }
                     .sortedBy { it.id }
                     .forEach { msg ->
-                        val body = if (msg.type == "text") e2ee.encrypt(toConversationId, msg.body.orEmpty()) else null
-                        repository.forwardMessage(msg.id, toConversationId, UUID.randomUUID().toString(), body)
+                        val body = if (msg.type == "text" && target != null) {
+                            sessCrypto.encryptText(target, myId(), msg.body.orEmpty())
+                        } else null
+                        repository.forwardMessage(msg.id, toConversationId, UUID.randomUUID().toString(), body, msg.type)
                     }
                 clearSelection()
                 refreshConversations()
@@ -2902,7 +3163,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         starredLoading.value = true
         viewModelScope.launch {
             try {
-                starredMessages.value = repository.starredMessages().map { e2ee.decryptMessage(it) }
+                starredMessages.value = decAll(repository.starredMessages())
             } catch (e: Exception) {
                 handleError(e)
             } finally {
@@ -3079,8 +3340,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun exportChat(conversation: Conversation) {
         viewModelScope.launch {
             try {
-                val page = repository.messages(conversation.id, limit = 100)
-                val lines = page.messages.map { e2ee.decryptMessage(it) }.map { msg ->
+                // Relay: server hanya menyimpan antrean — ekspor dari cache perangkat.
+                val cached = runCatching { chatCache.recent(conversation.id, 100) }.getOrDefault(emptyList())
+                val lines = cached.map { e2ee.decryptMessage(it) }.map { msg ->
                     val name = msg.sender?.familiarName ?: "?"
                     val text = when (msg.type) {
                         "text" -> msg.body.orEmpty()
@@ -3309,7 +3571,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     if (story.body.isNotBlank()) append(": ${story.body}")
                     story.media.firstOrNull()?.let { append("\n$it") }
                 }
-                repository.sendMessage(conversationId, e2ee.encrypt(conversationId, text), UUID.randomUUID().toString())
+                repository.sendMessage(conversationId, encryptFor(conversationId, text), UUID.randomUUID().toString())
                 refreshConversations()
                 message.value = "Story dibagikan ke chat."
             } catch (e: Exception) {

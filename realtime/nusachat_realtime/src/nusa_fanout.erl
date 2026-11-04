@@ -13,13 +13,18 @@
 %%% Aturan pengiriman: event hanya dikirim ke socket yang sedang
 %%% terhubung (`nusa_registry'); user offline tidak menerima apa pun
 %%% dari sini — mereka catch-up via REST (`after_id') saat online lagi.
+%%%
+%%% Fase 1 (relay): tick prune yang sama juga menyapu antrean pesan —
+%%% baris `messages' yang `expires_at'-nya lewat dihapus permanen
+%%% beserta penerima/reaksi/pin/bintang/sembunyinya. Server tidak
+%%% menyimpan history; riwayat permanen tinggal di perangkat.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(nusa_fanout).
 
 -behaviour(gen_server).
 
--export([start_link/0, notify/1]).
+-export([start_link/0, notify/1, cutoff_seconds_back/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(SERVER, ?MODULE).
@@ -54,7 +59,7 @@ init([]) ->
         _ -> MaxDb
     end,
     error_logger:info_msg("nusa_fanout cursor init at ~p (db max ~p)~n", [Cursor, MaxDb]),
-    erlang:send_after(?PRUNE_MS, self(), prune),
+    erlang:send_after(prune_ms(), self(), prune),
     erlang:send_after(?SAVE_MS, self(), save_cursor),
     {ok, #{cursor => Cursor, dirty => false}}.
 
@@ -78,17 +83,9 @@ handle_info(save_cursor, #{cursor := Cursor, dirty := Dirty} = State) ->
     erlang:send_after(?SAVE_MS, self(), save_cursor),
     {noreply, State#{dirty => false}};
 handle_info(prune, State) ->
-    Cutoff = cutoff_24h(),
-    case nusa_mysql:query(
-           <<"DELETE FROM realtime_events WHERE created_at < ?">>, [Cutoff]) of
-        {ok, N} when is_integer(N) ->
-            error_logger:info_msg("nusa_fanout pruned ~p rows~n", [N]);
-        {ok, _} ->
-            ok;
-        _ ->
-            ok
-    end,
-    erlang:send_after(?PRUNE_MS, self(), prune),
+    prune_events(),
+    prune_relay(),
+    erlang:send_after(prune_ms(), self(), prune),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -156,9 +153,64 @@ write_cursor(Cursor) ->
     _ = filelib:ensure_dir(cursor_file()),
     file:write_file(cursor_file(), integer_to_binary(Cursor)).
 
--spec cutoff_24h() -> binary().
-cutoff_24h() ->
+%%%-------------------------------------------------------------------
+%%% @doc Cutoff ISO-8601 UTC untuk klausa `kolom_waktu < ?'.
+%%% Diekspor agar bisa di-unit-test (format kabel vs MySQL VARCHAR).
+%%% @end
+%%%-------------------------------------------------------------------
+-spec cutoff_seconds_back(non_neg_integer()) -> binary().
+cutoff_seconds_back(Seconds) ->
     {{Y, Mo, D}, {H, Mi, S}} =
-        calendar:system_time_to_universal_time(erlang:system_time(second) - 86400, second),
+        calendar:system_time_to_universal_time(erlang:system_time(second) - Seconds, second),
     iolist_to_binary(io_lib:format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0BZ",
                                    [Y, Mo, D, H, Mi, S])).
+
+%% Interval sapu dari env (test boleh pendek); default 5 menit.
+-spec prune_ms() -> pos_integer().
+prune_ms() ->
+    case os:getenv("NUSA_PRUNE_MS") of
+        false -> ?PRUNE_MS;
+        "" -> ?PRUNE_MS;
+        S ->
+            try list_to_integer(string:trim(S)) of
+                N when N >= 1000 -> N;
+                _ -> ?PRUNE_MS
+            catch
+                _:_ -> ?PRUNE_MS
+            end
+    end.
+
+-spec prune_events() -> ok.
+prune_events() ->
+    Cutoff = cutoff_seconds_back(86400),
+    %% mysql-otp mengembalikan `ok' polos untuk DELETE (bukan {ok, N}).
+    case nusa_mysql:query(
+           <<"DELETE FROM realtime_events WHERE created_at < ?">>, [Cutoff]) of
+        ok ->
+            ok;
+        Other ->
+            error_logger:warning_msg("nusa_fanout events sweep unexpected: ~p~n", [Other])
+    end,
+    ok.
+
+%% Tabel anak dulu, induk `messages' terakhir (tanpa FK eksplisit).
+-define(RELAY_SWEEP, [
+    <<"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE expires_at < ?)">>,
+    <<"DELETE FROM conversation_pins WHERE message_id IN (SELECT id FROM messages WHERE expires_at < ?)">>,
+    <<"DELETE FROM starred_messages WHERE message_id IN (SELECT id FROM messages WHERE expires_at < ?)">>,
+    <<"DELETE FROM hidden_messages WHERE message_id IN (SELECT id FROM messages WHERE expires_at < ?)">>,
+    <<"DELETE FROM message_recipients WHERE message_id IN (SELECT id FROM messages WHERE expires_at < ?)">>,
+    <<"DELETE FROM messages WHERE expires_at < ?">>
+]).
+
+-spec prune_relay() -> ok.
+prune_relay() ->
+    Now = cutoff_seconds_back(0),
+    Results = [nusa_mysql:query(Sql, [Now]) || Sql <- ?RELAY_SWEEP],
+    case lists:filter(fun(R) -> R =/= ok end, Results) of
+        [] ->
+            error_logger:info_msg("nusa_fanout relay sweep ok~n");
+        Bad ->
+            error_logger:warning_msg("nusa_fanout relay sweep failures: ~p~n", [Bad])
+    end,
+    ok.

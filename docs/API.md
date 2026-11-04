@@ -190,7 +190,7 @@ Maksimal 2000 kontak per request. Nomor di-hash dengan HMAC; server tidak menyim
 | POST | `/conversations/create_group` | `title`, `member_ids` |
 | GET | `/conversations/messages` | `id`, `before_id?`, `after_id?`, `limit?` |
 | POST | `/conversations/send` | lihat di bawah |
-| POST | `/conversations/forward` | `message_id`, `to_id`, `body?`, `client_id?` |
+| POST | `/conversations/forward` | `message_id`, `to_id`, `body?`, `type?`, `attachment_url?`, `attachment_meta?`, `client_id?` (`type`+isi wajib bila sumber tersapu) |
 | GET | `/conversations/search` | `id`, `q` (min. 2 huruf), `limit?` |
 | POST | `/conversations/pin` | `id`, `message_id` |
 | POST | `/conversations/unpin` | `id`, `message_id` |
@@ -198,7 +198,8 @@ Maksimal 2000 kontak per request. Nomor di-hash dengan HMAC; server tidak menyim
 | POST | `/conversations/archive` | `id`, `archived?` (default true) |
 | GET | `/conversations/keys` | `id` → `my_key` (milikku) + `holders` (yang sudah punya) |
 | POST | `/conversations/set_keys` | `id`, `keys: [{user_id, wrapped_key}]` (khusus anggota) |
-| POST | `/conversations/read` | `id`, `message_id` |
+| POST | `/conversations/read` | `id`, `message_id` (toleran: tetap 200 walau pesan tersapu) |
+| POST | `/conversations/ack` | `id`, `message_id` → ack-sampai relay, idempotent |
 | POST | `/conversations/typing` | `id` |
 | POST | `/conversations/add_members` | `id`, `user_ids` |
 | POST | `/conversations/remove_member` | `id`, `user_id` |
@@ -230,7 +231,7 @@ Undangan: anggota bisa meminta tautan via `/conversations/invite` saat `invite_l
 }
 ```
 
-Field tambahan: `reply_to_id`, `attachment_url`, `attachment_meta`. Untuk `type` selain `text`/`sticker`, `attachment_url` wajib. Tipe yang didukung: `text`, `image`, `file`, `audio`, `video`, `location`, `sticker`, `redpacket` (redpacket hanya dibuat server via dompet).
+Field tambahan: `reply_to_id`, `attachment_url`, `attachment_meta`, `silent`. Untuk `type` selain `text`/`sticker`, `attachment_url` wajib. Tipe yang didukung: `text`, `image`, `file`, `audio`, `video`, `location`, `sticker`, `redpacket` (redpacket hanya dibuat server via dompet). Batas badan: 8192 karakter (muat amplop E2EE v2). `silent: true` = pesan mesin (SKDM): tetap event realtime, tanpa push.
 
 Mention: tulis `@username` anggota percakapan di isi pesan teks; server menyimpannya sebagai `mentions: [user_id, ...]` dan `mentioned_me: true` untuk user yang disebut. `@semua`/`@all` menyebut semua anggota.
 

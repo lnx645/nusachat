@@ -137,7 +137,7 @@ class Conversations extends MY_Controller
         $beforeId = $this->param('before_id') !== null ? $this->int_param('before_id') : null;
         $afterId = $this->param('after_id') !== null ? $this->int_param('after_id') : null;
         $limit = $this->int_param('limit', 30);
-        $rows = $this->message_model->list($id, $beforeId, $afterId, $limit);
+        $rows = $this->message_model->list($id, $beforeId, $afterId, $limit, (int) $user['id']);
         // Per-user clear history & disappearing
         $clearedAt = $this->store->value('SELECT cleared_at FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [$id, (int) $user['id']]);
         if (!empty($clearedAt)) {
@@ -225,14 +225,17 @@ class Conversations extends MY_Controller
         } elseif ($type !== 'text' && $type !== 'sticker' && $attachmentUrl === '') {
             $this->fail('attachment_url is required for this message type.', 422, 'missing_attachment');
         }
-        if (mb_strlen($body) > 4000) {
-            $this->fail('Message is too long (max 4000 characters).', 422, 'message_too_long');
+        // Batas 8192: amplop E2EE v2 (~300 char overhead base64+) harus muat.
+        if (mb_strlen($body) > 8192) {
+            $this->fail('Message is too long (max 8192 characters).', 422, 'message_too_long');
         }
 
         $replyTo = $this->param('reply_to_id') !== null ? $this->int_param('reply_to_id') : null;
         if ($replyTo) {
+            // Relay: target balas boleh sudah disapu server (kutipan ada di cache
+            // perangkat). Tolak hanya bila barisnya ada tapi beda percakapan.
             $reply = $this->message_model->find($replyTo);
-            if (!$reply || (int) $reply['conversation_id'] !== $id) {
+            if ($reply && (int) $reply['conversation_id'] !== $id) {
                 $this->fail('The message you replied to was not found.', 422, 'invalid_reply');
             }
         }
@@ -253,12 +256,15 @@ class Conversations extends MY_Controller
             'reply_to_id' => $replyTo,
             'mentions' => $mentions,
             'client_id' => $clientId !== '' ? $clientId : null,
+            'member_ids' => $this->conversation_model->memberIds($id),
         ]);
 
         $rows = $this->message_model->withExtras([$result['row']], (int) $user['id']);
         $message = message_dto($rows[0]);
+        // silent: pesan mesin (SKDM E2EE) — tetap event realtime, tanpa push.
+        $silent = $this->bool_param('silent');
         if (!$result['duplicate']) {
-            $this->broadcastNewMessage($id, $user, $result['row'], $message, $body, $type);
+            $this->broadcastNewMessage($id, $user, $result['row'], $message, $body, $type, $silent);
         }
 
         $this->ok(['message' => $message, 'duplicate' => $result['duplicate']], $result['duplicate'] ? 200 : 201);
@@ -275,8 +281,10 @@ class Conversations extends MY_Controller
         if (!$this->conversation_model->isMember($id, (int) $user['id'])) {
             $this->fail('Conversation not found.', 404, 'not_found');
         }
+        // Relay: pesan boleh sudah disapu; penanda baca tetap maju (idempotent).
+        // Tolak hanya bila barisnya ada tapi beda percakapan.
         $message = $this->message_model->find($messageId);
-        if (!$message || (int) $message['conversation_id'] !== $id) {
+        if ($message && (int) $message['conversation_id'] !== $id) {
             $this->fail('Message not found.', 404, 'not_found');
         }
 
@@ -482,10 +490,10 @@ class Conversations extends MY_Controller
         $messageId = $this->int_param('message_id');
         $toId = $this->int_param('to_id');
         $source = $this->message_model->find($messageId);
-        if (!$source || $source['revoked_at'] !== null) {
+        if ($source && $source['revoked_at'] !== null) {
             $this->fail('Message not found.', 404, 'not_found');
         }
-        if (!$this->conversation_model->isMember((int) $source['conversation_id'], (int) $user['id'])) {
+        if ($source && !$this->conversation_model->isMember((int) $source['conversation_id'], (int) $user['id'])) {
             $this->fail('Message not found.', 404, 'not_found');
         }
         $target = $this->conversation_model->forUser($toId, (int) $user['id']);
@@ -494,44 +502,96 @@ class Conversations extends MY_Controller
         }
         $this->assertCanSend($target, $user);
 
-        $meta = null;
-        if (!empty($source['attachment_meta'])) {
-            $decoded = json_decode($source['attachment_meta'], true);
-            if (is_array($decoded)) {
-                $meta = $decoded;
-            }
-        }
-        $body = (string) ($source['body'] ?? '');
-        // Klien E2EE boleh mengirim ulang isi yang sudah dienkripsi dengan kunci
-        // percakapan tujuan; tanpa ini, pesan lintas-obrolan tidak bisa dibaca.
         $bodyOverride = $this->str_param('body');
-        if ($bodyOverride !== '') {
-            if (mb_strlen($bodyOverride) > 4000) {
-                $this->fail('Message is too long (max 4000 characters).', 422, 'message_too_long');
+        if (mb_strlen($bodyOverride) > 8192) {
+            $this->fail('Message is too long (max 8192 characters).', 422, 'message_too_long');
+        }
+        if ($source) {
+            $meta = null;
+            if (!empty($source['attachment_meta'])) {
+                $decoded = json_decode($source['attachment_meta'], true);
+                if (is_array($decoded)) {
+                    $meta = $decoded;
+                }
+            }
+            $forwardType = $source['type'];
+            $body = (string) ($source['body'] ?? '');
+            // Klien E2EE boleh mengirim ulang isi yang sudah dienkripsi dengan kunci
+            // percakapan tujuan; tanpa ini, pesan lintas-obrolan tidak bisa dibaca.
+            if ($bodyOverride !== '') {
+                $body = $bodyOverride;
+            }
+            $attachmentUrl = $source['attachment_url'] ?? null;
+        } else {
+            // Relay: sumber sudah disapu server; klien memasok ulang isi dari cache.
+            $forwardType = $this->str_param('type');
+            $allowed = ['text', 'image', 'file', 'audio', 'video', 'location', 'sticker'];
+            if (!in_array($forwardType, $allowed, true)) {
+                $this->fail('The original message expired; include type and body from your device.', 422, 'source_expired');
+            }
+            if ($forwardType === 'text' && $bodyOverride === '') {
+                $this->fail('Message cannot be empty.', 422, 'empty_message');
             }
             $body = $bodyOverride;
+            $rawUrl = $this->str_param('attachment_url');
+            $attachmentUrl = $rawUrl !== '' ? $rawUrl : null;
+            if ($forwardType !== 'text' && $forwardType !== 'sticker' && $attachmentUrl === null) {
+                $this->fail('The original attachment expired; include attachment_url from your device.', 422, 'source_expired');
+            }
+            $rawMeta = $this->param('attachment_meta');
+            $meta = is_array($rawMeta) ? $rawMeta : null;
         }
-        $mentions = $source['type'] === 'text' ? $this->extractMentions($toId, (int) $user['id'], $body) : [];
+        $mentions = $forwardType === 'text' ? $this->extractMentions($toId, (int) $user['id'], $body) : [];
         $clientId = $this->str_param('client_id');
         $result = $this->message_model->create([
             'conversation_id' => $toId,
             'sender_id' => (int) $user['id'],
-            'type' => $source['type'],
+            'type' => $forwardType,
             'body' => $body !== '' ? $body : null,
-            'attachment_url' => $source['attachment_url'] ?? null,
+            'attachment_url' => $attachmentUrl,
             'attachment_meta' => $meta,
             'reply_to_id' => null,
             'forwarded_from_id' => $messageId,
             'mentions' => $mentions,
             'client_id' => $clientId !== '' ? $clientId : null,
+            'member_ids' => $this->conversation_model->memberIds($toId),
         ]);
 
         $rows = $this->message_model->withExtras([$result['row']], (int) $user['id']);
         $message = message_dto($rows[0]);
         if (!$result['duplicate']) {
-            $this->broadcastNewMessage($toId, $user, $result['row'], $message, $body, $source['type']);
+            $this->broadcastNewMessage($toId, $user, $result['row'], $message, $body, $forwardType);
         }
         $this->ok(['message' => $message, 'duplicate' => $result['duplicate']], $result['duplicate'] ? 200 : 201);
+    }
+
+    /**
+     * Ack-sampai relay: "pesan ≤ message_id sudah tersimpan di perangkatku".
+     * Idempotent; message_id tak dikenal tetap 200. Pesan yang semua
+     * penerimanya ack masuk masa tenggang 24 jam sebelum disapu.
+     */
+    public function ack(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['id', 'message_id']);
+
+        $id = $this->int_param('id');
+        $messageId = $this->int_param('message_id');
+        if (!$this->conversation_model->isMember($id, (int) $user['id'])) {
+            $this->fail('Conversation not found.', 404, 'not_found');
+        }
+
+        $fullyAcked = $this->message_model->ackUpTo($id, (int) $user['id'], $messageId);
+
+        $others = array_values(array_diff($this->conversation_model->memberIds($id), [(int) $user['id']]));
+        $this->realtime_model->push($others, 'ack', [
+            'conversation_id' => $id,
+            'user_id' => (int) $user['id'],
+            'message_id' => $messageId,
+            'fully_acked' => $fullyAcked,
+        ]);
+        $this->ok(['message_id' => $messageId, 'fully_acked' => $fullyAcked]);
     }
 
     public function search(): void
@@ -724,8 +784,9 @@ class Conversations extends MY_Controller
         if (!$this->conversation_model->isMember($id, (int) $user['id'])) {
             $this->fail('Conversation not found.', 404, 'not_found');
         }
+        // Relay: pesan boleh sudah disapu; daftar pembaca dari penanda anggota.
         $message = $this->message_model->find($messageId);
-        if (!$message || (int) $message['conversation_id'] !== $id) {
+        if ($message && (int) $message['conversation_id'] !== $id) {
             $this->fail('Message not found.', 404, 'not_found');
         }
         $rows = $this->store->all(
@@ -1226,7 +1287,7 @@ class Conversations extends MY_Controller
         }
     }
 
-    private function broadcastNewMessage(int $id, array $user, array $row, array $message, string $body, string $type): void
+    private function broadcastNewMessage(int $id, array $user, array $row, array $message, string $body, string $type, bool $silent = false): void
     {
         $this->conversation_model->setLastMessage($id, (int) $row['id'], $row['created_at']);
         $memberIds = $this->conversation_model->memberIds($id);
@@ -1234,6 +1295,9 @@ class Conversations extends MY_Controller
             'conversation_id' => $id,
             'message' => $message,
         ]);
+        if ($silent) {
+            return;
+        }
         // Isi pesan teks tidak pernah dikirim ke push: chat E2EE menyimpan
         // ciphertext (bocor bila dikirim mentah), dan isi plaintext pun privat.
         // Klien mendekrip lokal bila kuncinya ada (NusaFirebaseService).
@@ -1322,6 +1386,7 @@ class Conversations extends MY_Controller
             'sender_id' => $actorId,
             'type' => 'system',
             'body' => $body,
+            'member_ids' => $this->conversation_model->memberIds($conversationId),
         ]);
         $message = message_dto($result['row']);
         if (!$result['duplicate']) {

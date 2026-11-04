@@ -334,6 +334,7 @@ class Wallet extends MY_Controller
             'reply_to_id' => null,
             'mentions' => [],
             'client_id' => $clientId !== '' ? $clientId : null,
+            'member_ids' => $this->conversation_model->memberIds($convId),
         ]);
         $this->wallet_model->attachPacketMessage((int) $packet['id'], (int) $result['row']['id']);
         $rows = $this->message_model->withExtras([$result['row']], (int) $user['id']);

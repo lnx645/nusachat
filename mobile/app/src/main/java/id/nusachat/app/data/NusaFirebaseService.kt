@@ -77,15 +77,19 @@ class NusaFirebaseService : FirebaseMessagingService() {
             runBlocking {
                 withTimeoutOrNull(9_000) {
                     val api = ApiClient(BuildConfig.API_BASE_URL, session)
-                    val e2ee = E2eeManager(this@NusaFirebaseService)
-                    val page = ChatRepository(this@NusaFirebaseService, api, session)
-                        .messages(conversationId, limit = 10)
+                    val repo = ChatRepository(this@NusaFirebaseService, api, session)
+                    val sess = SessionCrypto(
+                        this@NusaFirebaseService, repo,
+                        E2eeManager(this@NusaFirebaseService),
+                    )
+                    val page = repo.messages(conversationId, limit = 10)
                     val raw = page.messages.firstOrNull { it.id == messageId } ?: return@withTimeoutOrNull null
-                    e2ee.decryptMessage(raw).body?.takeIf { it.isNotBlank() }
+                    // SKDM (null) tidak pernah jadi notifikasi.
+                    sess.decryptOne(raw, session.user?.id ?: 0L)?.body?.takeIf { it.isNotBlank() }
                 }
             }
         }.getOrNull()
-        if (plain.isNullOrBlank() || isCipherText(plain)) return data
+        if (plain.isNullOrBlank() || isCipherText(plain) || isEnvelope(plain)) return data
         return data + ("body" to plain.take(180))
     }
 
@@ -93,4 +97,8 @@ class NusaFirebaseService : FirebaseMessagingService() {
         if (text.length <= 24 || !text.contains("=")) return false
         return text.matches(Regex("^[A-Za-z0-9+/=\\n\\r]+$"))
     }
+
+    /** Amplop v2 yang lolos dekrip jangan pernah bocor ke notifikasi. */
+    private fun isEnvelope(text: String): Boolean =
+        text.startsWith("{\"v\":2,\"kind\":") || text == SessionCrypto.PLACEHOLDER_BROKEN
 }

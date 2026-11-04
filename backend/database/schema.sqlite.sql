@@ -432,3 +432,49 @@ CREATE TABLE IF NOT EXISTS comment_likes (
     UNIQUE (comment_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_comment_likes_comment ON comment_likes (comment_id);
+
+CREATE TABLE IF NOT EXISTS devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_id TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT '',
+    device_name TEXT NOT NULL DEFAULT '',
+    identity_sign_pub TEXT NOT NULL DEFAULT '',
+    identity_dh_pub TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT,
+    revoked_at TEXT,
+    UNIQUE (user_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id);
+CREATE TABLE IF NOT EXISTS signed_prekeys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_id TEXT NOT NULL,
+    key_id INTEGER NOT NULL,
+    public_key TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (user_id, device_id, key_id)
+);
+CREATE INDEX IF NOT EXISTS idx_spk_lookup ON signed_prekeys (user_id, device_id);
+CREATE TABLE IF NOT EXISTS onetime_prekeys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_id TEXT NOT NULL,
+    key_id INTEGER NOT NULL,
+    public_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (user_id, device_id, key_id)
+);
+CREATE INDEX IF NOT EXISTS idx_otpk_lookup ON onetime_prekeys (user_id, device_id);
+-- Fase 1 (relay): penerima snapshot per pesan + kedaluwarsa antrean.
+CREATE TABLE IF NOT EXISTS message_recipients (
+    message_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    acked_at TEXT,
+    PRIMARY KEY (message_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_recipients_user ON message_recipients (user_id);
+ALTER TABLE messages ADD COLUMN expires_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages (expires_at);

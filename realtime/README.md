@@ -12,7 +12,10 @@ Tanpa polling: tiap `Realtime_model::push()` langsung POST baris baru ke
 Cursor hanya dibaca sekali saat boot (catch-up) dan disimpan ke disk
 (`REALTIME_DATA_DIR/nusa_cursor`, default `/tmp/nusa_realtime/`) tiap
 10 detik + saat shutdown, sehingga restart mengirim ulang bukan
-menghilangkan. Prune baris > 24 jam jalan tiap 5 menit (maintenance).
+menghilangkan. Prune baris > 24 jam jalan tiap 5 menit (maintenance);
+tick yang sama menyapu antrean relay (`messages` kedaluwarsa +
+penerima/reaksi/pin/bintang/sembunyinya). Interval via
+`NUSA_PRUNE_MS` (default 300000, min 1000 — untuk test).
 
 ## Anatomi 10 menit (baca ini dulu)
 
@@ -79,7 +82,7 @@ versionalisasi):
 ```sh
 cd realtime/nusachat_realtime
 rebar3 compile    # kompilasi
-rebar3 eunit      # 20 unit test modul murni (jwt/geo/envelope)
+rebar3 eunit      # 22 unit test modul murni (jwt/geo/envelope/fanout)
 rebar3 dialyzer   # cek tipe statis (PLT di-cache, run pertama lambat)
 ```
 

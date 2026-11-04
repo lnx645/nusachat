@@ -117,6 +117,7 @@ fun ChatScreen(
 ) {
     val conversation = state.conversation ?: return
     val session by vm.sessionState.collectAsStateWithLifecycle()
+    val online by vm.isOnline.collectAsStateWithLifecycle()
     val me = session.user
     val friends by vm.friends.collectAsStateWithLifecycle()
     val dark = isSystemInDarkTheme()
@@ -629,6 +630,29 @@ fun ChatScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            // Bar offline: pesan tetap bisa dibaca & ditulis, terkirim otomatis.
+            if (!online) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 16.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        painter = painterResource(id = NusaIcons.WifiOff),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Offline — menampilkan pesan tersimpan",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             if (showSearch) {
                 Surface(color = MaterialTheme.colorScheme.surface) {
                     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {

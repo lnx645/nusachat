@@ -324,6 +324,51 @@ internal fun User.toJson(): JSONObject = JSONObject()
     .put("online", online)
     .put("last_seen_at", lastSeenAt)
 
+/**
+ * Encode Message ke bentuk JSON server agar [toMessage] bisa membaca ulang
+ * (dipakai cache lokal). `pending` milik klien — disimpan sebagai kolom DB.
+ */
+internal fun Message.toJson(): JSONObject {
+    val meta = JSONObject()
+    if (lat != null) meta.put("lat", lat)
+    if (lng != null) meta.put("lng", lng)
+    if (packetId != null) meta.put("packet_id", packetId)
+    val mentionArray = JSONArray()
+    mentions.forEach { mentionArray.put(it) }
+    val reactionArray = JSONArray()
+    reactions.forEach {
+        reactionArray.put(
+            JSONObject()
+                .put("emoji", it.emoji)
+                .put("count", it.count)
+                .put("reacted_by_me", it.reactedByMe)
+        )
+    }
+    return JSONObject()
+        .put("id", id)
+        .put("uuid", uuid)
+        .put("conversation_id", conversationId)
+        .put("sender", sender?.toJson())
+        .put("type", type)
+        .put("body", body)
+        .put("attachment_url", attachmentUrl)
+        .put("status", status)
+        .put("revoked", revoked)
+        .put("created_at", createdAt)
+        .put("client_id", clientId)
+        .put("reply_to_id", replyToId)
+        .put("edited_at", editedAt)
+        .put("forwarded", forwarded)
+        .put("forwarded_from_id", forwardedFromId)
+        .put("mentions", mentionArray)
+        .put("mentioned_me", mentionedMe)
+        .put("reactions", reactionArray)
+        .put("attachment_meta", meta)
+        .put("conversation_title", conversationTitle)
+        .put("conversation_type", conversationType)
+        .put("starred_at", starredAt)
+}
+
 internal fun JSONObject.toMessage(): Message {
     val sender = optJSONObject("sender")?.toUser()
     val meta = optJSONObject("attachment_meta")

@@ -68,7 +68,11 @@ Gateway Erlang/OTP (`realtime/nusachat_realtime`, port 8091, detail di
 - Tanpa polling: PHP menulis outbox lalu POST baris baru ke
   `/internal/notify`; node fan-out seketika ke socket tujuan.
 - Cursor persisten (kirim-ulang setelah restart, bukan hilang) dan prune
-  event > 24 jam tiap 5 menit.
+  event > 24 jam tiap 5 menit. Tick yang sama menyapu antrean relay:
+  `messages` kedaluwarsa + penerima/reaksi/pin/bintang/sembunyinya.
+- Server = relay buta + direktori: pesan hidup di `messages` hanya
+  sampai semua penerima ack (lalu tenggang 24 jam) atau TTL 30 hari;
+  riwayat permanen di cache perangkat (Room + SQLCipher).
 - Bentuk kabel: `{"event_id":N,"type":"...","data":{...},"ts":"..."}`.
 
 Database utama kini MySQL (`DB_DRIVER=mysql`); SQLite hanya untuk CI job
@@ -132,7 +136,8 @@ Pendekatan ini membuat aplikasi tetap berfungsi walau realtime sempat mati.
 | `friendships` | Permintaan dan status pertemanan |
 | `conversations` | Direct/group, `direct_key` unik untuk chat berdua |
 | `conversation_members` | Anggota, role, `last_read_message_id`, mute |
-| `messages` | Pesan, lampiran, `client_id` idempoten, status, revokasi |
+| `messages` | Antrean relay (bukan history): `expires_at` 30 hari, tenggang 24 jam setelah full-ack |
+| `message_recipients` | Snapshot penerima per pesan + `acked_at` (sumber kebenaran pengiriman) |
 | `moments` | Momen dan `media_json` |
 | `moment_likes` | Suka unik per user/momen |
 | `moment_comments` | Komentar momen |

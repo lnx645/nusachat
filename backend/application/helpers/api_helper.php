@@ -201,6 +201,7 @@ if (!function_exists('message_dto')) {
             'revoked' => $row['revoked_at'] !== null,
             'edited_at' => $row['edited_at'] ?? null,
             'created_at' => $row['created_at'],
+            'expires_at' => $row['expires_at'] ?? null,
         ];
     }
 }

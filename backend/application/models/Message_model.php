@@ -4,6 +4,11 @@ defined('BASEPATH') OR exit('No direct script access allowed');
 
 class Message_model extends CI_Model
 {
+    /** TTL antrean relay untuk pesan yang belum terkirim penuh (ala WhatsApp: 30 hari). */
+    private const TTL_UNDELIVERED = 30 * 86400;
+    /** Masa tenggang setelah semua penerima ack (jendela revoke/edit 24 jam). */
+    private const GRACE_FULLY_ACKED = 86400;
+
     private Store $store;
 
     public function __construct()
@@ -47,7 +52,19 @@ class Message_model extends CI_Model
             'status' => 'sent',
             'client_id' => $data['client_id'] ?? null,
             'created_at' => $now,
+            'expires_at' => gmdate('Y-m-d\TH:i:s\Z', time() + self::TTL_UNDELIVERED),
         ]);
+
+        // Snapshot penerima saat kirim; pengirim langsung dianggap ack.
+        // Anggota yang masuk belakangan tidak melihat pesan lama (ala WhatsApp).
+        $memberIds = $data['member_ids'] ?? [];
+        foreach ($memberIds as $memberId) {
+            $this->store->insert('message_recipients', [
+                'message_id' => $id,
+                'user_id' => (int) $memberId,
+                'acked_at' => (int) $memberId === (int) $data['sender_id'] ? $now : null,
+            ]);
+        }
 
         return ['row' => $this->find($id), 'duplicate' => false];
     }
@@ -63,7 +80,11 @@ class Message_model extends CI_Model
         );
     }
 
-    public function list(int $conversationId, ?int $beforeId, ?int $afterId, int $limit = 30): array
+    /**
+     * Daftar antrean relay untuk satu viewer: hanya pesan yang menargetkannya
+     * dan belum kedaluwarsa. Riwayat permanen tinggal di perangkat (Room).
+     */
+    public function list(int $conversationId, ?int $beforeId, ?int $afterId, int $limit, int $viewerId): array
     {
         $limit = max(1, min(100, $limit));
         $params = [$conversationId];
@@ -75,8 +96,10 @@ class Message_model extends CI_Model
                 'SELECT m.*, u.display_name AS sender_display_name, u.username AS sender_username,
                         u.avatar_url AS sender_avatar_url
                  FROM messages m JOIN users u ON u.id = m.sender_id
-                 WHERE ' . $where . ' ORDER BY m.id ASC LIMIT ' . $limit,
-                $params
+                 WHERE ' . $where . ' AND m.expires_at > ?
+                   AND EXISTS (SELECT 1 FROM message_recipients r WHERE r.message_id = m.id AND r.user_id = ?)
+                 ORDER BY m.id ASC LIMIT ' . $limit,
+                array_merge($params, [now_iso(), $viewerId])
             );
             return $rows;
         }
@@ -88,10 +111,46 @@ class Message_model extends CI_Model
             'SELECT m.*, u.display_name AS sender_display_name, u.username AS sender_username,
                     u.avatar_url AS sender_avatar_url
              FROM messages m JOIN users u ON u.id = m.sender_id
-             WHERE ' . $where . ' ORDER BY m.id DESC LIMIT ' . $limit,
-            $params
+             WHERE ' . $where . ' AND m.expires_at > ?
+               AND EXISTS (SELECT 1 FROM message_recipients r WHERE r.message_id = m.id AND r.user_id = ?)
+             ORDER BY m.id DESC LIMIT ' . $limit,
+            array_merge($params, [now_iso(), $viewerId])
         );
         return array_reverse($rows);
+    }
+
+    /**
+     * Ack-sampai (up-to): tandai semua pesan milikku ≤ messageId sebagai
+     * tersimpan di perangkat. Pesan yang semua penerimanya ack masuk masa
+     * tenggang 24 jam lalu disapu penyapu relay (Erlang).
+     *
+     * @return int[] id pesan yang baru saja full-ack
+     */
+    public function ackUpTo(int $conversationId, int $userId, int $messageId): array
+    {
+        $now = now_iso();
+        $this->store->run(
+            'UPDATE message_recipients SET acked_at = ? WHERE user_id = ? AND acked_at IS NULL
+             AND message_id IN (SELECT id FROM messages WHERE conversation_id = ? AND id <= ?)',
+            [$now, $userId, $conversationId, $messageId]
+        );
+        $rows = $this->store->all(
+            'SELECT m.id FROM messages m WHERE m.conversation_id = ? AND m.id <= ?
+             AND NOT EXISTS (SELECT 1 FROM message_recipients r WHERE r.message_id = m.id AND r.acked_at IS NULL)',
+            [$conversationId, $messageId]
+        );
+        $ids = array_map(static fn (array $r): int => (int) $r['id'], $rows);
+        if ($ids) {
+            $grace = gmdate('Y-m-d\TH:i:s\Z', time() + self::GRACE_FULLY_ACKED);
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
+            // Hanya persingkat masa berlaku, jangan perpanjang.
+            $this->store->run(
+                'UPDATE messages SET expires_at = ? WHERE id IN (' . $placeholders . ')
+                 AND (expires_at IS NULL OR expires_at > ?)',
+                array_merge([$grace], $ids, [$grace])
+            );
+        }
+        return $ids;
     }
 
     public function latestForConversations(array $conversationIds): array
@@ -106,8 +165,11 @@ class Message_model extends CI_Model
              FROM messages m JOIN users u ON u.id = m.sender_id
              WHERE m.id IN (
                 SELECT MAX(id) FROM messages WHERE conversation_id IN (' . $placeholders . ') GROUP BY conversation_id
-             )',
-            array_map(static fn (int|string $id): int => (int) $id, $conversationIds)
+             ) AND m.expires_at > ?',
+            array_merge(
+                array_map(static fn (int|string $id): int => (int) $id, $conversationIds),
+                [now_iso()]
+            )
         );
         $byConversation = [];
         foreach ($rows as $row) {
@@ -238,9 +300,9 @@ class Message_model extends CI_Model
             'SELECT m.*, u.display_name AS sender_display_name, u.username AS sender_username,
                     u.avatar_url AS sender_avatar_url
              FROM messages m JOIN users u ON u.id = m.sender_id
-             WHERE m.conversation_id = ? AND m.body LIKE ?
+             WHERE m.conversation_id = ? AND m.body LIKE ? AND m.expires_at > ?
              ORDER BY m.id DESC LIMIT ' . $limit,
-            [$conversationId, '%' . $query . '%']
+            [$conversationId, '%' . $query . '%', now_iso()]
         );
     }
 
@@ -399,10 +461,10 @@ class Message_model extends CI_Model
              JOIN users u ON u.id = m.sender_id
              JOIN conversations c ON c.id = m.conversation_id
              JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
-             WHERE m.body LIKE ? AND m.revoked_at IS NULL
+             WHERE m.body LIKE ? AND m.revoked_at IS NULL AND m.expires_at > ?
                AND NOT EXISTS (SELECT 1 FROM hidden_messages h WHERE h.user_id = ? AND h.message_id = m.id)
              ORDER BY m.id DESC LIMIT ' . $limit,
-            [$userId, '%' . $query . '%', $userId]
+            [$userId, '%' . $query . '%', now_iso(), $userId]
         );
     }
 }

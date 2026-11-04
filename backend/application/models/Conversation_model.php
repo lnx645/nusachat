@@ -97,18 +97,18 @@ class Conversation_model extends CI_Model
             'SELECT c.*, m.last_read_message_id, m.role, m.muted, m.archived, m.pinned,
                     (SELECT COUNT(*) FROM messages msg
                      WHERE msg.conversation_id = c.id AND msg.id > m.last_read_message_id
-                       AND msg.sender_id <> ? AND msg.revoked_at IS NULL
+                       AND msg.sender_id <> ? AND msg.revoked_at IS NULL AND msg.expires_at > ?
                        AND NOT EXISTS (SELECT 1 FROM hidden_messages h WHERE h.user_id = ? AND h.message_id = msg.id)) AS unread_count
              FROM conversations c
              JOIN conversation_members m ON m.conversation_id = c.id
              WHERE c.id = ? AND m.user_id = ?',
-            [$userId, $userId, $id, $userId]
+            [$userId, now_iso(), $userId, $id, $userId]
         );
     }
 
     public function listFor(int $userId, int $limit = 100, ?string $before = null): array
     {
-        $params = [$userId, $userId, $userId];
+        $params = [$userId, now_iso(), $userId, $userId];
         $where = 'm.user_id = ?';
         if ($before !== null && $before !== '') {
             $where .= ' AND COALESCE(c.last_message_at, c.created_at) < ?';
@@ -118,7 +118,7 @@ class Conversation_model extends CI_Model
             'SELECT c.*, m.last_read_message_id, m.role, m.muted, m.archived, m.pinned,
                     (SELECT COUNT(*) FROM messages msg
                      WHERE msg.conversation_id = c.id AND msg.id > m.last_read_message_id
-                       AND msg.sender_id <> ? AND msg.revoked_at IS NULL
+                       AND msg.sender_id <> ? AND msg.revoked_at IS NULL AND msg.expires_at > ?
                        AND NOT EXISTS (SELECT 1 FROM hidden_messages h WHERE h.user_id = ? AND h.message_id = msg.id)) AS unread_count
              FROM conversations c
              JOIN conversation_members m ON m.conversation_id = c.id

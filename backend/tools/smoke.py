@@ -447,6 +447,32 @@ def main():
         check("read device keys", status == 200 and any(k["public_key"] == fake_pub for k in payload["data"]["keys"]), f"status={status} {payload}")
         status, payload = request("POST", "/users/device_key", {"device_id": "x", "public_key": "bukan-base64!!!"}, token=nusa)
         check("bad public key rejected", status == 422, f"status={status} {payload}")
+        # Direktori device E2EE per device (docs/E2EE-PROTOCOL.md).
+        sign_pub = base64.b64encode(b"S" * 32).decode()
+        dh_pub = base64.b64encode(b"D" * 32).decode()
+        status, payload = request("POST", "/devices/register", {"device_id": "smoke-e2ee", "platform": "test", "device_name": "Smoke", "identity_sign_pub": sign_pub, "identity_dh_pub": dh_pub}, token=nusa)
+        check("register device", status == 201 and payload["data"]["device"]["device_id"] == "smoke-e2ee", f"status={status} {payload}")
+        status, payload = request("POST", "/devices/register", {"device_id": "bad", "identity_sign_pub": "pendek", "identity_dh_pub": dh_pub}, token=nusa)
+        check("bad identity key rejected", status == 422, f"status={status} {payload}")
+        spk_pub = base64.b64encode(b"P" * 32).decode()
+        spk_sig = base64.b64encode(b"G" * 64).decode()
+        otpk = base64.b64encode(b"O" * 32).decode()
+        status, payload = request("POST", "/devices/prekeys", {"device_id": "smoke-e2ee", "signed_prekey": {"key_id": 1, "public_key": spk_pub, "signature": spk_sig}, "onetime_prekeys": [{"key_id": 1, "public_key": otpk}]}, token=nusa)
+        check("upload prekeys", status == 201 and payload["data"]["stored_onetime"] == 1, f"status={status} {payload}")
+        status, payload = request("GET", "/devices/bundle?user_id=1&device_id=smoke-e2ee", token=sari)
+        bundle = payload.get("data", {}).get("bundle", {}) if status == 200 else {}
+        check("fetch bundle", status == 200 and bundle.get("identity_dh_pub") == dh_pub and (bundle.get("onetime_prekey") or {}).get("key_id") == 1, f"status={status} {payload}")
+        status, payload = request("GET", "/devices/bundle?user_id=1&device_id=smoke-e2ee", token=sari)
+        bundle2 = payload.get("data", {}).get("bundle", {}) if status == 200 else {}
+        check("onetime consumed once", status == 200 and bundle2.get("onetime_prekey") is None, f"status={status} {payload}")
+        status, payload = request("GET", "/devices/list?user_id=1", token=sari)
+        check("list devices", status == 200 and any(d["device_id"] == "smoke-e2ee" for d in payload["data"]["devices"]), f"status={status} {payload}")
+        status, payload = request("GET", "/devices/mine", token=nusa)
+        check("mine devices", status == 200 and any(d["device_id"] == "smoke-e2ee" for d in payload["data"]["devices"]), f"status={status} {payload}")
+        status, payload = request("POST", "/devices/revoke", {"device_id": "smoke-e2ee"}, token=nusa)
+        check("revoke device", status == 200, f"status={status} {payload}")
+        status, payload = request("GET", "/devices/bundle?user_id=1&device_id=smoke-e2ee", token=sari)
+        check("revoked bundle gone", status == 404, f"status={status} {payload}")
         status, payload = request("POST", "/conversations/set_keys", {"id": new_conv, "keys": [{"user_id": new_id, "wrapped_key": fake_wrap}]}, token=nusa)
         check("store wrapped keys", status == 201 and payload["data"]["stored"] == 1, f"status={status} {payload}")
         status, payload = request("GET", f"/conversations/keys?id={new_conv}", token=new_token)
@@ -597,6 +623,41 @@ def main():
         check("send sticker", status == 201 and payload["data"]["message"]["type"] == "sticker", f"status={status} {payload}")
         status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "sticker", "body": ""}, token=nusa)
         check("empty sticker rejected", status == 422, f"status={status} {payload}")
+
+        # Relay ack: pesan di-ack peer → masa tenggang 24 jam, tetap bisa dibaca/dibalas.
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": f"AckRelay-{suffix}"}, token=nusa)
+        ack_msg = payload.get("data", {}).get("message", {}).get("id")
+        check("relay send", status == 201 and ack_msg, f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/messages?id={new_conv}&after_id={ack_msg - 1}", token=new_token)
+        got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+        check("relay fetch", status == 200 and any(m["id"] == ack_msg for m in got), f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/ack", {"id": new_conv, "message_id": ack_msg}, token=new_token)
+        check("relay ack", status == 200 and payload.get("ok"), f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/messages?id={new_conv}&after_id={ack_msg - 1}", token=nusa)
+        got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+        exp = next((m.get("expires_at") for m in got if m["id"] == ack_msg), None)
+        check("relay grace kept", status == 200 and exp is not None, f"status={status} {payload}")
+        if exp:
+            from datetime import datetime, timedelta, timezone
+            exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+            check("relay grace 24h", exp_dt <= datetime.now(timezone.utc) + timedelta(hours=24, minutes=5), f"expires_at={exp}")
+        status, payload = request("POST", "/conversations/read", {"id": new_conv, "message_id": ack_msg}, token=nusa)
+        check("read after ack", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": f"Balas-{suffix}", "reply_to_id": ack_msg}, token=new_token)
+        check("reply after ack", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/ack", {"id": new_conv, "message_id": 999999999}, token=nusa)
+        check("ack unknown idempotent", status == 200, f"status={status} {payload}")
+
+        # Amplop E2EE v2: server buram (passthrough utuh) + batas 8192 + silent.
+        env = '{"v":2,"kind":"pairwise","from":"dev_x","parts":{}}'
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": env}, token=nusa)
+        check("envelope passthrough", status == 201 and payload["data"]["message"]["body"] == env, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": "L" * 5000}, token=nusa)
+        check("long body 5000", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": "skdm-ish", "silent": True}, token=nusa)
+        check("silent send", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": "L" * 8193}, token=nusa)
+        check("body 8193 rejected", status == 422, f"status={status} {payload}")
 
         # Mention semua + deskripsi + alih kepemilikan grup.
         status, payload = request("POST", "/conversations/send", {"id": group_id, "type": "text", "body": "@semua kumpul"}, token=nusa)
@@ -829,7 +890,8 @@ def main():
         readers = payload.get("data", {}).get("read_by", []) if payload.get("ok") else []
         check("message reads", status == 200 and any(r["id"] == 1 for r in readers), f"status={status} {payload}")
         status, payload = request("GET", f"/conversations/message_reads?id={new_conv}&message_id=999999", token=nusa)
-        check("reads unknown message", status == 404, f"status={status} {payload}")
+        # Relay: pesan tersapu tetap 200 (tanda baca dari anggota, bukan baris pesan).
+        check("reads unknown message", status == 200 and payload["data"]["read_by"] == [], f"status={status} {payload}")
 
         # Tagar.
         tag = f"smoke{suffix}"

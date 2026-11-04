@@ -139,9 +139,14 @@ $makeConversation = static function (string $a, string $b, array $messages) use 
     foreach ($messages as $message) {
         [$sender, $body] = $message;
         $created = gmdate('Y-m-d\TH:i:s\Z', time() - $offset);
-        $insert = $pdo->prepare('INSERT INTO messages (uuid, conversation_id, sender_id, type, body, status, client_id, created_at) VALUES (?,?,?,?,?,?,?,?)');
-        $insert->execute([uuid_seed(), $conversationId, $ids[$sender], 'text', $body, 'read', 'seed-' . uuid_seed(), $created]);
+        $expires = gmdate('Y-m-d\TH:i:s\Z', time() - $offset + 30 * 86400);
+        $insert = $pdo->prepare('INSERT INTO messages (uuid, conversation_id, sender_id, type, body, status, client_id, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?)');
+        $insert->execute([uuid_seed(), $conversationId, $ids[$sender], 'text', $body, 'read', 'seed-' . uuid_seed(), $created, $expires]);
         $messageId = (int) $pdo->lastInsertId();
+        // Relay: penerima snapshot; seed dianggap sudah dibaca semua pihak.
+        $recipient = $pdo->prepare('INSERT INTO message_recipients (message_id, user_id, acked_at) VALUES (?,?,?)');
+        $recipient->execute([$messageId, $aId, $created]);
+        $recipient->execute([$messageId, $bId, $created]);
         $pdo->prepare('UPDATE conversations SET last_message_id=?, last_message_at=?, updated_at=? WHERE id=?')
             ->execute([$messageId, $created, $created, $conversationId]);
         $offset -= 7;
