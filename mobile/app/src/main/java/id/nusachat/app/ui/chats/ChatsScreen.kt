@@ -2,9 +2,11 @@ package id.nusachat.app.ui.chats
 import id.nusachat.app.ui.components.NusaIconButton
 import id.nusachat.app.ui.components.NusaTopAppBar
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,21 +59,42 @@ import id.nusachat.app.ui.components.UnreadBadge
 import id.nusachat.app.ui.components.UserRow
 import id.nusachat.app.ui.components.formatListTime
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatsScreen(
     vm: AppViewModel,
     onOpenChat: (Conversation) -> Unit,
+    onShowHistory: () -> Unit = {},
+    onShowStarred: () -> Unit = {},
 ) {
     val conversations by vm.conversations.collectAsStateWithLifecycle()
     val loading by vm.conversationsLoading.collectAsStateWithLifecycle()
     val friends by vm.friends.collectAsStateWithLifecycle()
     val session by vm.sessionState.collectAsStateWithLifecycle()
     val connected by vm.realtimeConnected.collectAsStateWithLifecycle()
+    val globalResults by vm.globalSearchResults.collectAsStateWithLifecycle()
+    val globalSearching by vm.globalSearching.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
     var showNewChat by remember { mutableStateOf(false) }
+    var filter by rememberSaveable { mutableStateOf(0) } // 0 semua, 1 belum dibaca, 2 grup
+    var contextConv by remember { mutableStateOf<Conversation?>(null) }
+    var confirmClear by remember { mutableStateOf<Conversation?>(null) }
+
+    androidx.compose.runtime.LaunchedEffect(query) {
+        if (query.trim().length >= 2) {
+            kotlinx.coroutines.delay(450)
+            vm.searchAllChats(query)
+        } else {
+            vm.clearGlobalSearch()
+        }
+    }
 
     val currentUserId = session.user?.id
     val filtered = conversations.filter { conversation ->
+        when (filter) {
+            1 -> if (conversation.unreadCount == 0) return@filter false
+            2 -> if (!conversation.isGroup) return@filter false
+        }
         if (query.isBlank()) return@filter true
         val preview = conversationPreview(conversation, currentUserId)
         conversation.displayTitle.contains(query, ignoreCase = true) ||
@@ -98,8 +121,11 @@ fun ChatsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            NusaIconButton(onClick = { vm.refreshConversations() }) {
-                Icon(painter = painterResource(id = NusaIcons.Refresh), contentDescription = "Segarkan")
+            NusaIconButton(onClick = onShowHistory) {
+                Icon(painter = painterResource(id = NusaIcons.History), contentDescription = "Riwayat panggilan")
+            }
+            NusaIconButton(onClick = onShowStarred) {
+                Icon(painter = painterResource(id = NusaIcons.Star), contentDescription = "Pesan berbintang")
             }
             NusaIconButton(onClick = { showNewChat = true }) {
                 Icon(painter = painterResource(id = NusaIcons.Add), contentDescription = "Chat baru")
@@ -109,36 +135,140 @@ fun ChatsScreen(
         SearchField(
             value = query,
             onValueChange = { query = it },
-            placeholder = "Cari obrolan",
+            placeholder = "Cari obrolan & pesan",
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
         )
 
-        when {
-            loading && conversations.isEmpty() -> SkeletonList(count = 7)
-            filtered.isEmpty() -> EmptyState(
-                icon = NusaIcons.Chat,
-                title = if (query.isBlank()) "Belum ada obrolan" else "Tidak ditemukan",
-                subtitle = if (query.isBlank()) {
-                    "Tambahkan teman, lalu mulai percakapan pertamamu."
-                } else {
-                    "Coba kata kunci lain."
-                },
-            )
-            else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(filtered, key = { it.id }) { conversation ->
-                    ConversationRow(
-                        conversation = conversation,
-                        currentUserId = currentUserId,
-                        onClick = { onOpenChat(conversation) },
-                    )
-                    HorizontalDivider(
-                        modifier = Modifier.padding(start = 78.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant,
-                    )
-                }
-                item { Spacer(Modifier.height(12.dp)) }
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            listOf("Semua", "Belum dibaca", "Grup").forEachIndexed { index, label ->
+                androidx.compose.material3.FilterChip(
+                    selected = filter == index,
+                    onClick = { filter = index },
+                    label = { Text(label, style = MaterialTheme.typography.labelMedium) },
+                )
             }
         }
+
+        androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+            isRefreshing = loading,
+            onRefresh = { vm.refreshConversations() },
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            when {
+                loading && conversations.isEmpty() -> SkeletonList(count = 7)
+                filtered.isEmpty() && globalResults.isEmpty() -> EmptyState(
+                    icon = NusaIcons.Chat,
+                    title = if (query.isBlank()) "Belum ada obrolan" else "Tidak ditemukan",
+                    subtitle = if (query.isBlank()) {
+                        "Tambahkan teman, lalu mulai percakapan pertamamu."
+                    } else {
+                        "Coba kata kunci lain."
+                    },
+                )
+                else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    items(filtered, key = { it.id }) { conversation ->
+                        ConversationRow(
+                            conversation = conversation,
+                            currentUserId = currentUserId,
+                            onClick = { onOpenChat(conversation) },
+                            onLongClick = { contextConv = conversation },
+                        )
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 78.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                        )
+                    }
+                    if (query.trim().length >= 2) {
+                        item(key = "global-header") {
+                            Text(
+                                text = if (globalSearching) "Mencari pesan..." else "Pesan (${globalResults.size})",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            )
+                        }
+                        items(globalResults, key = { it.id }) { msg ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        conversations.firstOrNull { it.id == msg.conversationId }?.let(onOpenChat)
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    painter = painterResource(id = NusaIcons.Search),
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = msg.conversationTitle ?: "Obrolan",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                    )
+                                    Text(
+                                        text = "${msg.sender?.familiarName ?: ""}: ${msg.body?.take(80).orEmpty()}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    item { Spacer(Modifier.height(12.dp)) }
+                }
+            }
+        }
+    }
+
+    contextConv?.let { conv ->
+        id.nusachat.app.ui.components.NusaActionSheet(
+            title = conv.displayTitle,
+            actions = listOf(
+                id.nusachat.app.ui.components.SheetAction(
+                    if (conv.pinned) "Lepas sematan" else "Sematkan ke atas",
+                    NusaIcons.Pin,
+                ) { vm.togglePinChat(conv); contextConv = null },
+                id.nusachat.app.ui.components.SheetAction(
+                    if (conv.muted) "Nyalakan notifikasi" else "Bisukan",
+                    if (conv.muted) NusaIcons.Bell else NusaIcons.BellOff,
+                ) { vm.setMutedById(conv, !conv.muted); contextConv = null },
+                id.nusachat.app.ui.components.SheetAction("Tandai belum dibaca", NusaIcons.Chat) {
+                    vm.markChatUnread(conv); contextConv = null
+                },
+                id.nusachat.app.ui.components.SheetAction(
+                    if (conv.archived) "Keluarkan dari arsip" else "Arsipkan",
+                    NusaIcons.Archive,
+                ) { vm.setArchivedById(conv, !conv.archived); contextConv = null },
+                id.nusachat.app.ui.components.SheetAction("Ekspor chat", NusaIcons.Share) {
+                    vm.exportChat(conv); contextConv = null
+                },
+                id.nusachat.app.ui.components.SheetAction("Hapus riwayat", NusaIcons.Delete, danger = true) {
+                    contextConv = null; confirmClear = conv
+                },
+            ),
+            onDismiss = { contextConv = null },
+        )
+    }
+
+    confirmClear?.let { conv ->
+        id.nusachat.app.ui.components.NusaConfirmSheet(
+            title = "Hapus riwayat?",
+            text = "Semua pesan di \"${conv.displayTitle}\" hilang untukmu. Temanmu tetap melihatnya.",
+            confirmLabel = "Hapus",
+            danger = true,
+            onConfirm = { vm.clearHistoryById(conv); confirmClear = null },
+            onDismiss = { confirmClear = null },
+        )
     }
 
     if (showNewChat) {
@@ -216,17 +346,19 @@ private fun SearchField(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ConversationRow(
     conversation: Conversation,
     currentUserId: Long?,
     onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
 ) {
     val peerOnline = conversation.peer?.online == true
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 16.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -255,6 +387,15 @@ private fun ConversationRow(
                 .padding(start = 12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (conversation.pinned) {
+                    Icon(
+                        painter = painterResource(id = NusaIcons.Pin),
+                        contentDescription = "Disematkan",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
                 Text(
                     text = conversation.displayTitle,
                     modifier = Modifier.weight(1f),
@@ -263,6 +404,15 @@ private fun ConversationRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (conversation.muted) {
+                    Icon(
+                        painter = painterResource(id = NusaIcons.BellOff),
+                        contentDescription = "Dibisukan",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
                 Text(
                     text = formatListTime(conversation.lastMessageAt ?: conversation.lastMessage?.createdAt),
                     style = MaterialTheme.typography.labelSmall,
@@ -298,6 +448,7 @@ private fun conversationPreview(conversation: Conversation, currentUserId: Long?
         "audio" -> "[Pesan suara]"
         "location" -> "[Lokasi]"
         "file" -> "[File]"
+        "redpacket" -> "[Amplop merah]"
         else -> message.body.orEmpty()
     }
     // Jika body masih ciphertext base64 (gagal dekrip karena ganti HP/reinstall), jangan tampilkan raw base64

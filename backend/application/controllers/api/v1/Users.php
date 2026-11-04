@@ -24,6 +24,19 @@ class Users extends MY_Controller
         $user = $this->require_auth();
         $fields = [];
 
+        if ($this->param('username') !== null) {
+            $username = strtolower($this->str_param('username'));
+            if (!preg_match('/^[a-z0-9_.]{4,20}$/', $username)) {
+                $this->fail('Username must be 4-20 characters: letters, numbers, dot or underscore.', 422, 'invalid_username');
+            }
+            if (in_array($username, ['admin', 'administrator', 'support', 'system', 'nusachat', 'official'], true)) {
+                $this->fail('This username is reserved.', 422, 'invalid_username');
+            }
+            if ($username !== $user['username'] && $this->user_model->usernameExists($username)) {
+                $this->fail('Username is already taken.', 409, 'username_taken');
+            }
+            $fields['username'] = $username;
+        }
         if ($this->param('display_name') !== null) {
             $name = $this->str_param('display_name');
             if (mb_strlen($name) < 2 || mb_strlen($name) > 40) {

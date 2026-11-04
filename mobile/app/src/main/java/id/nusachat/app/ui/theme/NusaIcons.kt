@@ -75,4 +75,24 @@ object NusaIcons {
     @DrawableRes val Timer: Int = LucideR.drawable.lucide_ic_timer
     @DrawableRes val KeyRound: Int = LucideR.drawable.lucide_ic_key_round
     @DrawableRes val Megaphone: Int = LucideR.drawable.lucide_ic_megaphone
+    @DrawableRes val Star: Int = LucideR.drawable.lucide_ic_star
+    @DrawableRes val MissedCall: Int = LucideR.drawable.lucide_ic_phone_missed
+    @DrawableRes val CallIn: Int = LucideR.drawable.lucide_ic_phone_incoming
+    @DrawableRes val CallOut: Int = LucideR.drawable.lucide_ic_phone_outgoing
+    @DrawableRes val VideoOff: Int = LucideR.drawable.lucide_ic_video_off
+    @DrawableRes val SwitchCamera: Int = LucideR.drawable.lucide_ic_switch_camera
+    @DrawableRes val Palette: Int = LucideR.drawable.lucide_ic_palette
+    @DrawableRes val BellOff: Int = LucideR.drawable.lucide_ic_bell_off
+    @DrawableRes val Database: Int = LucideR.drawable.lucide_ic_database
+    @DrawableRes val Share: Int = LucideR.drawable.lucide_ic_share_2
+    @DrawableRes val Flag: Int = LucideR.drawable.lucide_ic_flag
+    @DrawableRes val Gift: Int = LucideR.drawable.lucide_ic_gift
+    @DrawableRes val Moon: Int = LucideR.drawable.lucide_ic_moon
+    @DrawableRes val Sun: Int = LucideR.drawable.lucide_ic_sun
+    @DrawableRes val Font: Int = LucideR.drawable.lucide_ic_type
+    @DrawableRes val PhoneDevice: Int = LucideR.drawable.lucide_ic_smartphone
+    @DrawableRes val History: Int = LucideR.drawable.lucide_ic_history
+    @DrawableRes val Qr: Int = LucideR.drawable.lucide_ic_qr_code
+    @DrawableRes val Scan: Int = LucideR.drawable.lucide_ic_scan
+    @DrawableRes val Hourglass: Int = LucideR.drawable.lucide_ic_hourglass
 }

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -50,41 +51,102 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import id.nusachat.app.data.PushDeepLink
 import id.nusachat.app.data.PushManager
 import id.nusachat.app.data.User
+import id.nusachat.app.data.SettingsStore
 import id.nusachat.app.ui.auth.AuthScreen
+import id.nusachat.app.ui.call.CallHistoryScreen
 import id.nusachat.app.ui.call.GroupCallScreen
 import id.nusachat.app.ui.call.IncomingCallScreen
+import id.nusachat.app.ui.call.VideoCallScreen
 import id.nusachat.app.ui.call.VoiceCallScreen
 import id.nusachat.app.ui.chats.ChatScreen
 import id.nusachat.app.ui.chats.ChatsScreen
+import id.nusachat.app.ui.chats.StarredScreen
 import id.nusachat.app.ui.moments.MomentsScreen
 import id.nusachat.app.ui.people.ContactsScreen
 import id.nusachat.app.ui.people.FriendRequestsScreen
+import id.nusachat.app.ui.people.QrScanScreen
 import id.nusachat.app.ui.people.NearbyScreen
 import id.nusachat.app.ui.profile.EditProfileScreen
 import id.nusachat.app.ui.profile.MeScreen
+import id.nusachat.app.ui.profile.SettingsScreen
 import id.nusachat.app.ui.theme.NusaChatTheme
 import kotlinx.coroutines.delay
 import androidx.compose.ui.platform.LocalContext
 
 private data class TabItem(val label: String, val icon: Int)
 
-private val tabs = listOf(
-    TabItem("Obrolan", NusaIcons.Chat),
-    TabItem("Kontak", NusaIcons.Contacts),
-    TabItem("Jelajah", NusaIcons.Explore),
-    TabItem("Saya", NusaIcons.Person),
-)
+@Composable
+private fun rememberTabs(): List<TabItem> {
+    val s = id.nusachat.app.ui.i18n.t()
+    return remember(s) {
+        listOf(
+            TabItem(s.tabChats, NusaIcons.Chat),
+            TabItem(s.tabContacts, NusaIcons.Contacts),
+            TabItem(s.tabDiscover, NusaIcons.Explore),
+            TabItem(s.tabMe, NusaIcons.Person),
+        )
+    }
+}
 
-private enum class Overlay { MOMENTS, NEARBY, FRIENDS, EDIT_PROFILE }
+private enum class Overlay { MOMENTS, NEARBY, FRIENDS, EDIT_PROFILE, HISTORY, STARRED, SETTINGS, SCAN }
 
 @Composable
 fun NusaChatApp(vm: AppViewModel = viewModel()) {
     val session by vm.sessionState.collectAsStateWithLifecycle()
-    NusaChatTheme {
-        when {
-            !session.checked -> SplashScreen()
-            session.user == null -> AuthScreen(vm)
-            else -> MainShell(vm, session.user!!)
+    val themeMode by vm.settings.themeMode.collectAsStateWithLifecycle()
+    val fontScale by vm.settings.fontScale.collectAsStateWithLifecycle()
+    val language by vm.settings.language.collectAsStateWithLifecycle()
+    val dark = when (themeMode) {
+        SettingsStore.THEME_DARK -> true
+        SettingsStore.THEME_LIGHT -> false
+        else -> androidx.compose.foundation.isSystemInDarkTheme()
+    }
+    NusaChatTheme(darkTheme = dark) {
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(
+                density = density.density,
+                fontScale = density.fontScale * fontScale,
+            ),
+            id.nusachat.app.ui.i18n.LocalStrings provides id.nusachat.app.ui.i18n.stringsFor(language),
+        ) {
+            when {
+                !session.checked -> SplashScreen()
+                session.user == null -> AuthScreen(vm)
+                else -> MainShell(vm, session.user!!)
+            }
+        }
+    }
+}
+
+/** Panel kanan kosong di mode dua-panel (tablet/landscape). */
+@Composable
+private fun ChatSplitPlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                painter = painterResource(id = NusaIcons.Chat),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier.size(64.dp),
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "Pilih obrolan",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Percakapan tampil di sini",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -135,7 +197,23 @@ private fun MainShell(vm: AppViewModel, user: User) {
     val snackbarHostState = remember { SnackbarHostState() }
     var tab by rememberSaveable { mutableStateOf(0) }
     var overlay by rememberSaveable { mutableStateOf<Overlay?>(null) }
+    var scanSeed by remember { mutableStateOf<String?>(null) }
+    // Tablet & landscape lebar: daftar + isi chat tampil berdampingan.
+    val wideTwoPane = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 840
+    val showChatSplit = wideTwoPane && tab == 0 && overlay == null
     val context = LocalContext.current
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) overlay = Overlay.SCAN
+    }
+    fun openScan() {
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) overlay = Overlay.SCAN
+        else cameraPermission.launch(Manifest.permission.CAMERA)
+    }
     val notifPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -149,10 +227,20 @@ private fun MainShell(vm: AppViewModel, user: User) {
     ) { granted ->
         if (granted) vm.answerVoiceCall()
     }
-    fun hasCallPermissions(): Boolean {
-        return androidx.core.content.ContextCompat.checkSelfPermission(
+    val answerVideoPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        if (result.values.all { it }) vm.answerVoiceCall()
+    }
+    fun hasCallPermissions(video: Boolean = false): Boolean {
+        val audio = androidx.core.content.ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!video) return audio
+        val camera = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        return audio && camera
     }
 
     LaunchedEffect(Unit) {
@@ -196,13 +284,28 @@ private fun MainShell(vm: AppViewModel, user: User) {
                 IncomingCallScreen(
                     state = call,
                     onAnswer = {
-                        if (hasCallPermissions()) {
+                        if (hasCallPermissions(call.video)) {
                             vm.answerVoiceCall()
+                        } else if (call.video) {
+                            answerVideoPermission.launch(
+                                arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
+                            )
                         } else {
                             answerPermission.launch(Manifest.permission.RECORD_AUDIO)
                         }
                     },
                     onReject = vm::rejectVoiceCall,
+                )
+            }
+            call.status in listOf("dialing", "active") && call.video -> {
+                BackHandler { /* block back during call, use end button */ }
+                VideoCallScreen(
+                    state = call,
+                    rtc = vm.rtcManager(),
+                    onToggleMute = vm::toggleCallMute,
+                    onToggleVideo = vm::toggleVideoMute,
+                    onSwitchCamera = vm::switchCallCamera,
+                    onEnd = vm::endVoiceCall,
                 )
             }
             call.status in listOf("dialing", "active") -> {
@@ -241,7 +344,7 @@ private fun MainShell(vm: AppViewModel, user: User) {
                     onToggleSpeaker = vm::toggleGroupSpeaker,
                 )
             }
-            chatState.conversation != null -> {
+            chatState.conversation != null && !showChatSplit -> {
                 BackHandler { vm.closeChat() }
                 ChatScreen(vm = vm, state = chatState, onBack = vm::closeChat)
             }
@@ -261,9 +364,50 @@ private fun MainShell(vm: AppViewModel, user: User) {
                 BackHandler { overlay = null }
                 EditProfileScreen(vm = vm, user = user, onBack = { overlay = null })
             }
+            overlay == Overlay.HISTORY -> {
+                BackHandler { overlay = null }
+                CallHistoryScreen(
+                    vm = vm,
+                    onBack = { overlay = null },
+                    onCallPeer = { peer ->
+                        overlay = null
+                        vm.startVoiceCall(peer)
+                    },
+                    onVideoPeer = { peer ->
+                        overlay = null
+                        vm.startVideoCall(peer)
+                    },
+                )
+            }
+            overlay == Overlay.STARRED -> {
+                BackHandler { overlay = null }
+                StarredScreen(
+                    vm = vm,
+                    onBack = { overlay = null },
+                    onOpenChat = { id ->
+                        overlay = null
+                        vm.openChatById(id)
+                    },
+                )
+            }
+            overlay == Overlay.SETTINGS -> {
+                BackHandler { overlay = null }
+                SettingsScreen(vm = vm, onBack = { overlay = null })
+            }
+            overlay == Overlay.SCAN -> {
+                QrScanScreen(
+                    onScanned = { raw ->
+                        overlay = null
+                        tab = 1
+                        scanSeed = raw
+                    },
+                    onBack = { overlay = null },
+                )
+            }
             else -> {
                 val unread = conversations.sumOf { it.unreadCount }
                 val incoming = requests.incoming.size
+                val tabs = rememberTabs()
                 Scaffold(
                     containerColor = MaterialTheme.colorScheme.background,
                     bottomBar = {
@@ -306,12 +450,52 @@ private fun MainShell(vm: AppViewModel, user: User) {
                             .padding(padding)
                     ) {
                         when (tab) {
-                            0 -> ChatsScreen(vm = vm, onOpenChat = vm::openChat)
+                            0 -> if (showChatSplit) {
+                                if (chatState.conversation != null) {
+                                    BackHandler { vm.closeChat() }
+                                }
+                                androidx.compose.foundation.layout.Row(
+                                    modifier = Modifier.fillMaxSize()
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(360.dp)
+                                            .fillMaxSize()
+                                    ) {
+                                        ChatsScreen(
+                                            vm = vm,
+                                            onOpenChat = vm::openChat,
+                                            onShowHistory = { overlay = Overlay.HISTORY },
+                                            onShowStarred = { overlay = Overlay.STARRED },
+                                        )
+                                    }
+                                    androidx.compose.material3.VerticalDivider(
+                                        color = MaterialTheme.colorScheme.outlineVariant,
+                                    )
+                                    Box(modifier = Modifier.weight(1f).fillMaxSize()) {
+                                        if (chatState.conversation != null) {
+                                            ChatScreen(vm = vm, state = chatState, onBack = vm::closeChat)
+                                        } else {
+                                            ChatSplitPlaceholder()
+                                        }
+                                    }
+                                }
+                            } else {
+                                ChatsScreen(
+                                    vm = vm,
+                                    onOpenChat = vm::openChat,
+                                    onShowHistory = { overlay = Overlay.HISTORY },
+                                    onShowStarred = { overlay = Overlay.STARRED },
+                                )
+                            }
                             1 -> ContactsScreen(
                                 vm = vm,
                                 onOpenFriends = { overlay = Overlay.FRIENDS },
                                 onOpenChatWith = vm::openChatWith,
                                 onOpenProfile = { tab = 3 },
+                                onScanQr = { openScan() },
+                                scanSeed = scanSeed,
+                                onScanConsumed = { scanSeed = null },
                             )
                             2 -> DiscoverScreen(
                                 vm = vm,
@@ -322,6 +506,7 @@ private fun MainShell(vm: AppViewModel, user: User) {
                                 vm = vm,
                                 user = user,
                                 onEditProfile = { overlay = Overlay.EDIT_PROFILE },
+                                onOpenSettings = { overlay = Overlay.SETTINGS },
                             )
                         }
                     }

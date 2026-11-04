@@ -4,7 +4,14 @@ import id.nusachat.app.ui.components.NusaIconButton
 import id.nusachat.app.ui.components.NusaFilledIconButton
 import id.nusachat.app.ui.components.NusaTopAppBar
 import id.nusachat.app.ui.components.NusaBottomSheet
+import id.nusachat.app.ui.components.NusaButton
 import id.nusachat.app.ui.components.NusaProgress
+import id.nusachat.app.ui.components.GifPickerSheet
+import id.nusachat.app.ui.components.PinSheet
+import id.nusachat.app.ui.components.RedPacketCreateSheet
+import id.nusachat.app.ui.components.RedPacketSheet
+import id.nusachat.app.ui.components.ReportSheet
+import id.nusachat.app.ui.components.StickerPickerSheet
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.res.painterResource
@@ -35,6 +42,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import android.Manifest
@@ -119,7 +127,22 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var highlightedId by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Long?>(null) }
-    var draft by rememberSaveable(conversation.id) { mutableStateOf("") }
+    var draft by rememberSaveable(conversation.id) { mutableStateOf(vm.settings.draftFor(conversation.id)) }
+    val selected by vm.selectedMessages.collectAsStateWithLifecycle()
+    val selectionMode = selected.isNotEmpty()
+    var showStickers by remember { mutableStateOf(false) }
+    var showGif by remember { mutableStateOf(false) }
+    val gifResults by vm.gifResults.collectAsStateWithLifecycle()
+    val gifLoading by vm.gifLoading.collectAsStateWithLifecycle()
+    var showRedPacketCreate by remember { mutableStateOf(false) }
+    val openPacket by vm.redPacket.collectAsStateWithLifecycle()
+    val packetLoading by vm.redPacketLoading.collectAsStateWithLifecycle()
+    val walletBalance by vm.walletBalance.collectAsStateWithLifecycle()
+    val walletHasPin by vm.walletHasPin.collectAsStateWithLifecycle()
+    var reportMsg by remember { mutableStateOf<Message?>(null) }
+    var showMultiForward by remember { mutableStateOf(false) }
+    var pinPrompt by remember { mutableStateOf(false) }
+    var pendingPacket by remember { mutableStateOf<Triple<Long, Int, String>?>(null) }
     var showInfo by remember { mutableStateOf(false) }
     var showAddMembers by remember { mutableStateOf(false) }
     var messageMenu by remember { mutableStateOf<Message?>(null) }
@@ -174,6 +197,16 @@ fun ChatScreen(
     }
     val groupCallPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) vm.startGroupCall(effectiveConversation.id)
+    }
+    var pendingVideoPeer by remember { mutableStateOf<User?>(null) }
+    val videoPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        if (result.values.all { it }) {
+            val peer = pendingVideoPeer
+                ?: effectiveConversation.peer
+                ?: effectiveConversation.members.firstOrNull { it.id != me?.id }
+            if (peer != null) vm.startVideoCall(peer)
+        }
+        pendingVideoPeer = null
     }
     // Backend canonical (kolom di Conversation) adalah sumber kebenaran untuk izin grup
     val canSendInGroup = when {
@@ -244,6 +277,17 @@ fun ChatScreen(
         lastSeenId = latestId
         if (!initialSnapDone) {
             initialSnapDone = true
+            // Lompat ke pesan belum dibaca pertama bila ada (dan termuat).
+            val unread = state.initialUnread
+            if (unread > 0 && unread < state.messages.size) {
+                val target = state.messages[state.messages.size - unread]
+                val prefix = if (state.hasMore) 2 else 1
+                val idx = rows.indexOfFirst { it is ChatRow.Msg && it.message.id == target.id }
+                if (idx != -1) {
+                    runCatching { listState.scrollToItem(prefix + idx) }
+                    return@LaunchedEffect
+                }
+            }
             snapToBottom()
             return@LaunchedEffect
         }
@@ -263,12 +307,15 @@ fun ChatScreen(
     }
 
     // Pill "Pesan baru" ikut hilang saat user scroll manual sampai bawah.
+    var atBottom by remember(conversation.id) { mutableStateOf(true) }
     androidx.compose.runtime.LaunchedEffect(listState) {
         androidx.compose.runtime.snapshotFlow {
             val info = listState.layoutInfo
             info.totalItemsCount to (info.visibleItemsInfo.lastOrNull()?.index ?: -1)
         }.collect { (total, last) ->
-            if (total > 0 && last >= total - 2) hasNewBelow = false
+            val bottom = total > 0 && last >= total - 2
+            atBottom = bottom
+            if (bottom) hasNewBelow = false
         }
     }
 
@@ -320,14 +367,14 @@ fun ChatScreen(
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = effectiveConversation.displayTitle,
+                                text = if (selectionMode) "${selected.size} dipilih" else effectiveConversation.displayTitle,
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
-                                text = chatSubtitle(state, effectiveConversation, me?.id),
+                                text = if (selectionMode) "Pilih aksi di atas" else chatSubtitle(state, effectiveConversation, me?.id),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
@@ -336,23 +383,48 @@ fun ChatScreen(
                     }
                 },
                 actions = {
-                    NusaIconButton(onClick = {
-                        showSearch = !showSearch
-                        if (!showSearch) {
-                            searchText = ""
-                            vm.clearChatSearch()
+                    if (selectionMode) {
+                        NusaIconButton(onClick = { showMultiForward = true }) {
+                            Icon(painter = painterResource(id = NusaIcons.Forward), contentDescription = "Teruskan pilihan")
                         }
-                    }) {
-                        Icon(painter = painterResource(id = NusaIcons.Search), contentDescription = "Cari pesan")
-                    }
-                    if (!effectiveConversation.isGroup) {
-                        NusaIconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }) {
-                            Icon(painter = painterResource(id = NusaIcons.Call), contentDescription = "Panggilan suara")
+                        NusaIconButton(onClick = { vm.starSelected() }) {
+                            Icon(painter = painterResource(id = NusaIcons.Star), contentDescription = "Bintangi pilihan")
                         }
-                    }
-                    // Langsung ke info kontak/grup ala LINE & WhatsApp — tanpa menu lagi.
-                    NusaIconButton(onClick = { showInfo = true }) {
-                        Icon(painter = painterResource(id = NusaIcons.More), contentDescription = "Info percakapan")
+                        NusaIconButton(onClick = { vm.deleteSelectedForMe() }) {
+                            Icon(painter = painterResource(id = NusaIcons.Delete), contentDescription = "Hapus pilihan untuk saya")
+                        }
+                        NusaIconButton(onClick = { vm.clearSelection() }) {
+                            Icon(painter = painterResource(id = NusaIcons.Close), contentDescription = "Batalkan pilihan")
+                        }
+                    } else {
+                        NusaIconButton(onClick = {
+                            showSearch = !showSearch
+                            if (!showSearch) {
+                                searchText = ""
+                                vm.clearChatSearch()
+                            }
+                        }) {
+                            Icon(painter = painterResource(id = NusaIcons.Search), contentDescription = "Cari pesan")
+                        }
+                        if (!effectiveConversation.isGroup) {
+                            NusaIconButton(onClick = {
+                                videoPermission.launch(
+                                    arrayOf(
+                                        Manifest.permission.RECORD_AUDIO,
+                                        Manifest.permission.CAMERA,
+                                    )
+                                )
+                            }) {
+                                Icon(painter = painterResource(id = NusaIcons.Video), contentDescription = "Panggilan video")
+                            }
+                            NusaIconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }) {
+                                Icon(painter = painterResource(id = NusaIcons.Call), contentDescription = "Panggilan suara")
+                            }
+                        }
+                        // Langsung ke info kontak/grup ala LINE & WhatsApp — tanpa menu lagi.
+                        NusaIconButton(onClick = { showInfo = true }) {
+                            Icon(painter = painterResource(id = NusaIcons.More), contentDescription = "Info percakapan")
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -424,6 +496,31 @@ fun ChatScreen(
                                 Icon(painter = painterResource(id = NusaIcons.Close), contentDescription = "Batalkan edit")
                             }
                         }
+                    }
+                }
+                // Saran @mention saat mengetik @nama di akhir draf (mode kirim saja;
+                // edit pesan tidak menghitung ulang mention di server).
+                val mentionQuery = remember(draft) { trailingMentionQuery(draft) }
+                if (mentionQuery != null && isDirectFriend && canSendInGroup && state.editing == null) {
+                    val candidates = remember(mentionQuery, effectiveConversation.members, me?.id) {
+                        mentionCandidates(
+                            effectiveConversation.members,
+                            mentionQuery,
+                            me?.id ?: 0L,
+                            effectiveConversation.isGroup,
+                        )
+                    }
+                    if (candidates.isNotEmpty()) {
+                        MentionSuggestBox(
+                            candidates = candidates,
+                            onPick = { username ->
+                                val at = draft.lastIndexOf('@')
+                                val next = (if (at >= 0) draft.substring(0, at) else draft) + "@$username "
+                                draft = next
+                                vm.settings.saveDraft(conversation.id, next)
+                                if (next.isNotEmpty()) vm.notifyTyping()
+                            },
+                        )
                     }
                 }
                 if (!isDirectFriend) {
@@ -500,10 +597,17 @@ fun ChatScreen(
                         draft = draft,
                         onDraftChange = {
                             draft = it
+                            vm.settings.saveDraft(conversation.id, it)
                             if (it.isNotEmpty()) vm.notifyTyping()
                         },
                         sendingImage = state.sendingImage || state.sendingFile,
                         onPickImage = { showAttachMenu = true },
+                        onSticker = { showStickers = true },
+                        onGif = {
+                            showGif = true
+                            vm.loadTrendingGifs()
+                        },
+                        onVoice = { uri -> vm.sendVoiceFile(uri) },
                         onSend = {
                             if (draft.isNotBlank()) {
                                 if (state.editing != null) {
@@ -512,6 +616,7 @@ fun ChatScreen(
                                     vm.sendMessage(draft)
                                 }
                                 draft = ""
+                                vm.settings.clearDraft(conversation.id)
                             }
                         },
                     )
@@ -714,10 +819,20 @@ fun ChatScreen(
                             message = message,
                             quoted = quoted,
                             mine = message.sender?.id == me?.id,
+                            myId = me?.id ?: 0L,
                             isGroup = effectiveConversation.isGroup,
                             compactTop = samePrev,
                             compactBottom = sameNext,
-                            onLongPress = { messageMenu = message },
+                            onLongPress = {
+                                if (selectionMode) vm.toggleSelectMessage(message.id)
+                                else messageMenu = message
+                            },
+                            onBubbleClick = {
+                                if (selectionMode && message.id > 0) vm.toggleSelectMessage(message.id)
+                            },
+                            selected = message.id in selected,
+                            selectionMode = selectionMode,
+                            onPacketClick = { vm.loadRedPacket(it) },
                             onRetry = { vm.retryMessage(message.clientId.orEmpty()) },
                             menuOpen = messageMenu?.let { it.id == message.id && it.clientId == message.clientId } == true,
                             onDismissMenu = dismissMenu,
@@ -733,6 +848,18 @@ fun ChatScreen(
                             pinned = state.pins.any { it.message.id == message.id },
                             onRevoke = { vm.revokeMessage(it); dismissMenu() },
                             onShowInfo = { infoMessage = it; dismissMenu() },
+                            onStar = { vm.starMessage(it); dismissMenu() },
+                            onSelect = { vm.toggleSelectMessage(it.id); dismissMenu() },
+                            onHide = { vm.hideMessage(it); dismissMenu() },
+                            onReport = { reportMsg = it; dismissMenu() },
+                            onSave = { msg ->
+                                msg.attachmentUrl?.let { vm.downloadMedia(it, null) }
+                                dismissMenu()
+                            },
+                            onShare = { msg ->
+                                vm.shareText(msg.body.orEmpty())
+                                dismissMenu()
+                            },
                             audioPlayingKey = audioPlayingKey,
                             onAudioToggle = { key ->
                                 audioPlayingKey = if (audioPlayingKey == key) null else key
@@ -784,6 +911,28 @@ fun ChatScreen(
                                 modifier = Modifier.size(28.dp),
                             )
                         }
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(12.dp),
+                        ) {
+                            NusaIconButton(onClick = { vm.downloadMedia(url, null) }) {
+                                Icon(
+                                    painter = painterResource(id = NusaIcons.Download),
+                                    contentDescription = "Simpan",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(24.dp),
+                                )
+                            }
+                            NusaIconButton(onClick = { vm.shareText(url, "Bagikan foto") }) {
+                                Icon(
+                                    painter = painterResource(id = NusaIcons.Share),
+                                    contentDescription = "Bagikan",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(24.dp),
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -797,6 +946,21 @@ fun ChatScreen(
                             interactionSource = remember { MutableInteractionSource() },
                         ) { dismissMenu() },
                 )
+            }
+            if (!atBottom && !hasNewBelow && state.messages.isNotEmpty()) {
+                NusaFilledIconButton(
+                    onClick = { scope.launch { snapToBottom() } },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 12.dp, bottom = 10.dp)
+                        .size(44.dp),
+                ) {
+                    Icon(
+                        painter = painterResource(id = NusaIcons.Down),
+                        contentDescription = "Ke pesan terbaru",
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
             }
             if (hasNewBelow && state.messages.isNotEmpty()) {
                 Surface(
@@ -886,6 +1050,124 @@ fun ChatScreen(
         }
     }
 
+    if (showStickers) {
+        StickerPickerSheet(
+            onPick = { emoji ->
+                showStickers = false
+                vm.sendSticker(emoji)
+            },
+            onDismiss = { showStickers = false },
+        )
+    }
+
+    if (showGif) {
+        GifPickerSheet(
+            results = gifResults,
+            loading = gifLoading,
+            hasKey = id.nusachat.app.data.GifClient.hasKey,
+            onSearch = { vm.searchGifs(it) },
+            onPick = { gif ->
+                showGif = false
+                vm.sendGif(gif.fullUrl)
+            },
+            onManualUrl = { url ->
+                showGif = false
+                vm.sendGif(url)
+            },
+            onDismiss = { showGif = false; vm.clearGifs() },
+        )
+    }
+
+    if (showMultiForward) {
+        NusaBottomSheet(onDismissRequest = { showMultiForward = false }) {
+            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                Text(
+                    text = "Teruskan ${selected.size} pesan ke...",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    items(conversations.filter { it.id != conversation.id }, key = { it.id }) { conv ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    vm.forwardSelected(conv.id) { showMultiForward = false }
+                                }
+                                .padding(horizontal = 20.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            NusaAvatar(name = conv.displayTitle, url = conv.avatarUrl, size = 40.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                text = conv.displayTitle,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showRedPacketCreate) {
+        RedPacketCreateSheet(
+            balance = walletBalance,
+            memberCount = effectiveConversation.members.size.takeIf { it > 0 }
+                ?: effectiveConversation.memberCount.takeIf { it > 0 } ?: 2,
+            hasPin = walletHasPin,
+            onSubmit = { total, count, note, pin ->
+                showRedPacketCreate = false
+                pendingPacket = Triple(total, count, note)
+                vm.createRedPacket(total, count, note, pin.ifBlank { null }, onPinRequired = { pinPrompt = true })
+            },
+            onDismiss = { showRedPacketCreate = false },
+        )
+    }
+
+    if (pinPrompt) {
+        PinSheet(
+            title = "PIN dompet",
+            subtitle = "Pengeluaran koin dilindungi PIN.",
+            confirmLabel = "Kirim",
+            onSubmit = { pin, _ ->
+                pinPrompt = false
+                pendingPacket?.let { (total, count, note) ->
+                    vm.createRedPacket(
+                        total, count, note, pin,
+                        onPinRequired = { pinPrompt = true },
+                        onDone = { pendingPacket = null },
+                    )
+                }
+            },
+            onDismiss = { pinPrompt = false; pendingPacket = null },
+        )
+    }
+
+    openPacket?.let { packet ->
+        RedPacketSheet(
+            packet = packet,
+            myId = me?.id ?: 0L,
+            loading = packetLoading,
+            onClaim = { vm.claimRedPacket(packet.id) },
+            onDismiss = { vm.clearRedPacket() },
+        )
+    }
+
+    reportMsg?.let { msg ->
+        ReportSheet(
+            onSubmit = { reason, details ->
+                vm.createReport("message", msg.id, reason, details)
+                reportMsg = null
+            },
+            onDismiss = { reportMsg = null },
+        )
+    }
+
     if (showAttachMenu) {
         NusaActionSheet(
             title = "Kirim lampiran",
@@ -923,6 +1205,11 @@ fun ChatScreen(
                         )
                     )
                 },
+                SheetAction("Amplop merah", NusaIcons.Gift) {
+                    showAttachMenu = false
+                    vm.loadWalletFull()
+                    showRedPacketCreate = true
+                },
             ),
             onDismiss = { showAttachMenu = false },
         )
@@ -938,8 +1225,19 @@ fun ChatScreen(
         )
     }
 
+    val readsUsers by vm.readsUsers.collectAsStateWithLifecycle()
+    val readsLoading by vm.readsLoading.collectAsStateWithLifecycle()
+    LaunchedEffect(infoMessage?.id, infoMessage?.clientId) {
+        infoMessage?.let { vm.loadMessageReads(conversation.id, it) }
+    }
+
     infoMessage?.let { info ->
-        MessageInfoDialog(message = info, onDismiss = { infoMessage = null })
+        MessageInfoDialog(
+            message = info,
+            readers = readsUsers,
+            readersLoading = readsLoading,
+            onDismiss = { infoMessage = null; vm.clearMessageReads() },
+        )
     }
 
     if (showE2eeInfo) {
@@ -1175,18 +1473,187 @@ private fun chatSubtitle(state: ChatUiState, conversation: Conversation, myId: L
     }
 }
 
+/** Query @mention di akhir draf: "@" diawali spasi/awal teks + 0-20 char kata. Null = tidak aktif. */
+private fun trailingMentionQuery(draft: String): String? {
+    val match = Regex("""(?:^|\s)@([A-Za-z0-9._]{0,20})$""").find(draft) ?: return null
+    return match.groupValues[1]
+}
+
+/**
+ * Kandidat mention: anggota (kecuali saya) yang username/nama cocok query,
+ * ditambah "semua" di grup. Id -1 = pseudo @semua, bukan user beneran.
+ */
+private fun mentionCandidates(
+    members: List<User>,
+    query: String,
+    myId: Long,
+    isGroup: Boolean,
+): List<User> {
+    val q = query.lowercase()
+    val matched = members
+        .filter { it.id != myId }
+        .filter {
+            q.isBlank() ||
+                it.username.contains(q, ignoreCase = true) ||
+                it.displayName.contains(q, ignoreCase = true)
+        }
+        .sortedWith(
+            compareBy(
+                { !it.username.startsWith(q, ignoreCase = true) },
+                { it.displayName.lowercase() },
+            )
+        )
+        .take(5)
+    val out = matched.toMutableList()
+    if (isGroup && (q.isBlank() || "semua".contains(q) || "all".contains(q))) {
+        out.add(0, User(id = -1L, username = "semua", displayName = "Semua anggota"))
+    }
+    return out.take(6)
+}
+
+/** Kotak saran @mention di atas kolom input — ketuk untuk sisipkan @username. */
+@Composable
+private fun MentionSuggestBox(
+    candidates: List<User>,
+    onPick: (String) -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shadowElevation = 8.dp,
+        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 248.dp),
+        ) {
+            items(candidates, key = { it.id }) { user ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(user.username) }
+                        .padding(horizontal = 16.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (user.id == -1L) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                painter = painterResource(id = NusaIcons.AtSign),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    } else {
+                        id.nusachat.app.ui.components.NusaAvatar(
+                            name = user.displayName,
+                            url = user.avatarUrl,
+                            gender = user.gender,
+                            seed = user.id,
+                            size = 36.dp,
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = user.displayName,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "@${user.username}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ChatInputBar(
     draft: String,
     onDraftChange: (String) -> Unit,
     sendingImage: Boolean,
     onPickImage: () -> Unit,
+    onSticker: () -> Unit = {},
+    onGif: () -> Unit = {},
+    onVoice: (android.net.Uri) -> Unit = {},
     onSend: () -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val recorder = remember { id.nusachat.app.data.VoiceRecorder(context) }
+    var recording by remember { mutableStateOf(false) }
+    var seconds by remember { mutableStateOf(0) }
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted && recorder.start()) {
+            recording = true
+            seconds = 0
+        }
+    }
+    androidx.compose.runtime.LaunchedEffect(recording) {
+        while (recording) {
+            delay(1000)
+            seconds++
+            if (seconds >= 300) {
+                recorder.stop()?.let { file ->
+                    recorder.outputUri()?.let(onVoice)
+                }
+                recording = false
+            }
+        }
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { recorder.cancel() }
+    }
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shadowElevation = 6.dp,
     ) {
+        if (recording) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .background(MaterialTheme.colorScheme.error, RoundedCornerShape(50)),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = String.format("%d:%02d", seconds / 60, seconds % 60),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                NusaTextButton(onClick = { recorder.cancel(); recording = false }) { Text("Batal") }
+                NusaButton(
+                    onClick = {
+                        recorder.stop()
+                        recorder.outputUri()?.let(onVoice)
+                        recording = false
+                    },
+                    modifier = Modifier.height(40.dp),
+                ) {
+                    Text("Kirim", fontWeight = FontWeight.Bold)
+                }
+            }
+            return@Surface
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1204,11 +1671,28 @@ private fun ChatInputBar(
                 } else {
                     Icon(
                         painter = painterResource(id = NusaIcons.AddCircle),
-                        contentDescription = "Kirim foto",
+                        contentDescription = "Kirim lampiran",
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(27.dp),
                     )
                 }
+            }
+            NusaIconButton(onClick = onSticker, enabled = !sendingImage) {
+                Text(text = "😊", fontSize = 22.sp)
+            }
+            NusaTextButton(onClick = onGif, enabled = !sendingImage) {
+                Text(
+                    text = "GIF",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .background(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                            RoundedCornerShape(6.dp),
+                        )
+                        .padding(horizontal = 7.dp, vertical = 4.dp),
+                )
             }
             Surface(
                 modifier = Modifier.weight(1f),
@@ -1245,16 +1729,43 @@ private fun ChatInputBar(
                 )
             }
             Spacer(Modifier.width(6.dp))
-            NusaFilledIconButton(
-                onClick = onSend,
-                enabled = draft.isNotBlank(),
-                modifier = Modifier.size(44.dp),
-            ) {
-                Icon(
-                    painter = painterResource(id = NusaIcons.Send),
-                    contentDescription = "Kirim",
-                    modifier = Modifier.size(20.dp),
-                )
+            if (draft.isBlank()) {
+                NusaIconButton(
+                    onClick = {
+                        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                                context, android.Manifest.permission.RECORD_AUDIO,
+                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        ) {
+                            if (recorder.start()) {
+                                recording = true
+                                seconds = 0
+                            }
+                        } else {
+                            micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
+                    enabled = !sendingImage,
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    Icon(
+                        painter = painterResource(id = NusaIcons.Mic),
+                        contentDescription = "Rekam pesan suara",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+            } else {
+                NusaFilledIconButton(
+                    onClick = onSend,
+                    enabled = draft.isNotBlank(),
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    Icon(
+                        painter = painterResource(id = NusaIcons.Send),
+                        contentDescription = "Kirim",
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
             }
         }
     }

@@ -114,4 +114,74 @@ class Messages extends MY_Controller
         );
         $this->ok(['action' => $action, 'reactions' => $summary]);
     }
+
+    public function star(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['message_id']);
+
+        $messageId = $this->int_param('message_id');
+        $message = $this->message_model->find($messageId);
+        if (!$message || $message['revoked_at'] !== null) {
+            $this->fail('Message not found.', 404, 'not_found');
+        }
+        if (!$this->conversation_model->isMember((int) $message['conversation_id'], (int) $user['id'])) {
+            $this->fail('Conversation not found.', 404, 'not_found');
+        }
+        $this->message_model->star((int) $message['conversation_id'], $messageId, (int) $user['id']);
+        $this->ok(['starred' => true], 201);
+    }
+
+    public function unstar(): void
+    {
+        $this->require_method(['POST', 'DELETE']);
+        $user = $this->require_auth();
+        $this->require_fields(['message_id']);
+        $this->message_model->unstar($this->int_param('message_id'), (int) $user['id']);
+        $this->ok(['starred' => false]);
+    }
+
+    public function starred(): void
+    {
+        $this->require_method(['GET']);
+        $user = $this->require_auth();
+        $limit = $this->int_param('limit', 50);
+        $rows = $this->message_model->withExtras(
+            $this->message_model->starred((int) $user['id'], $limit),
+            (int) $user['id']
+        );
+        $this->ok(['messages' => array_map(
+            static function (array $row): array {
+                $dto = message_dto($row);
+                $dto['starred_at'] = $row['starred_at'] ?? null;
+                $dto['conversation_title'] = $row['conversation_title'] ?? null;
+                $dto['conversation_type'] = $row['conversation_type'] ?? null;
+                return $dto;
+            },
+            $rows
+        )]);
+    }
+
+    /**
+     * Hapus untuk saya: pesan hilang dari perangkatku, tetap ada untuk lain.
+     */
+    public function hide(): void
+    {
+        $this->require_method(['POST', 'DELETE']);
+        $user = $this->require_auth();
+        $this->require_fields(['message_id']);
+
+        $messageId = $this->int_param('message_id');
+        $message = $this->message_model->find($messageId);
+        if (!$message) {
+            $this->fail('Message not found.', 404, 'not_found');
+        }
+        if (!$this->conversation_model->isMember((int) $message['conversation_id'], (int) $user['id'])) {
+            $this->fail('Conversation not found.', 404, 'not_found');
+        }
+        $this->message_model->hide($messageId, (int) $user['id']);
+        $this->message_model->unstar($messageId, (int) $user['id']);
+        $this->ok(['hidden' => true]);
+    }
 }

@@ -63,7 +63,11 @@ fun MomentCommentsScreen(
     loading: Boolean,
     onBack: () -> Unit,
     onSend: (String, Long?) -> Unit,
+    myId: Long = 0L,
+    onDelete: (MomentComment) -> Unit = {},
+    onToggleLike: (MomentComment) -> Unit = {},
 ) {
+    val isAuthor = moment.author.id == myId
     var draft by remember { mutableStateOf("") }
     var replyTo by remember { mutableStateOf<MomentComment?>(null) }
 
@@ -167,7 +171,10 @@ fun MomentCommentsScreen(
                     items(comments, key = { it.id }) { c ->
                         CommentRow(
                             comment = c,
+                            canDelete = c.user.id == myId || isAuthor,
                             onReply = { replyTo = c },
+                            onDelete = { onDelete(c) },
+                            onToggleLike = { onToggleLike(c) },
                         )
                     }
                 }
@@ -258,7 +265,14 @@ fun MomentCommentsScreen(
 }
 
 @Composable
-private fun CommentRow(comment: MomentComment, onReply: () -> Unit) {
+private fun CommentRow(
+    comment: MomentComment,
+    onReply: () -> Unit,
+    canDelete: Boolean = false,
+    onDelete: () -> Unit = {},
+    onToggleLike: () -> Unit = {},
+) {
+    var confirm by remember { mutableStateOf(false) }
     val isReply = comment.parentId != null
     Row(
         modifier = Modifier
@@ -322,16 +336,63 @@ private fun CommentRow(comment: MomentComment, onReply: () -> Unit) {
                 )
             }
             Spacer(Modifier.height(4.dp))
-            Text(
-                "Balas",
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable(onClick = onReply)
-                    .padding(horizontal = 6.dp, vertical = 3.dp),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Balas",
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onReply)
+                        .padding(horizontal = 6.dp, vertical = 3.dp),
+                )
+                if (canDelete) {
+                    Text(
+                        "Hapus",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { confirm = true }
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                    )
+                }
+                Spacer(Modifier.width(2.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onToggleLike)
+                        .padding(horizontal = 6.dp, vertical = 3.dp),
+                ) {
+                    Icon(
+                        painter = painterResource(id = NusaIcons.Like),
+                        contentDescription = "Suka",
+                        tint = if (comment.likedByMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(13.dp),
+                    )
+                    if (comment.likeCount > 0) {
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "${comment.likeCount}",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                            color = if (comment.likedByMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
         }
+    }
+    if (confirm) {
+        id.nusachat.app.ui.components.NusaConfirmSheet(
+            title = "Hapus komentar?",
+            text = "Komentar dan balasannya ikut terhapus.",
+            confirmLabel = "Hapus",
+            danger = true,
+            onConfirm = { confirm = false; onDelete() },
+            onDismiss = { confirm = false },
+        )
     }
 }

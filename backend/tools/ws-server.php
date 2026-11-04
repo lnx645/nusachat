@@ -68,6 +68,11 @@ $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 
 $secret = (string) ws_env($env, 'APP_SECRET', 'dev-secret-change-me');
+$envName = strtolower((string) ws_env($env, 'APP_ENV', 'development'));
+if ($envName === 'production' && (strlen($secret) < 32 || str_starts_with($secret, 'dev-secret'))) {
+    fwrite(STDERR, "Refusing to start: APP_SECRET is still the dev default. Set a random 32+ byte secret.\n");
+    exit(1);
+}
 $bind = (string) ws_env($env, 'WS_BIND', 'tcp://0.0.0.0:8090');
 $server = @stream_socket_server($bind, $errno, $errstr);
 if (!$server) {

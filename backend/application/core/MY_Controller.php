@@ -19,6 +19,7 @@ class MY_Controller extends CI_Controller
 
         $this->config->load('app');
         $this->app = $this->config->item('app');
+        $this->assert_secret();
         $this->load->library('store');
         $this->load->helper('api');
 
@@ -41,12 +42,40 @@ class MY_Controller extends CI_Controller
 
     protected function send_cors(): void
     {
-        $origin = getenv('CORS_ORIGINS') ?: '*';
-        header('Access-Control-Allow-Origin: ' . $origin);
+        $allowed = $this->app['cors_origins'] ?? ['*'];
+        $requestOrigin = trim((string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
+        if (in_array('*', $allowed, true)) {
+            // Dev default. Jangan pakai '*' di produksi (lihat .env.example).
+            header('Access-Control-Allow-Origin: *');
+        } elseif ($requestOrigin !== '' && in_array($requestOrigin, $allowed, true)) {
+            header('Access-Control-Allow-Origin: ' . $requestOrigin);
+            header('Vary: Origin');
+        } else {
+            // Origin tidak dikenal: tanpa header ACAO, browser memblokir.
+            // Request non-browser (curl, Android) tetap jalan.
+            header('Vary: Origin');
+        }
         header('Access-Control-Allow-Methods: GET, POST, PATCH, PUT, DELETE, OPTIONS');
         header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With');
         header('Access-Control-Max-Age: 86400');
         header('X-Content-Type-Options: nosniff');
+    }
+
+    /**
+     * Fail-closed bila secret dev dipakai di production: menolak boot
+     * daripada menandatangani JWT dengan kunci publik.
+     */
+    protected function assert_secret(): void
+    {
+        $env = (string) ($this->app['env'] ?? 'production');
+        $secret = (string) ($this->app['secret'] ?? '');
+        $weak = ['dev-secret-change-me', 'dev-secret-change-me-please-32-bytes-min', 'changeme', ''];
+        if ($env === 'production' && (strlen($secret) < 32 || in_array($secret, $weak, true))) {
+            http_response_code(500);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'error' => ['code' => 'misconfigured', 'message' => 'Server misconfigured.']]);
+            exit;
+        }
     }
 
     protected function json(array $body, int $status = 200): never

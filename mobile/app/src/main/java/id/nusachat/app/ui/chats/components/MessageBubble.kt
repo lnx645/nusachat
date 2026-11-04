@@ -49,9 +49,12 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -67,6 +70,9 @@ import id.nusachat.app.ui.theme.NusaIcons
  * "Pesan ini telah ditarik" — isi aslinya tidak pernah bocor. Tipe media
  * memakai label Indonesia, bukan kode mentah seperti [img].
  */
+/** Pola sorot @mention di bubble — cermin pola server (extractMentions). */
+private val MentionSpanRegex = Regex("@((?:semua|all)\\b|[A-Za-z0-9._]{4,20})", RegexOption.IGNORE_CASE)
+
 fun messagePreviewText(message: Message, maxLen: Int = 80): String {
     if (message.revoked) return "Pesan ini telah ditarik"
     message.body?.take(maxLen)?.takeIf { it.isNotBlank() }?.let { return it }
@@ -76,6 +82,7 @@ fun messagePreviewText(message: Message, maxLen: Int = 80): String {
         "audio" -> "[Pesan suara]"
         "location" -> "[Lokasi]"
         "file" -> "[File]"
+        "redpacket" -> "[Amplop merah]"
         else -> "[Pesan]"
     }
 }
@@ -109,16 +116,57 @@ fun MessageBubble(
     pinned: Boolean = false,
     onRevoke: (Message) -> Unit = {},
     onShowInfo: (Message) -> Unit = {},
+    onStar: (Message) -> Unit = {},
+    onSelect: (Message) -> Unit = {},
+    onHide: (Message) -> Unit = {},
+    onReport: (Message) -> Unit = {},
+    onSave: (Message) -> Unit = {},
+    onShare: (Message) -> Unit = {},
     audioPlayingKey: String? = null,
     onAudioToggle: (String) -> Unit = {},
     onImageClick: (String) -> Unit = {},
     onQuotedClick: ((Long) -> Unit)? = null,
     isHighlighted: Boolean = false,
+    onBubbleClick: () -> Unit = {},
+    myId: Long = 0L,
+    selected: Boolean = false,
+    selectionMode: Boolean = false,
+    onPacketClick: (Long) -> Unit = {},
     /** Pasangan bubble dari Latar Chat; null = ikut token tema (hijau Nusa + putih). */
     bubbles: id.nusachat.app.ui.theme.ResolvedBubbles? = null,
     /** Wallpaper gelap? Menentukan warna jam + centang di atas wallpaper. Null = ikut tema sistem. */
     wallpaperDark: Boolean? = null,
 ) {
+    val haptic = LocalHapticFeedback.current
+    // Stiker: emoji raksasa tanpa bubble.
+    if (message.type == "sticker" && !message.revoked) {
+        StickerMessage(
+            message = message,
+            mine = mine,
+            isGroup = isGroup,
+            menuOpen = menuOpen,
+            onDismissMenu = onDismissMenu,
+            onLongPress = onLongPress,
+            onBubbleClick = onBubbleClick,
+            pinned = pinned,
+            onReply = onReply,
+            onEdit = onEdit,
+            onForward = onForward,
+            onReact = onReact,
+            onPin = onPin,
+            onRevoke = onRevoke,
+            onRetry = onRetry,
+            onShowInfo = onShowInfo,
+            onStar = onStar,
+            onSelect = onSelect,
+            onHide = onHide,
+            onReport = onReport,
+            onShare = onShare,
+            selected = selected,
+            wallpaperDark = wallpaperDark,
+        )
+        return
+    }
     val onWallpaperDark = wallpaperDark ?: androidx.compose.foundation.isSystemInDarkTheme()
     // Jam + centang duduk di atas wallpaper (bukan di bubble).
     val metaColor = if (onWallpaperDark) Color.White.copy(alpha = 0.85f) else Color(0xFF5B6B76)
@@ -142,7 +190,6 @@ fun MessageBubble(
     val isTextBubble = (message.type == "text" || message.type.isBlank()) &&
         message.attachmentUrl.isNullOrBlank()
     val hasTail = isTextBubble && !compactTop
-    val haptic = LocalHapticFeedback.current
     val shape = when {
         // Sudut sisi ekor dibuat hampir runcing (2.dp) supaya tepi atas
         // bubble mengalir lurus ke ujung ekor — sambungan mulus, tidak ber-nat.
@@ -261,9 +308,13 @@ fun MessageBubble(
                     color = bubbleColor,
                     tonalElevation = 0.dp,
                     shadowElevation = if (isHighlighted) 6.dp else if (menuOpen) 4.dp else 0.dp,
-                    border = if (isHighlighted) androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                    border = when {
+                        selected -> androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+                        isHighlighted -> androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+                        else -> null
+                    },
                     modifier = Modifier.combinedClickable(
-                        onClick = {},
+                        onClick = { onBubbleClick() },
                         onLongClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             onLongPress()
@@ -280,10 +331,12 @@ fun MessageBubble(
                         onAudioToggle = onAudioToggle,
                         onImageClick = onImageClick,
                         onQuotedClick = onQuotedClick,
+                        onPacketClick = onPacketClick,
                         groupName = if (!mine && isGroup && message.sender != null && !compactTop) {
-                            message.sender.displayName
+                            message.sender.familiarName
                         } else null,
                         groupNameColor = memberNameColor(message.sender?.id),
+                        myId = myId,
                     )
                 }
                 // Menu apung custom yang ditempel LANGSUNG ke bubble ini
@@ -310,6 +363,12 @@ fun MessageBubble(
                         onRetry = onRetry,
                         onShowInfo = onShowInfo,
                         onDismiss = onDismissMenu,
+                        onStar = onStar,
+                        onSelect = onSelect,
+                        onHide = onHide,
+                        onReport = onReport,
+                        onSave = onSave,
+                        onShare = onShare,
                     )
                 }
             }
@@ -351,8 +410,10 @@ private fun BubbleContent(
     onAudioToggle: (String) -> Unit,
     onImageClick: (String) -> Unit,
     onQuotedClick: ((Long) -> Unit)? = null,
+    onPacketClick: (Long) -> Unit = {},
     groupName: String? = null,
     groupNameColor: Color = Color.Unspecified,
+    myId: Long = 0L,
 ) {
     // Image / video / location: flush ke tepi bubble (tanpa padding/ekor).
     // Voice & file: row langsung di atas warna bubble, ala LINE.
@@ -416,7 +477,7 @@ private fun BubbleContent(
                         )
                         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp).weight(1f)) {
                             Text(
-                                text = quoted.sender?.displayName ?: "Pesan",
+                                text = quoted.sender?.familiarName ?: "Pesan",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = if (mine) {
@@ -470,6 +531,13 @@ private fun BubbleContent(
                     isPlaying = audioPlayingKey == key,
                     onToggle = { onAudioToggle(key) },
                 )
+            } else if (message.type == "redpacket") {
+                RedPacketBubble(
+                    message = message,
+                    mine = mine,
+                    textColor = textColor,
+                    onOpen = { message.packetId?.let(onPacketClick) },
+                )
             } else if (message.type != "text" && !message.attachmentUrl.isNullOrBlank()) {
                 FileBubble(
                     url = message.attachmentUrl,
@@ -480,8 +548,26 @@ private fun BubbleContent(
                     Spacer(Modifier.height(6.dp))
                 }
             }
-            // Location sudah menampilkan judul di kartunya — jangan duplikat.
-            if (!message.body.isNullOrBlank() && message.type != "location") {
+            // Lencana bila saya disebut: dari server (REST) atau hitung lokal
+            // dari daftar mentions (realtime WS tidak dipersonalisasi per user).
+            val mentionsMe = !mine && (message.mentionedMe || (myId != 0L && myId in message.mentions))
+            if (mentionsMe) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.13f),
+                ) {
+                    Text(
+                        text = "Menyebut Anda",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+            // Location & redpacket sudah menampilkan judul di kartunya — jangan duplikat.
+            if (!message.body.isNullOrBlank() && message.type != "location" && message.type != "redpacket") {
                 val isCipher = message.type == "text" && message.body.length > 24 && message.body.matches(Regex("^[A-Za-z0-9+/=]+$")) && message.body.contains("=")
                 if (isCipher) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -499,8 +585,24 @@ private fun BubbleContent(
                         )
                     }
                 } else {
+                    val body = message.body
+                    // Sorot @username/@semua/@all seperti pola server (extractMentions).
+                    val mentionColor = if (mine) Color(0xFFB3E5FC) else MaterialTheme.colorScheme.primary
+                    val annotated = remember(body) {
+                        buildAnnotatedString {
+                            var last = 0
+                            MentionSpanRegex.findAll(body).forEach { m ->
+                                append(body.substring(last, m.range.first))
+                                withStyle(SpanStyle(color = mentionColor, fontWeight = FontWeight.SemiBold)) {
+                                    append(m.value)
+                                }
+                                last = m.range.last + 1
+                            }
+                            append(body.substring(last))
+                        }
+                    }
                     Text(
-                        text = message.body,
+                        text = annotated,
                         style = MaterialTheme.typography.bodyMedium,
                         color = textColor,
                         // Caption di bawah image flush tetap punya padding.
@@ -511,6 +613,9 @@ private fun BubbleContent(
                         },
                     )
                 }
+            }
+            if ((message.type == "text" || message.type.isBlank()) && !message.body.isNullOrBlank()) {
+                LinkChip(text = message.body, mine = mine, textColor = textColor)
             }
             if (message.status == "failed") {
                 Spacer(Modifier.height(4.dp))
@@ -548,6 +653,206 @@ private fun BubbleContent(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/** Chip domain untuk tautan pertama di pesan teks — ketuk untuk buka. */
+@Composable
+private fun LinkChip(text: String, mine: Boolean, textColor: Color) {
+    val url = remember(text) { URL_REGEX.find(text)?.value } ?: return
+    val host = remember(url) {
+        runCatching { android.net.Uri.parse(url).host?.removePrefix("www.") }.getOrNull()
+            ?: url.take(24)
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Spacer(Modifier.height(6.dp))
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = if (mine) textColor.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.clickable {
+            runCatching {
+                val intent = android.content.Intent(
+                    android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(url),
+                ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+            }
+        },
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                painter = painterResource(id = NusaIcons.Link),
+                contentDescription = null,
+                tint = textColor.copy(alpha = 0.8f),
+                modifier = Modifier.size(13.dp),
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                text = host,
+                style = MaterialTheme.typography.labelSmall,
+                color = textColor.copy(alpha = 0.9f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+private val URL_REGEX = Regex("https?://[^\\s]+")
+
+/** Kartu amplop merah di dalam bubble. */
+@Composable
+private fun RedPacketBubble(message: Message, mine: Boolean, textColor: Color, onOpen: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (mine) textColor.copy(alpha = 0.14f) else MaterialTheme.colorScheme.errorContainer,
+        modifier = Modifier.widthIn(min = 180.dp, max = 240.dp).clickable(onClick = onOpen),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.error) {
+                Icon(
+                    painter = painterResource(id = NusaIcons.Gift),
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.padding(8.dp).size(18.dp),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = message.body?.takeIf { it.isNotBlank() } ?: "Amplop merah untukmu",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = textColor,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "Ketuk untuk membuka",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = textColor.copy(alpha = 0.7f),
+                )
+            }
+        }
+    }
+}
+
+/** Stiker: emoji raksasa tanpa bubble + jam/centang + menu yang sama. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun StickerMessage(
+    message: Message,
+    mine: Boolean,
+    isGroup: Boolean,
+    menuOpen: Boolean,
+    onDismissMenu: () -> Unit,
+    onLongPress: () -> Unit,
+    onBubbleClick: () -> Unit,
+    pinned: Boolean,
+    onReply: (Message) -> Unit,
+    onEdit: (Message) -> Unit,
+    onForward: (Message) -> Unit,
+    onReact: (Message, String) -> Unit,
+    onPin: (Message) -> Unit,
+    onRevoke: (Message) -> Unit,
+    onRetry: () -> Unit,
+    onShowInfo: (Message) -> Unit,
+    onStar: (Message) -> Unit,
+    onSelect: (Message) -> Unit,
+    onHide: (Message) -> Unit,
+    onReport: (Message) -> Unit,
+    onShare: (Message) -> Unit,
+    selected: Boolean,
+    wallpaperDark: Boolean?,
+) {
+    val onWallpaperDark = wallpaperDark ?: androidx.compose.foundation.isSystemInDarkTheme()
+    val metaColor = if (onWallpaperDark) Color.White.copy(alpha = 0.85f) else Color(0xFF5B6B76)
+    val haptic = LocalHapticFeedback.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 3.dp),
+        horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Top,
+    ) {
+        if (isGroup && !mine) {
+            id.nusachat.app.ui.components.NusaAvatar(
+                name = message.sender?.familiarName ?: "?",
+                url = message.sender?.avatarUrl,
+                gender = message.sender?.gender,
+                seed = message.sender?.id,
+                size = 32.dp,
+            )
+            Spacer(Modifier.width(7.dp))
+        }
+        Column(horizontalAlignment = if (mine) Alignment.End else Alignment.Start) {
+            Box(
+                modifier = Modifier
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent,
+                        RoundedCornerShape(16.dp),
+                    )
+                    .combinedClickable(
+                        onClick = { onBubbleClick() },
+                        onLongClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onLongPress()
+                        },
+                    )
+                    .padding(6.dp),
+            ) {
+                Text(text = message.body.orEmpty(), fontSize = 64.sp)
+                NusaMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = onDismissMenu,
+                    shape = RoundedCornerShape(24.dp),
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shadowElevation = 8.dp,
+                    tonalElevation = 0.dp,
+                    modifier = Modifier.width(216.dp),
+                ) {
+                    MessageMenuContent(
+                        message = message,
+                        mine = mine,
+                        pinned = pinned,
+                        onReply = onReply,
+                        onEdit = onEdit,
+                        onForward = onForward,
+                        onReact = onReact,
+                        onPin = onPin,
+                        onRevoke = onRevoke,
+                        onRetry = onRetry,
+                        onShowInfo = onShowInfo,
+                        onDismiss = onDismissMenu,
+                        onStar = onStar,
+                        onSelect = onSelect,
+                        onHide = onHide,
+                        onReport = onReport,
+                        onShare = onShare,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = formatClockTime(message.createdAt),
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                    color = metaColor,
+                )
+                if (mine) {
+                    Spacer(Modifier.width(3.dp))
+                    MessageStatus(status = message.status, pending = message.pending, light = onWallpaperDark)
                 }
             }
         }

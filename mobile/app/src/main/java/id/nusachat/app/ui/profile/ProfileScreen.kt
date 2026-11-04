@@ -63,7 +63,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import id.nusachat.app.BuildConfig
 import id.nusachat.app.data.User
 import id.nusachat.app.ui.AppViewModel
 import id.nusachat.app.ui.theme.NusaIcons
@@ -77,10 +76,10 @@ fun MeScreen(
     vm: AppViewModel,
     user: User,
     onEditProfile: () -> Unit,
+    onOpenSettings: () -> Unit = {},
 ) {
     val connected by vm.realtimeConnected.collectAsStateWithLifecycle()
     var showLogout by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var showPassword by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
@@ -218,14 +217,14 @@ fun MeScreen(
             ProfileRow(
                 icon = NusaIcons.Settings,
                 title = "Pengaturan",
-                subtitle = "Info server dan koneksi",
-                onClick = { showSettings = true },
+                subtitle = "Tema, notifikasi, perangkat, penyimpanan",
+                onClick = onOpenSettings,
             )
             ProfileDivider()
             ProfileRow(
                 icon = NusaIcons.Info,
                 title = "Tentang NusaChat",
-                subtitle = "Versi 0.1.0",
+                subtitle = "Versi 0.2.0",
                 onClick = { showAbout = true },
             )
         }
@@ -253,7 +252,7 @@ fun MeScreen(
 
         Spacer(Modifier.height(20.dp))
         Text(
-            text = "NusaChat 0.1.0",
+            text = "NusaChat 0.2.0",
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 20.dp),
@@ -275,30 +274,6 @@ fun MeScreen(
             },
             onDismiss = { showLogout = false },
         )
-    }
-
-    if (showSettings) {
-        NusaBottomSheet(
-            onDismissRequest = { showSettings = false },
-            containerColor = MaterialTheme.colorScheme.surface,
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-        ) {
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
-                Text("Pengaturan", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(12.dp))
-                SettingsLine("Status realtime", if (connected) "Terhubung" else "Terputus")
-                SettingsLine("API", BuildConfig.API_BASE_URL)
-                SettingsLine("WebSocket", BuildConfig.WS_URL)
-                SettingsLine("Penyimpanan sesi", "SharedPreferences privat")
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "Untuk mengubah alamat server, edit buildConfigField di app/build.gradle.kts lalu build ulang.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(24.dp))
-            }
-        }
     }
 
     if (showAbout) {
@@ -325,14 +300,6 @@ fun MeScreen(
         }
     }
 
-}
-
-@Composable
-private fun SettingsLine(label: String, value: String) {
-    Column(modifier = Modifier.padding(vertical = 3.dp)) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodySmall)
-    }
 }
 
 @Composable
@@ -411,6 +378,7 @@ fun EditProfileScreen(
     onBack: () -> Unit,
 ) {
     var displayName by rememberSaveable { mutableStateOf(user.displayName) }
+    var username by rememberSaveable(user.username) { mutableStateOf(user.username) }
     var bio by rememberSaveable { mutableStateOf(user.bio.orEmpty()) }
     var phone by rememberSaveable { mutableStateOf(user.phone.orEmpty()) }
     var gender by rememberSaveable { mutableStateOf(user.gender.orEmpty()) }
@@ -421,7 +389,7 @@ fun EditProfileScreen(
     val uploading by vm.uploadingAvatar.collectAsStateWithLifecycle()
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        uri?.let(vm::uploadAvatar)
+        uri?.let(vm::uploadAvatarCropped)
     }
 
     fun save() {
@@ -437,7 +405,15 @@ fun EditProfileScreen(
             localError = "Bio maksimal 160 karakter."
             return
         }
+        val uname = username.trim().lowercase()
+        if (!Regex("^[a-z0-9_.]{4,20}$").matches(uname)) {
+            localError = "Username 4-20 karakter: huruf, angka, titik, garis bawah."
+            return
+        }
         localError = null
+        if (uname != user.username) {
+            vm.updateUsername(uname)
+        }
         vm.updateProfileExtended(
             displayName, bio, phone,
             gender,
@@ -542,10 +518,9 @@ fun EditProfileScreen(
                 Spacer(Modifier.height(20.dp))
                 NusaLineInput(
                     label = "Username",
-                    value = "@${user.username}",
-                    onValueChange = {},
-                    supportingText = "Username tidak dapat diubah",
-                    enabled = false,
+                    value = username,
+                    onValueChange = { if (it.length <= 20) username = it.lowercase().filter { c -> c.isLetterOrDigit() || c == '.' || c == '_' } },
+                    supportingText = "Teman menemukanmu lewat @username",
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )

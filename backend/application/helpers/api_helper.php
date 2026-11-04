@@ -56,13 +56,29 @@ if (!function_exists('phone_hash')) {
 if (!function_exists('client_ip')) {
     function client_ip(): string
     {
-        foreach (['HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR'] as $key) {
-            if (!empty($_SERVER[$key])) {
-                $value = trim(explode(',', $_SERVER[$key])[0]);
-                if (filter_var($value, FILTER_VALIDATE_IP)) {
-                    return $value;
+        $remote = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+        // Header forward hanya dipercaya bila request datang dari proxy
+        // terdaftar (TRUSTED_PROXIES, koma-dipisah; '*' = semua, hanya untuk
+        // dev di belakang tunnel). Tanpanya, pakai REMOTE_ADDR agar throttle
+        // tidak bisa di-bypass dengan memalsukan X-Forwarded-For.
+        $trusted = array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) (getenv('TRUSTED_PROXIES') ?: ''))
+        )));
+        $trustForward = in_array('*', $trusted, true)
+            || ($remote !== '' && in_array($remote, $trusted, true));
+        if ($trustForward) {
+            foreach (['HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR'] as $key) {
+                if (!empty($_SERVER[$key])) {
+                    $value = trim(explode(',', (string) $_SERVER[$key])[0]);
+                    if (filter_var($value, FILTER_VALIDATE_IP)) {
+                        return $value;
+                    }
                 }
             }
+        }
+        if (filter_var($remote, FILTER_VALIDATE_IP)) {
+            return $remote;
         }
         return '0.0.0.0';
     }
@@ -197,6 +213,7 @@ if (!function_exists('conversation_dto')) {
             'uuid' => $row['uuid'],
             'type' => $row['type'],
             'title' => $row['title'],
+            'description' => $row['description'] ?? null,
             'avatar_url' => $row['avatar_url'],
             'created_by' => (int) $row['created_by'],
             'only_admins_can_send' => (bool) ($row['only_admins_can_send'] ?? false),
@@ -211,6 +228,7 @@ if (!function_exists('conversation_dto')) {
             'role' => $row['role'] ?? 'member',
             'muted' => (bool) ($row['muted'] ?? false),
             'archived' => (bool) ($row['archived'] ?? false),
+            'pinned' => (bool) ($row['pinned'] ?? false),
             'members' => $members,
             'created_at' => $row['created_at'],
         ];
@@ -238,6 +256,8 @@ if (!function_exists('moment_dto')) {
             ],
             'body' => $row['body'],
             'media' => $media,
+            'audience' => $row['audience'] ?? 'friends',
+            'edited_at' => $row['edited_at'] ?? null,
             'like_count' => (int) ($row['like_count'] ?? 0),
             'comment_count' => (int) ($row['comment_count'] ?? 0),
             'liked_by_me' => (bool) ($row['liked_by_me'] ?? false),
@@ -268,6 +288,9 @@ if (!function_exists('story_dto')) {
             ],
             'body' => $row['body'],
             'media' => $media,
+            'style' => $row['style'] ?? null,
+            'view_count' => (int) ($row['view_count'] ?? 0),
+            'viewed_by_me' => (bool) ($row['viewed_by_me'] ?? false),
             'created_at' => $row['created_at'],
             'expires_at' => $row['expires_at'],
         ];

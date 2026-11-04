@@ -23,7 +23,11 @@ data class User(
     val friendCount: Int = 0,
     val role: String? = null,
     val blockedByMe: Boolean = false,
-)
+    val remark: String? = null,
+) {
+    /** Nama panggilan pribadi bila ada, kalau tidak nama tampilan. */
+    val familiarName: String get() = remark?.takeIf { it.isNotBlank() } ?: displayName
+}
 
 data class GroupJoinRequest(
     val requestId: Long,
@@ -88,6 +92,10 @@ data class Message(
     val mentions: List<Long> = emptyList(),
     val mentionedMe: Boolean = false,
     val reactions: List<Reaction> = emptyList(),
+    val packetId: Long? = null,
+    val conversationTitle: String? = null,
+    val conversationType: String? = null,
+    val starredAt: String? = null,
 )
 
 data class PinnedMessage(
@@ -111,6 +119,8 @@ data class Conversation(
     val myRole: String = "member",
     val muted: Boolean = false,
     val archived: Boolean = false,
+    val pinned: Boolean = false,
+    val description: String? = null,
     val inviteToken: String? = null,
     val onlyAdminsCanSend: Boolean = false,
     val onlyAdminsCanEdit: Boolean = false,
@@ -133,6 +143,8 @@ data class Moment(
     val likedByMe: Boolean,
     val reshared: ResharedInfo? = null,
     val createdAt: String,
+    val audience: String = "friends",
+    val editedAt: String? = null,
 )
 
 data class ResharedInfo(
@@ -147,6 +159,74 @@ data class Story(
     val media: List<String>,
     val createdAt: String,
     val expiresAt: String,
+    val viewCount: Int = 0,
+    val viewedByMe: Boolean = false,
+    val style: String? = null,
+)
+
+data class StoryViewer(
+    val user: User,
+    val viewedAt: String = "",
+)
+
+data class SessionItem(
+    val jti: String,
+    val device: String? = null,
+    val createdAt: String = "",
+    val lastUsedAt: String? = null,
+    val expiresAt: String = "",
+)
+
+data class WalletRequestItem(
+    val id: Long,
+    val amount: Long,
+    val note: String? = null,
+    val status: String = "pending",
+    val createdAt: String = "",
+    val requester: User,
+    val target: User,
+)
+
+data class RedPacketClaim(
+    val user: User,
+    val amount: Long,
+    val createdAt: String = "",
+)
+
+data class RedPacket(
+    val id: Long,
+    val conversationId: Long,
+    val messageId: Long? = null,
+    val sender: User,
+    val totalAmount: Long,
+    val totalCount: Int,
+    val claimedCount: Int,
+    val claimedAmount: Long,
+    val note: String? = null,
+    val status: String = "active",
+    val myClaim: Long? = null,
+    val claims: List<RedPacketClaim> = emptyList(),
+    val createdAt: String = "",
+    val expiresAt: String = "",
+)
+
+data class CallHistoryItem(
+    val call: VoiceCall,
+    val direction: String = "incoming",
+    val missed: Boolean = false,
+    val duration: Int = 0,
+    val peer: User? = null,
+    val groupTitle: String? = null,
+)
+
+data class ReportItem(
+    val id: Long,
+    val targetType: String,
+    val targetId: Long,
+    val reason: String,
+    val details: String? = null,
+    val status: String = "pending",
+    val createdAt: String = "",
 )
 
 data class MomentComment(
@@ -158,6 +238,8 @@ data class MomentComment(
     val replyToUserId: Long? = null,
     val replyToDisplayName: String? = null,
     val replyToUsername: String? = null,
+    val likeCount: Int = 0,
+    val likedByMe: Boolean = false,
 )
 
 data class FriendRequest(
@@ -166,6 +248,7 @@ data class FriendRequest(
     val createdAt: String,
     val user: User,
     val incoming: Boolean,
+    val greeting: String? = null,
 )
 
 data class MessagesPage(
@@ -203,6 +286,7 @@ internal fun JSONObject.toUser(): User = User(
     friendCount = optInt("friend_count", 0),
     role = stringOrNull("role"),
     blockedByMe = optBoolean("blocked_by_me", false),
+    remark = stringOrNull("remark"),
 )
 
 internal fun JSONObject.toWalletTxn(): WalletTxn {
@@ -294,6 +378,10 @@ internal fun JSONObject.toMessage(): Message {
         mentions = mentions,
         mentionedMe = optBoolean("mentioned_me", false),
         reactions = reactions,
+        packetId = meta?.takeIf { it.has("packet_id") && !it.isNull("packet_id") }?.optLong("packet_id"),
+        conversationTitle = stringOrNull("conversation_title"),
+        conversationType = stringOrNull("conversation_type"),
+        starredAt = stringOrNull("starred_at"),
     )
 }
 
@@ -326,6 +414,8 @@ internal fun JSONObject.toConversation(): Conversation {
         myRole = optString("role", "member"),
         muted = optBoolean("muted", false),
         archived = optBoolean("archived", false),
+        pinned = optBoolean("pinned", false),
+        description = stringOrNull("description"),
         inviteToken = stringOrNull("invite_token"),
         onlyAdminsCanSend = optBoolean("only_admins_can_send", false),
         onlyAdminsCanEdit = optBoolean("only_admins_can_edit", false),
@@ -365,6 +455,8 @@ internal fun JSONObject.toMoment(): Moment {
         likedByMe = optBoolean("liked_by_me", false),
         reshared = reshared,
         createdAt = optString("created_at"),
+        audience = optString("audience", "friends"),
+        editedAt = stringOrNull("edited_at"),
     )
 }
 
@@ -383,6 +475,9 @@ internal fun JSONObject.toStory(): Story {
         media = media,
         createdAt = optString("created_at"),
         expiresAt = optString("expires_at"),
+        viewCount = optInt("view_count", 0),
+        viewedByMe = optBoolean("viewed_by_me", false),
+        style = stringOrNull("style"),
     )
 }
 
@@ -395,6 +490,8 @@ internal fun JSONObject.toMomentComment(): MomentComment = MomentComment(
     replyToUserId = longOrNull("reply_to_user_id"),
     replyToDisplayName = stringOrNull("reply_to_display_name"),
     replyToUsername = stringOrNull("reply_to_username"),
+    likeCount = optInt("like_count", 0),
+    likedByMe = optInt("liked_by_me", 0) == 1 || optBoolean("liked_by_me", false),
 )
 
 internal fun JSONObject.toFriendRequest(incoming: Boolean): FriendRequest = FriendRequest(
@@ -403,6 +500,88 @@ internal fun JSONObject.toFriendRequest(incoming: Boolean): FriendRequest = Frie
     createdAt = optString("created_at"),
     user = optJSONObject("user")?.toUser() ?: User(0, "", "Pengguna"),
     incoming = incoming,
+    greeting = stringOrNull("greeting"),
+)
+
+internal fun JSONObject.toSessionItem(): SessionItem = SessionItem(
+    jti = optString("jti"),
+    device = stringOrNull("device"),
+    createdAt = optString("created_at"),
+    lastUsedAt = stringOrNull("last_used_at"),
+    expiresAt = optString("expires_at"),
+)
+
+internal fun JSONObject.toWalletRequest(): WalletRequestItem = WalletRequestItem(
+    id = optLong("id"),
+    amount = optLong("amount"),
+    note = stringOrNull("note"),
+    status = optString("status", "pending"),
+    createdAt = optString("created_at"),
+    requester = optJSONObject("requester")?.toUser() ?: User(0, "", "Pengguna"),
+    target = optJSONObject("target")?.toUser() ?: User(0, "", "Pengguna"),
+)
+
+internal fun JSONObject.toRedPacket(): RedPacket {
+    val claims = mutableListOf<RedPacketClaim>()
+    optJSONArray("claims")?.let { array ->
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let {
+                claims.add(
+                    RedPacketClaim(
+                        user = it.optJSONObject("user")?.toUser() ?: User(0, "", "Pengguna"),
+                        amount = it.optLong("amount"),
+                        createdAt = it.optString("created_at"),
+                    )
+                )
+            }
+        }
+    }
+    return RedPacket(
+        id = optLong("id"),
+        conversationId = optLong("conversation_id"),
+        messageId = longOrNull("message_id"),
+        sender = optJSONObject("sender")?.toUser() ?: User(0, "", "Pengguna"),
+        totalAmount = optLong("total_amount"),
+        totalCount = optInt("total_count", 0),
+        claimedCount = optInt("claimed_count", 0),
+        claimedAmount = optLong("claimed_amount"),
+        note = stringOrNull("note"),
+        status = optString("status", "active"),
+        myClaim = longOrNull("my_claim"),
+        claims = claims,
+        createdAt = optString("created_at"),
+        expiresAt = optString("expires_at"),
+    )
+}
+
+internal fun JSONObject.toCallHistory(): CallHistoryItem = CallHistoryItem(
+    call = toVoiceCall(),
+    direction = optString("direction", "incoming"),
+    missed = optBoolean("missed", false),
+    duration = optInt("duration", 0),
+    peer = optJSONObject("peer")?.toUser(),
+    groupTitle = stringOrNull("group_title"),
+)
+
+internal fun JSONObject.toReport(): ReportItem = ReportItem(
+    id = optLong("id"),
+    targetType = optString("target_type"),
+    targetId = optLong("target_id"),
+    reason = optString("reason"),
+    details = stringOrNull("details"),
+    status = optString("status", "pending"),
+    createdAt = optString("created_at"),
+)
+
+internal fun JSONObject.toStoryViewer(): StoryViewer = StoryViewer(
+    user = User(
+        id = optLong("id"),
+        username = optString("username"),
+        displayName = stringOrNull("display_name") ?: optString("username"),
+        avatarUrl = stringOrNull("avatar_url"),
+        gender = stringOrNull("gender"),
+    ),
+    viewedAt = optString("viewed_at"),
 )
 
 internal fun JSONArray.toUserList(): List<User> {

@@ -13,8 +13,8 @@ android {
         applicationId = "id.nusachat.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -35,6 +35,13 @@ android {
         // Realtime pindah ke gateway Erlang/OTP (realtime/nusachat_realtime).
         // Gateway PHP di 8090 tetap jalan sebagai fallback.
         buildConfigField("String", "WS_URL", "\"ws://192.168.70.92:8091\"")
+        // GIF Giphy: default key proyek, bisa dioverride via
+        // -PGIF_API_KEY=... atau env GIF_API_KEY. Kosong = picker GIF
+        // hanya mendukung tempel tautan manual.
+        val gifKey = (findProperty("GIF_API_KEY") as String?)
+            ?: System.getenv("GIF_API_KEY")
+            ?: "6T4KllU0Z42diGwX7jmOHx9qLora1IB6"
+        buildConfigField("String", "GIF_API_KEY", "\"$gifKey\"")
     }
 
     buildTypes {
@@ -102,7 +109,9 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     // Push notification (FCM) — manual FirebaseApp init, no google-services.json required for debug.
@@ -126,4 +135,12 @@ dependencies {
     implementation("androidx.credentials:credentials:1.5.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
     implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
+
+    // Pindai QR: CameraX + ML Kit Barcode (model statis, tanpa unduhan).
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("com.google.mlkit:barcode-scanning:17.2.0")
+    // Tampilkan QR profil (encode saja, tanpa kamera).
+    implementation("com.google.zxing:core:3.5.3")
 }

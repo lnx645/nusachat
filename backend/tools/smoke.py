@@ -327,10 +327,14 @@ def main():
             status, payload = request("POST", "/conversations/join", {"token": invite_token}, token=budi)
             check("join disabled link", status == 403, f"status={status} {payload}")
 
-        # Panggilan: voice 1-1 + room grup (video call dihapus).
+        # Panggilan: voice + video 1-1 + room grup.
         fake_sdp = "v=0\r\no=smoke 1 1 IN IP4 127.0.0.1\r\ns=smoke\r\nt=0 0\r\n"
         status, payload = request("POST", "/calls/offer", {"to_user_id": 2, "sdp": fake_sdp, "kind": "video"}, token=nusa)
-        check("video offer rejected", status == 403 and payload.get("error", {}).get("code") == "video_disabled", f"status={status} {payload}")
+        video_call = payload.get("data", {}).get("call", {}).get("id") if status == 201 else None
+        check("video offer accepted", status == 201 and payload["data"]["call"]["kind"] == "video", f"status={status} {payload}")
+        if video_call:
+            status, payload = request("POST", "/calls/end", {"call_id": video_call}, token=nusa)
+            check("video call cleanup", status == 200, f"status={status} {payload}")
         status, payload = request("POST", "/calls/offer", {"to_user_id": 2, "sdp": fake_sdp, "kind": "audio"}, token=nusa)
         check("audio offer", status == 201 and payload["data"]["call"]["kind"] == "audio", f"status={status} {payload}")
         call_id = payload.get("data", {}).get("call", {}).get("id")
@@ -475,6 +479,370 @@ def main():
         check("token dead after delete", status == 401, f"status={status} {payload}")
         status, payload = request("POST", "/auth/login", {"login": del_name, "password": "secret123", "device": "smoke"})
         check("login dead after delete", status in (401, 403), f"status={status} {payload}")
+
+        # Reset password: token sekali pakai + anti enumerasi.
+        rst_name = f"rst{suffix}"
+        status, payload = request("POST", "/auth/register", {"username": rst_name, "password": "oldpass1", "display_name": "Reset Me"})
+        check("register resettable", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/forgot", {"login": "tidakada000"})
+        check("forgot unknown hides", status == 200 and payload["data"]["sent"] is True and "reset_token" not in payload["data"], f"status={status} {payload}")
+        status, payload = request("POST", "/auth/forgot", {"login": rst_name})
+        rst_token = payload.get("data", {}).get("reset_token")
+        check("forgot known issues token", status == 200 and bool(rst_token), f"status={status} {payload}")
+        status, payload = request("POST", "/auth/reset", {"token": "salah", "new_password": "newpass1"})
+        check("reset bad token", status == 401, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/reset", {"token": rst_token, "new_password": "x"})
+        check("reset short password", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/reset", {"token": rst_token, "new_password": "newpass1"})
+        check("reset password", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/login", {"login": rst_name, "password": "oldpass1"})
+        check("old password dead", status == 401, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/login", {"login": rst_name, "password": "newpass1"})
+        check("new password works", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/reset", {"token": rst_token, "new_password": "newpass2"})
+        check("reset token single use", status == 401, f"status={status} {payload}")
+
+        # Sesi: daftar + cabut per perangkat.
+        status, payload = request("POST", "/auth/register", {"username": f"ssn{suffix}", "password": "secret123", "display_name": "Sesi", "device": "smoke-A"})
+        ref_a = payload.get("data", {}).get("auth", {}).get("refresh_token")
+        ssn_token = payload.get("data", {}).get("auth", {}).get("access_token")
+        status, payload = request("POST", "/auth/login", {"login": f"ssn{suffix}", "password": "secret123", "device": "smoke-B"})
+        ref_b = payload.get("data", {}).get("auth", {}).get("refresh_token")
+        status, payload = request("GET", "/auth/sessions", token=ssn_token)
+        sessions = payload.get("data", {}).get("sessions", []) if payload.get("ok") else []
+        check("list sessions", status == 200 and len(sessions) >= 2 and all(s["jti"] and s["device"] for s in sessions), f"status={status} {payload}")
+        status, payload = request("POST", "/auth/revoke_session", {"jti": "tidakada"}, token=ssn_token)
+        check("revoke unknown session", status == 404, f"status={status} {payload}")
+        jti_a = ref_a.split(".")[0]
+        status, payload = request("POST", "/auth/revoke_session", {"jti": jti_a}, token=ssn_token)
+        check("revoke one session", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/refresh", {"refresh_token": ref_a})
+        check("revoked refresh dead", status == 401, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/refresh", {"refresh_token": ref_b})
+        check("other refresh alive", status == 200 and payload["data"]["auth"]["access_token"], f"status={status} {payload}")
+        # Reuse token yang sudah DIROTASI = indikasi curian → seluruh keluarga mati.
+        # (Beda dengan retry token yang dicabut eksplisit: itu 401 biasa.)
+        ref_b2 = (payload.get("data", {}) or {}).get("auth", {}).get("refresh_token") if status == 200 else None
+        status, payload = request("POST", "/auth/refresh", {"refresh_token": ref_b})
+        err = (payload.get("error") or {}) if isinstance(payload, dict) else {}
+        check("rotated reuse nukes family", status == 401 and err.get("code") == "token_revoked", f"status={status} {payload}")
+        if ref_b2:
+            status, payload = request("POST", "/auth/refresh", {"refresh_token": ref_b2})
+            check("family dead after reuse", status == 401, f"status={status} {payload}")
+
+        # Ganti username.
+        status, payload = request("POST", "/auth/register", {"username": f"nama{suffix}", "password": "secret123", "display_name": "Nama"})
+        nm_token = payload.get("data", {}).get("auth", {}).get("access_token")
+        status, payload = request("POST", "/users/update", {"username": "ab"}, token=nm_token)
+        check("username too short", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/users/update", {"username": "admin"}, token=nm_token)
+        check("username reserved", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/users/update", {"username": "sari"}, token=nm_token)
+        check("username taken", status == 409, f"status={status} {payload}")
+        status, payload = request("POST", "/users/update", {"username": f"baru{suffix}"}, token=nm_token)
+        check("username changed", status == 200 and payload["data"]["user"]["username"] == f"baru{suffix}", f"status={status} {payload}")
+        status, payload = request("POST", "/auth/login", {"login": f"baru{suffix}", "password": "secret123"})
+        check("login new username", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/auth/login", {"login": f"nama{suffix}", "password": "secret123"})
+        check("old username dead", status == 401, f"status={status} {payload}")
+
+        # Pin chat, tandai belum dibaca, cari global, pagination.
+        status, payload = request("POST", "/conversations/pin_chat", {"id": new_conv}, token=nusa)
+        check("pin chat", status == 200 and payload["data"]["pinned"] is True, f"status={status} {payload}")
+        status, payload = request("GET", "/conversations", token=nusa)
+        convs = payload.get("data", {}).get("conversations", []) if payload.get("ok") else []
+        check("pinned first", status == 200 and convs and convs[0]["id"] == new_conv and convs[0]["pinned"] is True, f"status={status}")
+        status, payload = request("POST", "/conversations/pin_chat", {"id": new_conv, "pinned": False}, token=nusa)
+        check("unpin chat", status == 200 and payload["data"]["pinned"] is False, f"status={status} {payload}")
+        probe = f"TandaiBelumDibaca-{suffix}"
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": probe}, token=new_token)
+        probe_id = payload.get("data", {}).get("message", {}).get("id")
+        status, payload = request("POST", "/conversations/read", {"id": new_conv, "message_id": probe_id}, token=nusa)
+        check("read probe", status == 200, f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/show?id={new_conv}", token=nusa)
+        check("unread zero", status == 200 and payload["data"]["conversation"]["unread_count"] == 0, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/mark_unread", {"id": new_conv, "message_id": probe_id}, token=nusa)
+        check("mark unread", status == 200 and payload["data"]["unread_count"] >= 1, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/read", {"id": new_conv, "message_id": probe_id}, token=nusa)
+        check("read again cleanup", status == 200, f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/search_all?q={probe}", token=nusa)
+        found = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+        check("search all chats", status == 200 and any(m["id"] == probe_id and m["conversation_id"] == new_conv for m in found), f"status={status} {payload}")
+        status, payload = request("GET", "/conversations/search_all?q=x", token=nusa)
+        check("search all too short", status == 422, f"status={status} {payload}")
+        status, payload = request("GET", "/conversations?limit=1", token=nusa)
+        page_ok = status == 200 and len(payload["data"]["conversations"]) == 1 and payload["data"]["has_more"] is True and payload["data"]["next_before"]
+        check("conversations pagination", page_ok, f"status={status} {payload}")
+        if page_ok:
+            before = payload["data"]["next_before"]
+            status, payload = request("GET", f"/conversations?limit=50&before={before}", token=nusa)
+            check("conversations next page", status == 200, f"status={status} {payload}")
+
+        # Bintang + hapus-untuk-saya + stiker.
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": f"Bintang-{suffix}"}, token=nusa)
+        star_msg = payload.get("data", {}).get("message", {}).get("id")
+        status, payload = request("POST", "/messages/star", {"message_id": star_msg}, token=nusa)
+        check("star message", status == 201, f"status={status} {payload}")
+        status, payload = request("GET", "/messages/starred", token=nusa)
+        check("starred list", status == 200 and any(m["id"] == star_msg for m in payload["data"]["messages"]), f"status={status} {payload}")
+        status, payload = request("POST", "/messages/unstar", {"message_id": star_msg}, token=nusa)
+        check("unstar message", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/messages/hide", {"message_id": star_msg}, token=nusa)
+        check("hide message", status == 200, f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/messages?id={new_conv}&limit=100", token=nusa)
+        check("hidden from me", status == 200 and all(m["id"] != star_msg for m in payload["data"]["messages"]), f"status={status}")
+        status, payload = request("GET", f"/conversations/messages?id={new_conv}&limit=100", token=new_token)
+        check("visible to peer", status == 200 and any(m["id"] == star_msg for m in payload["data"]["messages"]), f"status={status}")
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "sticker", "body": "🦁"}, token=nusa)
+        check("send sticker", status == 201 and payload["data"]["message"]["type"] == "sticker", f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "sticker", "body": ""}, token=nusa)
+        check("empty sticker rejected", status == 422, f"status={status} {payload}")
+
+        # Mention semua + deskripsi + alih kepemilikan grup.
+        status, payload = request("POST", "/conversations/send", {"id": group_id, "type": "text", "body": "@semua kumpul"}, token=nusa)
+        mentions = payload.get("data", {}).get("message", {}).get("mentions", []) if payload.get("ok") else []
+        check("mention all", status == 201 and 2 in mentions and len(mentions) >= 2, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/update_group", {"id": group_id, "description": "Grup smoke test"}, token=nusa)
+        check("group description", status == 200 and payload["data"]["conversation"]["description"] == "Grup smoke test", f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/update_group", {"id": group_id, "description": "x" * 301}, token=nusa)
+        check("description too long", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/transfer_owner", {"id": group_id, "user_id": 1}, token=sari)
+        check("transfer by non-owner", status == 403, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/transfer_owner", {"id": group_id, "user_id": 999999}, token=nusa)
+        check("transfer to non-member", status == 404, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/transfer_owner", {"id": group_id, "user_id": 2}, token=nusa)
+        check("transfer ownership", status == 200 and payload["data"]["owner_id"] == 2, f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/show?id={group_id}", token=sari)
+        check("new owner shown", status == 200 and payload["data"]["conversation"]["created_by"] == 2, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/transfer_owner", {"id": group_id, "user_id": 1}, token=sari)
+        check("transfer back", status == 200 and payload["data"]["owner_id"] == 1, f"status={status} {payload}")
+
+        # Sapaan pertemanan + remark.
+        status, payload = request("POST", "/auth/register", {"username": f"gsap{suffix}", "password": "secret123", "display_name": "Sapa"})
+        greet_token = payload.get("data", {}).get("auth", {}).get("access_token")
+        greet_id = payload.get("data", {}).get("user", {}).get("id")
+        status, payload = request("POST", "/friends/send", {"user_id": 1, "message": "Halo, aku teman lama"}, token=greet_token)
+        greet_req = payload.get("data", {}).get("request", {}).get("request_id")
+        status, payload = request("GET", "/friends/requests", token=nusa)
+        incoming = payload.get("data", {}).get("incoming", []) if payload.get("ok") else []
+        check("greeting shown", any(r["request_id"] == greet_req and r["greeting"] == "Halo, aku teman lama" for r in incoming), f"status={status} {payload}")
+        status, payload = request("POST", "/friends/respond", {"request_id": greet_req, "action": "accept"}, token=nusa)
+        check("accept greeter", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/friends/remark", {"user_id": greet_id, "remark": "Kawan Lama"}, token=nusa)
+        check("set remark", status == 200 and payload["data"]["remark"] == "Kawan Lama", f"status={status} {payload}")
+        status, payload = request("GET", "/friends", token=nusa)
+        check("remark listed", status == 200 and any(f["id"] == greet_id and f.get("remark") == "Kawan Lama" for f in payload["data"]["friends"]), f"status={status}")
+        status, payload = request("POST", "/friends/remark", {"user_id": greet_id, "remark": "x" * 41}, token=nusa)
+        check("remark too long", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/friends/remove", {"user_id": greet_id}, token=nusa)
+        check("remove greeter", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/friends/remark", {"user_id": greet_id, "remark": "x"}, token=nusa)
+        check("remark non-friend", status == 403, f"status={status} {payload}")
+
+        # Momen privat + edit + daftar suka + hapus komentar.
+        status, payload = request("POST", "/moments/create", {"body": f"Rahasia-{suffix}", "audience": "private"}, token=nusa)
+        priv_id = payload.get("data", {}).get("moment", {}).get("id")
+        check("private moment", status == 201 and payload["data"]["moment"]["audience"] == "private", f"status={status} {payload}")
+        status, payload = request("GET", "/moments?limit=50", token=sari)
+        check("private hidden from feed", status == 200 and all(m["id"] != priv_id for m in payload["data"]["moments"]), f"status={status}")
+        status, payload = request("GET", f"/moments/show?id={priv_id}", token=sari)
+        check("private show forbidden", status == 404, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/like", {"id": priv_id}, token=sari)
+        check("private like forbidden", status == 404, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/edit", {"id": priv_id, "body": f"Rahasia diubah-{suffix}"}, token=nusa)
+        check("edit moment", status == 200 and payload["data"]["moment"]["body"] == f"Rahasia diubah-{suffix}" and payload["data"]["moment"]["edited_at"], f"status={status} {payload}")
+        status, payload = request("POST", "/moments/edit", {"id": priv_id, "body": "diubah orang"}, token=sari)
+        check("edit others moment", status == 404, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/delete", {"id": priv_id}, token=nusa)
+        check("delete private moment", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/like", {"id": moment_id}, token=sari)
+        check("like for list", status == 200, f"status={status} {payload}")
+        status, payload = request("GET", f"/moments/likes?id={moment_id}", token=nusa)
+        check("likers list", status == 200 and any(u["id"] == 2 for u in payload["data"]["users"]), f"status={status} {payload}")
+        status, payload = request("POST", "/moments/comment", {"id": moment_id, "body": f"Komen hapus-{suffix}"}, token=sari)
+        cdel = payload.get("data", {}).get("comment", {}).get("id")
+        status, payload = request("POST", "/moments/comment_delete", {"id": cdel}, token=nusa)
+        check("author deletes comment", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/comment", {"id": moment_id, "body": f"Komen hapus 2-{suffix}"}, token=sari)
+        cdel2 = payload.get("data", {}).get("comment", {}).get("id")
+        status, payload = request("POST", "/moments/comment_delete", {"id": cdel2}, token=sari)
+        check("own comment deleted", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/comment_delete", {"id": 999999}, token=nusa)
+        check("delete unknown comment", status == 404, f"status={status} {payload}")
+
+        # Viewer story.
+        status, payload = request("POST", "/moments/story_create", {"body": f"StoryView-{suffix}"}, token=nusa)
+        sid = payload.get("data", {}).get("story", {}).get("id")
+        status, payload = request("POST", "/moments/story_view", {"id": sid}, token=sari)
+        check("story viewed", status == 200, f"status={status} {payload}")
+        status, payload = request("GET", f"/moments/story_views?id={sid}", token=nusa)
+        viewers = payload.get("data", {}).get("viewers", []) if payload.get("ok") else []
+        check("story viewers", status == 200 and payload["data"]["view_count"] == 1 and any(v["id"] == 2 for v in viewers), f"status={status} {payload}")
+        status, payload = request("GET", f"/moments/story_views?id={sid}", token=sari)
+        check("viewers author only", status == 403, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/story_view", {"id": sid}, token=greet_token)
+        check("stranger cannot view", status == 404, f"status={status} {payload}")
+        status, payload = request("GET", "/moments/stories", token=nusa)
+        check("stories carry counts", status == 200 and any(s["id"] == sid and s["view_count"] == 1 for s in payload["data"]["stories"]), f"status={status}")
+        status, payload = request("POST", "/moments/story_delete", {"id": sid}, token=nusa)
+        check("story cleanup", status == 200, f"status={status} {payload}")
+
+        # Riwayat panggilan + tak terjawab.
+        status, payload = request("GET", "/calls/history", token=nusa)
+        hist = payload.get("data", {}).get("calls", []) if payload.get("ok") else []
+        answered = [c for c in hist if c["id"] == call_id]
+        check("history answered", status == 200 and answered and answered[0]["direction"] == "outgoing" and answered[0]["answered_at"] and answered[0]["missed"] is False, f"status={status} {payload}")
+        status, payload = request("POST", "/calls/offer", {"to_user_id": 2, "sdp": fake_sdp}, token=nusa)
+        miss_id = payload.get("data", {}).get("call", {}).get("id")
+        status, payload = request("POST", "/calls/end", {"call_id": miss_id}, token=nusa)
+        check("caller cancels", status == 200, f"status={status} {payload}")
+        status, payload = request("GET", "/calls/history", token=sari)
+        shist = payload.get("data", {}).get("calls", []) if payload.get("ok") else []
+        missed = [c for c in shist if c["id"] == miss_id]
+        check("missed call flagged", status == 200 and missed and missed[0]["missed"] is True and missed[0]["direction"] == "incoming", f"status={status} {payload}")
+
+        # Laporan konten.
+        status, payload = request("POST", "/reports/create", {"target_type": "user", "target_id": 2, "reason": "spam"}, token=nusa)
+        check("report user", status == 201 and payload["data"]["report"]["status"] == "pending", f"status={status} {payload}")
+        status, payload = request("POST", "/reports/create", {"target_type": "planet", "target_id": 2, "reason": "spam"}, token=nusa)
+        check("report bad target", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/reports/create", {"target_type": "user", "target_id": 2, "reason": "benci"}, token=nusa)
+        check("report bad reason", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/reports/create", {"target_type": "user", "target_id": 999999, "reason": "spam"}, token=nusa)
+        check("report unknown", status == 404, f"status={status} {payload}")
+        status, payload = request("POST", "/reports/create", {"target_type": "user", "target_id": 1, "reason": "spam"}, token=nusa)
+        check("report self rejected", status == 404, f"status={status} {payload}")
+        status, payload = request("GET", "/reports/mine", token=nusa)
+        check("my reports", status == 200 and any(r["target_id"] == 2 for r in payload["data"]["reports"]), f"status={status} {payload}")
+
+        # PIN dompet.
+        status, payload = request("POST", "/auth/register", {"username": f"pin{suffix}", "password": "secret123", "display_name": "Pin"})
+        pin_token = payload.get("data", {}).get("auth", {}).get("access_token")
+        status, payload = request("POST", "/wallet/topup", {"amount": 10000}, token=pin_token)
+        check("pinuser topup", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/set_pin", {"pin": "12"}, token=pin_token)
+        check("pin too short", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/set_pin", {"pin": "1234"}, token=pin_token)
+        check("pin set", status == 200 and payload["data"]["has_pin"] is True, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/transfer", {"to_user_id": 2, "amount": 100}, token=pin_token)
+        check("transfer needs pin", status == 403 and payload["error"]["code"] == "pin_required", f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/transfer", {"to_user_id": 2, "amount": 100, "pin": "0000"}, token=pin_token)
+        check("wrong pin rejected", status == 403, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/transfer", {"to_user_id": 2, "amount": 100, "pin": "1234"}, token=pin_token)
+        check("transfer with pin", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/set_pin", {"pin": "5678"}, token=pin_token)
+        check("change pin needs old", status == 401, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/set_pin", {"pin": "5678", "old_pin": "1234"}, token=pin_token)
+        check("pin changed", status == 200, f"status={status} {payload}")
+
+        # Tagih koin.
+        status, payload = request("POST", "/auth/register", {"username": f"rqa{suffix}", "password": "secret123", "display_name": "ReqA"})
+        rqa_token = payload.get("data", {}).get("auth", {}).get("access_token")
+        status, payload = request("POST", "/auth/register", {"username": f"rqb{suffix}", "password": "secret123", "display_name": "ReqB"})
+        rqb_token = payload.get("data", {}).get("auth", {}).get("access_token")
+        rqb_id = payload.get("data", {}).get("user", {}).get("id")
+        status, payload = request("POST", "/wallet/topup", {"amount": 5000}, token=rqb_token)
+        check("reqb topup", status == 201, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/request_money", {"to_user_id": rqb_id, "amount": 1000, "note": "Ganti"}, token=rqa_token)
+        req_id = payload.get("data", {}).get("request", {}).get("id")
+        check("request money", status == 201 and req_id, f"status={status} {payload}")
+        status, payload = request("GET", "/wallet/requests", token=rqb_token)
+        check("incoming request", status == 200 and any(r["id"] == req_id for r in payload["data"]["incoming"]), f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/request_pay", {"request_id": req_id}, token=rqa_token)
+        check("pay own request rejected", status == 404, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/request_pay", {"request_id": req_id}, token=rqb_token)
+        check("request paid", status == 200 and payload["data"]["paid"] is True, f"status={status} {payload}")
+        status, payload = request("GET", "/wallet", token=rqa_token)
+        check("requester credited", status == 200 and payload["data"]["balance"] == 1000, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/request_pay", {"request_id": req_id}, token=rqb_token)
+        check("double pay rejected", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/request_money", {"to_user_id": rqb_id, "amount": 500}, token=rqa_token)
+        req2 = payload.get("data", {}).get("request", {}).get("id")
+        status, payload = request("POST", "/wallet/request_decline", {"request_id": req2}, token=rqb_token)
+        check("request declined", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/request_money", {"to_user_id": rqb_id, "amount": 500}, token=rqa_token)
+        req3 = payload.get("data", {}).get("request", {}).get("id")
+        status, payload = request("POST", "/wallet/request_cancel", {"request_id": req3}, token=rqa_token)
+        check("request cancelled", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/request_pay", {"request_id": req3}, token=rqb_token)
+        check("pay cancelled rejected", status == 422, f"status={status} {payload}")
+
+        # Amplop merah.
+        status, payload = request("POST", "/wallet/topup", {"amount": 100000}, token=nusa)
+        check("redpacket funds", status == 201, f"status={status} {payload}")
+        status, payload = request("GET", "/wallet", token=nusa)
+        bal_before = payload["data"]["balance"] if payload.get("ok") else 0
+        status, payload = request("POST", "/wallet/redpacket_create", {"conversation_id": group_id, "total": 100, "count": 2, "note": "Bagi rezeki"}, token=nusa)
+        pkt = payload.get("data", {}).get("packet", {}) if payload.get("ok") else {}
+        pkt_id = pkt.get("id")
+        msg_ok = payload.get("data", {}).get("message", {}).get("type") == "redpacket" if payload.get("ok") else False
+        check("redpacket created", status == 201 and pkt_id and msg_ok, f"status={status} {payload}")
+        status, payload = request("GET", "/wallet", token=nusa)
+        check("sender debited", status == 200 and payload["data"]["balance"] == bal_before - 100, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/redpacket_claim", {"packet_id": pkt_id}, token=sari)
+        amt1 = payload.get("data", {}).get("amount", 0) if payload.get("ok") else 0
+        check("first claim", status == 200 and payload["data"]["status"] == "claimed" and 1 <= amt1 <= 99, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/redpacket_claim", {"packet_id": pkt_id}, token=sari)
+        check("claim once only", status == 200 and payload["data"]["status"] == "already" and payload["data"]["amount"] == amt1, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/redpacket_claim", {"packet_id": pkt_id}, token=nusa)
+        check("sender cannot claim", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/redpacket_claim", {"packet_id": pkt_id}, token=dewi)
+        check("second claim", status == 200 and payload["data"]["status"] == "claimed" and payload["data"]["packet"]["status"] == "finished", f"status={status} {payload}")
+        status, payload = request("GET", f"/wallet/redpacket?id={pkt_id}", token=nusa)
+        pkt_full = payload.get("data", {}).get("packet", {}) if payload.get("ok") else {}
+        check("packet total exact", status == 200 and pkt_full.get("claimed_amount") == 100 and len(pkt_full.get("claims", [])) == 2, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/redpacket_claim", {"packet_id": pkt_id}, token=new_token)
+        check("non-member claim hidden", status == 404, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/redpacket_create", {"conversation_id": group_id, "total": 5, "count": 10}, token=nusa)
+        check("count over members", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/redpacket_create", {"conversation_id": group_id, "total": 1, "count": 2}, token=nusa)
+        check("total below count", status == 422, f"status={status} {payload}")
+        status, payload = request("POST", "/wallet/redpacket_create", {"conversation_id": group_id, "total": 9000000, "count": 1}, token=nusa)
+        check("redpacket overdraft", status == 422, f"status={status} {payload}")
+
+        # Gaya story.
+        status, payload = request("POST", "/moments/story_create", {"body": f"Gaya-{suffix}", "style": "sunset"}, token=nusa)
+        styled = payload.get("data", {}).get("story", {}).get("id") if payload.get("ok") else None
+        check("story style", status == 201 and payload["data"]["story"]["style"] == "sunset", f"status={status} {payload}")
+        status, payload = request("POST", "/moments/story_create", {"body": "x", "style": "neon"}, token=nusa)
+        check("story style invalid", status == 422, f"status={status} {payload}")
+        if styled:
+            status, payload = request("POST", "/moments/story_delete", {"id": styled}, token=nusa)
+            check("styled story cleanup", status == 200, f"status={status} {payload}")
+
+        # Suka komentar.
+        status, payload = request("POST", "/moments/comment", {"id": moment_id, "body": f"Suka komen-{suffix}"}, token=sari)
+        like_cid = payload.get("data", {}).get("comment", {}).get("id")
+        status, payload = request("POST", "/moments/like_comment", {"id": like_cid}, token=nusa)
+        check("like comment", status == 200 and payload["data"]["like_count"] == 1, f"status={status} {payload}")
+        status, payload = request("GET", f"/moments/comments?id={moment_id}", token=nusa)
+        cmts = payload.get("data", {}).get("comments", []) if payload.get("ok") else []
+        mine_c = [c for c in cmts if c["id"] == like_cid]
+        check("comment like shown", status == 200 and mine_c and mine_c[0]["liked_by_me"] is True and mine_c[0]["like_count"] == 1, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/unlike_comment", {"id": like_cid}, token=nusa)
+        check("unlike comment", status == 200 and payload["data"]["like_count"] == 0, f"status={status} {payload}")
+        status, payload = request("POST", "/moments/comment_delete", {"id": like_cid}, token=nusa)
+        check("liked comment cleanup", status == 200, f"status={status} {payload}")
+
+        # Info dibaca per pesan.
+        status, payload = request("GET", f"/conversations/message_reads?id={new_conv}&message_id={probe_id}", token=nusa)
+        readers = payload.get("data", {}).get("read_by", []) if payload.get("ok") else []
+        check("message reads", status == 200 and any(r["id"] == 1 for r in readers), f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/message_reads?id={new_conv}&message_id=999999", token=nusa)
+        check("reads unknown message", status == 404, f"status={status} {payload}")
+
+        # Tagar.
+        tag = f"smoke{suffix}"
+        status, payload = request("POST", "/moments/create", {"body": f"Halo #{tag} semua"}, token=nusa)
+        tag_mid = payload.get("data", {}).get("moment", {}).get("id") if payload.get("ok") else None
+        status, payload = request("GET", f"/moments/tag?tag={tag}", token=sari)
+        tagged = payload.get("data", {}).get("moments", []) if payload.get("ok") else []
+        check("tag feed", status == 200 and any(m["id"] == tag_mid for m in tagged), f"status={status} {payload}")
+        status, payload = request("GET", "/moments/tag?tag=x", token=sari)
+        check("tag too short", status == 422, f"status={status} {payload}")
+        if tag_mid:
+            status, payload = request("POST", "/moments/delete", {"id": tag_mid}, token=nusa)
+            check("tagged moment cleanup", status == 200, f"status={status} {payload}")
 
         status, payload = request("POST", "/auth/logout", {}, token=new_token)
         check("logout", status == 200, f"status={status} {payload}")

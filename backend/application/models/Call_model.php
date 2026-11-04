@@ -154,4 +154,28 @@ final class Call_model extends CI_Model
         );
         return array_map(static fn (array $r): int => (int) $r['user_id'], $rows);
     }
+
+    /**
+     * Riwayat: panggilan 1-1 milikku + room grup yang pernah kuikuti.
+     *
+     * @return list<array>
+     */
+    public function historyFor(int $userId, int $limit = 30, int $beforeId = 0): array
+    {
+        $limit = max(1, min(100, $limit));
+        $params = [$userId, $userId, $userId];
+        $where = '(c.caller_id = ? OR c.callee_id = ?
+             OR EXISTS (SELECT 1 FROM call_participants p WHERE p.call_id = c.id AND p.user_id = ?))';
+        if ($beforeId > 0) {
+            $where .= ' AND c.id < ?';
+            $params[] = $beforeId;
+        }
+        return $this->store->all(
+            'SELECT c.*, g.title AS group_title FROM calls c
+             LEFT JOIN conversations g ON g.id = c.conversation_id
+             WHERE ' . $where . '
+             ORDER BY c.id DESC LIMIT ' . $limit,
+            $params
+        );
+    }
 }

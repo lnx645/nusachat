@@ -89,6 +89,22 @@ Body opsional `{ "refresh_token": "..." }`. Semua sesi user dicabut dan `token_v
 { "ok": true, "data": { "username": "rina", "available": true, "reason": null } }
 ```
 
+### POST `/auth/forgot`
+
+`{ "login": "rina" }` — selalu `200 { sent: true }` (anti enumerasi). Di development response juga berisi `reset_token` (15 menit) karena belum ada gateway SMS/email; di produksi token hanya dicatat di log.
+
+### POST `/auth/reset`
+
+`{ "token": "...", "new_password": "..." }` — token sekali pakai; semua sesi dicabut.
+
+### GET `/auth/sessions` 🔒
+
+Daftar sesi aktif (`jti`, `device`, `created_at`, `last_used_at`, `expires_at`).
+
+### POST `/auth/revoke_session` 🔒
+
+`{ "jti": "..." }` — cabut satu sesi.
+
 ## Konfigurasi
 
 ### GET `/config`
@@ -98,7 +114,7 @@ Info aplikasi, fitur, batas, dan `ws_url`.
 ### GET `/config/ping`
 
 ```json
-{ "ok": true, "data": { "pong": true, "db": "sqlite", "server_time": "...", "version": "0.1.0" } }
+{ "ok": true, "data": { "pong": true, "db": "sqlite", "server_time": "...", "version": "0.2.0" } }
 ```
 
 ## Pengguna 🔒
@@ -115,7 +131,14 @@ Info aplikasi, fitur, batas, dan `ws_url`.
 | POST | `/users/device_key` | `device_id`, `public_key` (base64 kunci publik RSA perangkat) |
 | GET | `/users/device_keys?user_id=5` | — (daftar kunci publik perangkat user) |
 
-Field `users/update`: `display_name`, `bio`, `gender` (`male`/`female`/`other`), `birthday` (`YYYY-MM-DD`), `avatar_url`, `discoverable`, `phone`.
+Field `users/update`: `username` (unik, aturan register), `display_name`, `bio`, `gender` (`male`/`female`/`other`), `birthday` (`YYYY-MM-DD`), `avatar_url`, `discoverable`, `phone`.
+
+## Laporan 🔒
+
+| Method | Path | Body |
+| --- | --- | --- |
+| POST | `/reports/create` | `target_type` (`user`/`message`/`moment`/`comment`/`story`), `target_id`, `reason` (`spam`/`abuse`/`fraud`/`porn`/`violence`/`other`), `details?` |
+| GET | `/reports/mine` | — |
 
 ```json
 { "lat": -6.2, "lng": 106.816 }
@@ -129,7 +152,8 @@ Field `users/update`: `display_name`, `bio`, `gender` (`male`/`female`/`other`),
 | --- | --- | --- |
 | GET | `/friends` | — |
 | GET | `/friends/requests` | — |
-| POST | `/friends/send` | `user_id` (ditolak bila salah satu memblokir) |
+| POST | `/friends/send` | `user_id`, `message?` sapaan ≤160 (ditolak bila salah satu memblokir) |
+| POST | `/friends/remark` | `user_id`, `remark?` (kosong = hapus; maks 40, khusus teman) |
 | POST | `/friends/respond` | `request_id`, `action` = `accept`/`decline` |
 | POST/DELETE | `/friends/remove` | `user_id` |
 | POST | `/friends/block` | `user_id` |
@@ -139,7 +163,7 @@ Field `users/update`: `display_name`, `bio`, `gender` (`male`/`female`/`other`),
 
 Blokir satu arah: chat/panggilan langsung, permintaan teman, pencarian, profil, dan nearby terhadap yang diblokir ditolak. Bila saya memblokir → `403 blocked`; bila saya diblokir → `404` seolah tidak ada. Grup tidak terpengaruh.
 
-`GET /friends/requests` mengembalikan `incoming` dan `outgoing`.
+`GET /friends/requests` mengembalikan `incoming` dan `outgoing` (termasuk `greeting`). Daftar teman menyertakan `remark` (nama panggilan pribadi).
 
 ## Kontak 🔒
 
@@ -184,8 +208,12 @@ Maksimal 2000 kontak per request. Nomor di-hash dengan HMAC; server tidak menyim
 | GET | `/conversations/join_requests` | `id` (admin saja) |
 | POST | `/conversations/review_request` | `request_id`, `action` = `approve`/`reject` (admin saja) |
 | POST | `/conversations/mute` | `id`, `muted` |
+| POST | `/conversations/pin_chat` | `id`, `pinned?` (default true) |
+| POST | `/conversations/mark_unread` | `id`, `message_id?` |
+| GET | `/conversations/search_all` | `q` (min. 2 huruf), `limit?` — cari di semua chat |
+| POST | `/conversations/transfer_owner` | `id`, `user_id` (owner grup saja) |
 
-`GET /conversations` mendukung `?archived=1` untuk daftar arsip; default menyembunyikan yang diarsipkan.
+`GET /conversations` mendukung `?archived=1` untuk daftar arsip (default disembunyikan) serta pagination `?limit=` + `?before=` (kursor waktu); urutan: disematkan dulu, lalu pesan terakhir.
 
 Chat langsung hanya bisa dibuat dengan teman. Grup maksimal 50 anggota dan hanya owner yang bisa menambah anggota.
 
@@ -202,9 +230,9 @@ Undangan: anggota bisa meminta tautan via `/conversations/invite` saat `invite_l
 }
 ```
 
-Field tambahan: `reply_to_id`, `attachment_url`, `attachment_meta`. Untuk `type` selain `text`, `attachment_url` wajib. Tipe yang didukung: `text`, `image`, `file`, `audio`, `video`.
+Field tambahan: `reply_to_id`, `attachment_url`, `attachment_meta`. Untuk `type` selain `text`/`sticker`, `attachment_url` wajib. Tipe yang didukung: `text`, `image`, `file`, `audio`, `video`, `location`, `sticker`, `redpacket` (redpacket hanya dibuat server via dompet).
 
-Mention: tulis `@username` anggota percakapan di isi pesan teks; server menyimpannya sebagai `mentions: [user_id, ...]` dan `mentioned_me: true` untuk user yang disebut.
+Mention: tulis `@username` anggota percakapan di isi pesan teks; server menyimpannya sebagai `mentions: [user_id, ...]` dan `mentioned_me: true` untuk user yang disebut. `@semua`/`@all` menyebut semua anggota.
 
 `client_id` membuat pengiriman idempoten: request ulang dengan `client_id` yang sama mengembalikan pesan lama dengan `duplicate: true` dan HTTP `200`.
 
@@ -247,24 +275,38 @@ Response:
 
 `POST /conversations/forward` dengan `{ "message_id": 123, "to_id": 5 }`. Menyalin pesan ke percakapan tujuan dengan `forwarded: true` dan `forwarded_from_id` terisi. `reply_to` tidak ikut disalin. Klien E2EE boleh menyertakan `body` berisi isi yang sudah dienkripsi ulang dengan kunci percakapan tujuan.
 
+### Bintang & hapus-untuk-saya
+
+| Method | Path | Body |
+| --- | --- | --- |
+| POST | `/messages/star` | `message_id` |
+| POST | `/messages/unstar` | `message_id` |
+| GET | `/messages/starred` | `limit?` |
+| POST | `/messages/hide` | `message_id` (sembunyikan hanya untukku) |
+
 ## Momen 🔒
 
 | Method | Path | Body/Query |
 | --- | --- | --- |
 | GET | `/moments` | `before_id?`, `limit?` |
 | GET | `/moments/show?id=1` | — |
-| POST | `/moments/create` | `body?`, `media?` (foto/video, maks 9) |
+| POST | `/moments/create` | `body?`, `media?` (foto/video, maks 9), `audience?` (`friends`/`private`) |
+| POST | `/moments/edit` | `id`, `body` (milik sendiri) → `edited_at` |
 | POST/DELETE | `/moments/delete` | `id` |
 | POST | `/moments/reshare` | `id` → salinan + atribusi `reshared: {moment_id, author}` |
-| GET | `/moments/stories` | — (story aktif teman + sendiri) |
+| GET | `/moments/likes` | `id` → daftar penyuka |
+| GET | `/moments/stories` | — (story aktif teman + sendiri + `view_count`) |
 | POST | `/moments/story_create` | `body?`, `media?` (maks 4), `expires_in_hours?` (default 24) |
 | POST/DELETE | `/moments/story_delete` | `id` |
+| POST | `/moments/story_view` | `id` (catat tontonan) |
+| GET | `/moments/story_views` | `id` (khusus pembuat) |
 | POST | `/moments/like` | `id` |
 | POST/DELETE | `/moments/unlike` | `id` |
 | GET | `/moments/comments?id=1` | — |
 | POST | `/moments/comment` | `id`, `body` |
+| POST/DELETE | `/moments/comment_delete` | `id` (pemilik komentar/pemilik momen) |
 
-`media` adalah array URL hasil upload, maksimal 9. Momen minimal berisi teks atau satu media. Feed berisi momen sendiri dan teman.
+`media` adalah array URL hasil upload, maksimal 9. Momen minimal berisi teks atau satu media. Feed berisi momen sendiri dan teman; momen `private` hanya terlihat pemiliknya.
 
 ## Orang terdekat 🔒
 
@@ -328,19 +370,20 @@ Ringkasan untuk badge dan reconnect:
 
 Butuh `FCM_SERVER_KEY` di backend. Tanpa key, response `push_enabled: false` dan API tetap jalan; notifikasi hanya dari WS saat app terbuka. Payload FCM data-only (`event`, `title`, `body` + id terkait); channel Android: `nusachat_messages` dan `nusachat_calls`.
 
-## Voice call 🔒 (video call dihapus)
+## Voice & video call 🔒
 
 | Method | Path | Body |
 | --- | --- | --- |
-| POST | `/calls/offer` | `to_user_id`, `sdp`, `kind?` (hanya `audio`; `video` ditolak `403 video_disabled`) |
+| POST | `/calls/offer` | `to_user_id`, `sdp`, `kind?` (`audio`/`video`) |
 | POST | `/calls/answer` | `call_id`, `sdp` |
 | POST | `/calls/ice` | `call_id`, `candidate` (`{candidate, sdpMid, sdpMLineIndex}`), `to_user_id?` (wajib untuk room grup) |
 | POST | `/calls/reject` | `call_id` |
 | POST | `/calls/end` | `call_id` |
 | GET | `/calls/incoming` | — (mengembalikan `calls` + `rooms`) |
+| GET | `/calls/history` | `limit?`, `before_id?` → riwayat + `direction`, `missed`, `duration` |
 | GET | `/calls/ice_servers` | — (kredensial TURN Cloudflare short-lived per `docs/TURN.md`, fallback STUN) |
 
-Signaling lewat outbox realtime (`call_offer`, `call_answer`, `call_ice`, `call_end`) + FCM wake-up untuk `call_offer`. Media audio peer-to-peer WebRTC (TURN Cloudflare via `/calls/ice_servers`, fallback STUN `stun:stun.cloudflare.com:3478`). Status: `ringing` → `active` → `ended`/`rejected`.
+Signaling lewat outbox realtime (`call_offer`, `call_answer`, `call_ice`, `call_end`) + FCM wake-up untuk `call_offer`. Media peer-to-peer WebRTC (TURN Cloudflare via `/calls/ice_servers`, fallback STUN `stun:stun.cloudflare.com:3478`). Status: `ringing` → `active` → `ended`/`rejected`. Grup tetap mesh audio.
 
 ### Panggilan grup 🔒
 
@@ -370,12 +413,24 @@ Koin demo (bilangan bulat, bukan uang sungguhan / bukan payment gateway).
 
 | Method | Path | Body |
 | --- | --- | --- |
-| GET | `/wallet` | — → `{balance}` |
+| GET | `/wallet` | — → `{balance, has_pin}` |
 | POST | `/wallet/topup` | `amount` (1–10.000.000) |
-| POST | `/wallet/transfer` | `to_user_id`, `amount`, `note?` (atomik, saldo kurang → 422) |
+| POST | `/wallet/transfer` | `to_user_id`, `amount`, `note?`, `pin?` (atomik, saldo kurang → 422) |
 | GET | `/wallet/history` | `limit?` → `{balance, transactions}` |
+| POST | `/wallet/set_pin` | `pin` (4–6 digit), `old_pin?` (wajib bila sudah ada PIN) |
+| POST | `/wallet/check_pin` | `pin` |
+| POST | `/wallet/request_money` | `to_user_id`, `amount`, `note?` |
+| GET | `/wallet/requests` | — → `{incoming, outgoing}` |
+| POST | `/wallet/request_pay` | `request_id`, `pin?` |
+| POST | `/wallet/request_decline` | `request_id` |
+| POST | `/wallet/request_cancel` | `request_id` |
+| POST | `/wallet/redpacket_create` | `conversation_id`, `total`, `count`, `note?`, `pin?`, `client_id?` |
+| GET | `/wallet/redpacket` | `id` (anggota chat saja) |
+| POST | `/wallet/redpacket_claim` | `packet_id` |
 
-Transfer ke sesama user aktif; penerima diberi event realtime `wallet_received`.
+Transfer ke sesama user aktif; penerima diberi event realtime `wallet_received`. Bila pengirim memasang PIN, `transfer`/`request_pay`/`redpacket_create` wajib `pin` yang benar (`403 pin_required` bila salah).
+
+Amplop merah: debit pengirim atomik + pesan `type=redpacket` berisi `packet_id` di `attachment_meta`. Klaim acak ala luck-draw (min 1 koin, total pas); pengirim tidak bisa klaim; kedaluwarsa 24 jam dengan pengembalian sisa otomatis (lazy). Event: `redpacket_claimed`. Tagihan: event `wallet_requested` (+ push), `wallet_request_paid`, `wallet_request_declined`.
 
 ## DTO
 

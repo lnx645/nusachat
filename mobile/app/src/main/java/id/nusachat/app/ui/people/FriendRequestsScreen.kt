@@ -115,11 +115,12 @@ private fun RequestRow(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
 ) {
-    UserRow(
-        user = request.user,
-        subtitle = "@${request.user.username} ingin berteman",
-        onClick = {},
-        trailing = {
+    Column {
+        UserRow(
+            user = request.user,
+            subtitle = "@${request.user.username} ingin berteman",
+            onClick = {},
+            trailing = {
             NusaIconButton(onClick = onAccept) {
                 Icon(
                     painter = painterResource(id = NusaIcons.Check),
@@ -137,5 +138,15 @@ private fun RequestRow(
                 )
             }
         },
-    )
+        )
+        request.greeting?.takeIf { it.isNotBlank() }?.let { greeting ->
+            Text(
+                text = "\"$greeting\"",
+                style = MaterialTheme.typography.bodySmall,
+                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 74.dp, end = 16.dp, bottom = 8.dp),
+            )
+        }
+    }
 }

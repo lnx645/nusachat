@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     google_sub TEXT UNIQUE,
-    google_email TEXT
+    google_email TEXT,
+    wallet_pin_hash TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_users_phone_hash ON users (phone_hash);
 CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users (last_seen_at);
@@ -36,7 +37,9 @@ CREATE TABLE IF NOT EXISTS tokens (
     device TEXT,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    revoked_at TEXT
+    revoked_at TEXT,
+    revoked_reason TEXT,
+    last_used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens (user_id);
 
@@ -57,6 +60,7 @@ CREATE TABLE IF NOT EXISTS friendships (
     requester_id INTEGER NOT NULL,
     addressee_id INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    message TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (requester_id, addressee_id)
@@ -69,6 +73,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     uuid TEXT NOT NULL UNIQUE,
     type TEXT NOT NULL DEFAULT 'direct',
     title TEXT,
+    description TEXT,
     avatar_url TEXT,
     created_by INTEGER NOT NULL,
     direct_key TEXT UNIQUE,
@@ -96,6 +101,7 @@ CREATE TABLE IF NOT EXISTS conversation_members (
     muted INTEGER NOT NULL DEFAULT 0,
     cleared_at TEXT,
     archived INTEGER NOT NULL DEFAULT 0,
+    pinned INTEGER NOT NULL DEFAULT 0,
     UNIQUE (conversation_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_members_user ON conversation_members (user_id);
@@ -129,6 +135,8 @@ CREATE TABLE IF NOT EXISTS moments (
     body TEXT,
     media_json TEXT,
     reshared_from_id INTEGER,
+    audience TEXT NOT NULL DEFAULT 'friends',
+    edited_at TEXT,
     created_at TEXT NOT NULL,
     deleted_at TEXT
 );
@@ -200,6 +208,7 @@ CREATE TABLE IF NOT EXISTS stories (
     user_id INTEGER NOT NULL,
     body TEXT,
     media_json TEXT,
+    style TEXT,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     deleted_at TEXT
@@ -281,6 +290,7 @@ CREATE TABLE IF NOT EXISTS calls (
     status TEXT NOT NULL DEFAULT 'ringing',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    answered_at TEXT,
     ended_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls (callee_id, status);
@@ -297,6 +307,103 @@ CREATE TABLE IF NOT EXISTS call_participants (
 );
 CREATE INDEX IF NOT EXISTS idx_call_participants_call ON call_participants (call_id, status);
 
+CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets (user_id);
+
+CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reporter_id INTEGER NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    details TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reports_reporter ON reports (reporter_id);
+
+CREATE TABLE IF NOT EXISTS story_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    story_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (story_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_story_views_story ON story_views (story_id);
+
+CREATE TABLE IF NOT EXISTS starred_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    conversation_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (user_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_starred_user ON starred_messages (user_id);
+
+CREATE TABLE IF NOT EXISTS hidden_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (user_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_hidden_user ON hidden_messages (user_id);
+
+CREATE TABLE IF NOT EXISTS friend_remarks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    friend_id INTEGER NOT NULL,
+    remark TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (user_id, friend_id)
+);
+
+CREATE TABLE IF NOT EXISTS wallet_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    requester_id INTEGER NOT NULL,
+    target_id INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    note TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_requests_target ON wallet_requests (target_id, status);
+
+CREATE TABLE IF NOT EXISTS red_packets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL UNIQUE,
+    conversation_id INTEGER NOT NULL,
+    message_id INTEGER,
+    sender_id INTEGER NOT NULL,
+    total_amount INTEGER NOT NULL,
+    total_count INTEGER NOT NULL,
+    claimed_count INTEGER NOT NULL DEFAULT 0,
+    claimed_amount INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_red_packets_conversation ON red_packets (conversation_id);
+
+CREATE TABLE IF NOT EXISTS red_packet_claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    packet_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (packet_id, user_id)
+);
+
 -- Kolom untuk database yang dibuat sebelum fitur chat lanjutan ada.
 ALTER TABLE messages ADD COLUMN forwarded_from_id INTEGER;
 ALTER TABLE messages ADD COLUMN mentions TEXT;
@@ -306,3 +413,22 @@ ALTER TABLE conversations ADD COLUMN invite_token TEXT;
 ALTER TABLE calls ADD COLUMN conversation_id INTEGER;
 ALTER TABLE calls ADD COLUMN kind TEXT NOT NULL DEFAULT 'audio';
 ALTER TABLE moments ADD COLUMN reshared_from_id INTEGER;
+ALTER TABLE users ADD COLUMN wallet_pin_hash TEXT;
+ALTER TABLE tokens ADD COLUMN last_used_at TEXT;
+ALTER TABLE friendships ADD COLUMN message TEXT;
+ALTER TABLE conversations ADD COLUMN description TEXT;
+ALTER TABLE conversation_members ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE moments ADD COLUMN audience TEXT NOT NULL DEFAULT 'friends';
+ALTER TABLE moments ADD COLUMN edited_at TEXT;
+ALTER TABLE calls ADD COLUMN answered_at TEXT;
+ALTER TABLE stories ADD COLUMN style TEXT;
+ALTER TABLE tokens ADD COLUMN revoked_reason TEXT;
+
+CREATE TABLE IF NOT EXISTS comment_likes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    comment_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (comment_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_comment_likes_comment ON comment_likes (comment_id);

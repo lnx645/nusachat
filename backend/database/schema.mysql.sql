@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS users (
     UNIQUE KEY uq_users_phone_hash (phone_hash),
     google_sub VARCHAR(64) NULL,
     google_email VARCHAR(190) NULL,
+    wallet_pin_hash VARCHAR(255) NULL,
     UNIQUE KEY uq_users_google_sub (google_sub),
     KEY idx_users_last_seen (last_seen_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -42,6 +43,8 @@ CREATE TABLE IF NOT EXISTS tokens (
     expires_at VARCHAR(32) NOT NULL,
     created_at VARCHAR(32) NOT NULL,
     revoked_at VARCHAR(32) NULL,
+    revoked_reason VARCHAR(16) NULL,
+    last_used_at VARCHAR(32) NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uq_tokens_jti (jti),
     KEY idx_tokens_user (user_id)
@@ -65,6 +68,7 @@ CREATE TABLE IF NOT EXISTS friendships (
     requester_id BIGINT UNSIGNED NOT NULL,
     addressee_id BIGINT UNSIGNED NOT NULL,
     status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    message VARCHAR(160) NULL,
     created_at VARCHAR(32) NOT NULL,
     updated_at VARCHAR(32) NOT NULL,
     PRIMARY KEY (id),
@@ -78,6 +82,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     uuid CHAR(36) NOT NULL,
     type VARCHAR(16) NOT NULL DEFAULT 'direct',
     title VARCHAR(60) NULL,
+    description VARCHAR(300) NULL,
     avatar_url VARCHAR(500) NULL,
     created_by BIGINT UNSIGNED NOT NULL,
     direct_key VARCHAR(40) NULL,
@@ -109,6 +114,7 @@ CREATE TABLE IF NOT EXISTS conversation_members (
     muted TINYINT(1) NOT NULL DEFAULT 0,
     cleared_at VARCHAR(32) NULL,
     archived TINYINT(1) NOT NULL DEFAULT 0,
+    pinned TINYINT(1) NOT NULL DEFAULT 0,
     PRIMARY KEY (id),
     UNIQUE KEY uq_members_pair (conversation_id, user_id),
     KEY idx_members_user (user_id)
@@ -145,6 +151,8 @@ CREATE TABLE IF NOT EXISTS moments (
     body TEXT NULL,
     media_json TEXT NULL,
     reshared_from_id BIGINT UNSIGNED NULL,
+    audience VARCHAR(16) NOT NULL DEFAULT 'friends',
+    edited_at VARCHAR(32) NULL,
     created_at VARCHAR(32) NOT NULL,
     deleted_at VARCHAR(32) NULL,
     PRIMARY KEY (id),
@@ -225,6 +233,7 @@ CREATE TABLE IF NOT EXISTS stories (
     user_id BIGINT UNSIGNED NOT NULL,
     body TEXT NULL,
     media_json TEXT NULL,
+    style VARCHAR(24) NULL,
     created_at VARCHAR(32) NOT NULL,
     expires_at VARCHAR(32) NOT NULL,
     deleted_at VARCHAR(32) NULL,
@@ -316,6 +325,7 @@ CREATE TABLE IF NOT EXISTS calls (
     status VARCHAR(16) NOT NULL DEFAULT 'ringing',
     created_at VARCHAR(32) NOT NULL,
     updated_at VARCHAR(32) NOT NULL,
+    answered_at VARCHAR(32) NULL,
     ended_at VARCHAR(32) NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uq_calls_uuid (uuid),
@@ -335,6 +345,114 @@ CREATE TABLE IF NOT EXISTS call_participants (
     KEY idx_call_participants_call (call_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS password_resets (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id BIGINT UNSIGNED NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    expires_at VARCHAR(32) NOT NULL,
+    used_at VARCHAR(32) NULL,
+    created_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_password_resets_token (token_hash),
+    KEY idx_password_resets_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS reports (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    reporter_id BIGINT UNSIGNED NOT NULL,
+    target_type VARCHAR(16) NOT NULL,
+    target_id BIGINT UNSIGNED NOT NULL,
+    reason VARCHAR(40) NOT NULL,
+    details VARCHAR(500) NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    created_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    KEY idx_reports_reporter (reporter_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS story_views (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    story_id BIGINT UNSIGNED NOT NULL,
+    user_id BIGINT UNSIGNED NOT NULL,
+    created_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_story_views (story_id, user_id),
+    KEY idx_story_views_story (story_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS starred_messages (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id BIGINT UNSIGNED NOT NULL,
+    conversation_id BIGINT UNSIGNED NOT NULL,
+    message_id BIGINT UNSIGNED NOT NULL,
+    created_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_starred (user_id, message_id),
+    KEY idx_starred_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS hidden_messages (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id BIGINT UNSIGNED NOT NULL,
+    message_id BIGINT UNSIGNED NOT NULL,
+    created_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_hidden (user_id, message_id),
+    KEY idx_hidden_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS friend_remarks (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id BIGINT UNSIGNED NOT NULL,
+    friend_id BIGINT UNSIGNED NOT NULL,
+    remark VARCHAR(40) NOT NULL,
+    updated_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_remarks (user_id, friend_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS wallet_requests (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    requester_id BIGINT UNSIGNED NOT NULL,
+    target_id BIGINT UNSIGNED NOT NULL,
+    amount BIGINT NOT NULL,
+    note VARCHAR(200) NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    created_at VARCHAR(32) NOT NULL,
+    updated_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    KEY idx_wallet_requests_target (target_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS red_packets (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid CHAR(36) NOT NULL,
+    conversation_id BIGINT UNSIGNED NOT NULL,
+    message_id BIGINT UNSIGNED NULL,
+    sender_id BIGINT UNSIGNED NOT NULL,
+    total_amount BIGINT NOT NULL,
+    total_count INT NOT NULL,
+    claimed_count INT NOT NULL DEFAULT 0,
+    claimed_amount BIGINT NOT NULL DEFAULT 0,
+    note VARCHAR(200) NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'active',
+    created_at VARCHAR(32) NOT NULL,
+    expires_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_red_packets_uuid (uuid),
+    KEY idx_red_packets_conversation (conversation_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS red_packet_claims (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    packet_id BIGINT UNSIGNED NOT NULL,
+    user_id BIGINT UNSIGNED NOT NULL,
+    amount BIGINT NOT NULL,
+    created_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_red_packet_claims (packet_id, user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Kolom untuk database yang dibuat sebelum fitur chat lanjutan ada.
 ALTER TABLE messages ADD COLUMN forwarded_from_id BIGINT UNSIGNED NULL;
 ALTER TABLE messages ADD COLUMN mentions TEXT NULL;
@@ -344,3 +462,23 @@ ALTER TABLE conversations ADD COLUMN invite_token VARCHAR(32) NULL;
 ALTER TABLE calls ADD COLUMN conversation_id BIGINT UNSIGNED NULL;
 ALTER TABLE calls ADD COLUMN kind VARCHAR(8) NOT NULL DEFAULT 'audio';
 ALTER TABLE moments ADD COLUMN reshared_from_id BIGINT UNSIGNED NULL;
+ALTER TABLE users ADD COLUMN wallet_pin_hash VARCHAR(255) NULL;
+ALTER TABLE tokens ADD COLUMN last_used_at VARCHAR(32) NULL;
+ALTER TABLE friendships ADD COLUMN message VARCHAR(160) NULL;
+ALTER TABLE conversations ADD COLUMN description VARCHAR(300) NULL;
+ALTER TABLE conversation_members ADD COLUMN pinned TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE moments ADD COLUMN audience VARCHAR(16) NOT NULL DEFAULT 'friends';
+ALTER TABLE moments ADD COLUMN edited_at VARCHAR(32) NULL;
+ALTER TABLE calls ADD COLUMN answered_at VARCHAR(32) NULL;
+ALTER TABLE stories ADD COLUMN style VARCHAR(24) NULL;
+ALTER TABLE tokens ADD COLUMN revoked_reason VARCHAR(16) NULL;
+
+CREATE TABLE IF NOT EXISTS comment_likes (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    comment_id BIGINT UNSIGNED NOT NULL,
+    user_id BIGINT UNSIGNED NOT NULL,
+    created_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_comment_likes (comment_id, user_id),
+    KEY idx_comment_likes_comment (comment_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

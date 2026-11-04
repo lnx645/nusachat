@@ -67,6 +67,7 @@ import id.nusachat.app.ui.chats.components.MediaGalleryScreen
 import id.nusachat.app.ui.components.NusaAvatar
 import id.nusachat.app.ui.components.NusaConfirmSheet
 import id.nusachat.app.ui.components.NusaOnlineGreen
+import id.nusachat.app.ui.components.NusaSearchField
 import id.nusachat.app.ui.components.formatClockTime
 import id.nusachat.app.ui.theme.NusaIcons
 
@@ -303,6 +304,16 @@ fun GroupInfoScreen(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            conversation.description?.takeIf { it.isNotBlank() }?.let { desc ->
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    desc,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                         Spacer(Modifier.height(20.dp))
                         Row(
@@ -397,6 +408,15 @@ fun GroupInfoScreen(
                     }
                 }
                 item(key = "members") {
+                    var memberQuery by remember(conversation.id) { mutableStateOf("") }
+                    var transferTarget by remember { mutableStateOf<User?>(null) }
+                    val shownMembers = remember(conversation.members, memberQuery) {
+                        if (memberQuery.isBlank()) conversation.members
+                        else conversation.members.filter {
+                            it.displayName.contains(memberQuery, ignoreCase = true) ||
+                                it.username.contains(memberQuery, ignoreCase = true)
+                        }
+                    }
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -435,7 +455,24 @@ fun GroupInfoScreen(
                                     Text(if (canAdd) "Tambah" else "Admin saja")
                                 }
                             }
-                            conversation.members.forEachIndexed { index, member ->
+                            if (conversation.members.size > 5) {
+                                NusaSearchField(
+                                    value = memberQuery,
+                                    onValueChange = { memberQuery = it },
+                                    placeholder = "Cari anggota",
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                                )
+                            }
+                            transferTarget?.let { target ->
+                                NusaConfirmSheet(
+                                    title = "Alihkan kepemilikan?",
+                                    text = "${target.displayName} menjadi pemilik grup dan kamu turun jadi admin.",
+                                    confirmLabel = "Alihkan",
+                                    onConfirm = { vm?.transferOwnership(target.id); transferTarget = null },
+                                    onDismiss = { transferTarget = null },
+                                )
+                            }
+                            shownMembers.forEachIndexed { index, member ->
                                 if (index > 0) {
                                     HorizontalDivider(
                                         modifier = Modifier.padding(start = 64.dp, end = 16.dp),
@@ -504,6 +541,9 @@ fun GroupInfoScreen(
                                                 NusaTextButton(onClick = { onSetRole(member.id, "admin") }) {
                                                     Text("Jadikan admin")
                                                 }
+                                            }
+                                            NusaTextButton(onClick = { transferTarget = member }) {
+                                                Text("Alihkan pemilik")
                                             }
                                             NusaTextButton(onClick = { confirmRemove = member }) {
                                                 Text("Keluarkan", color = MaterialTheme.colorScheme.error)

@@ -91,7 +91,7 @@ class User_model extends CI_Model
 
     public function update(int $id, array $fields): void
     {
-        $allowed = ['display_name', 'avatar_url', 'bio', 'gender', 'birthday', 'discoverable', 'phone', 'phone_hash'];
+        $allowed = ['username', 'display_name', 'avatar_url', 'bio', 'gender', 'birthday', 'discoverable', 'phone', 'phone_hash'];
         $data = [];
         foreach ($allowed as $field) {
             if (array_key_exists($field, $fields)) {

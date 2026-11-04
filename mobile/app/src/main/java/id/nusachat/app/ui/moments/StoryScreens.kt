@@ -178,6 +178,9 @@ fun StoryViewer(
     meId: Long,
     onDelete: (Story) -> Unit,
     onDismiss: () -> Unit,
+    onTrackView: (Story) -> Unit = {},
+    onShowViewers: (Story) -> Unit = {},
+    onReply: (Story) -> Unit = {},
 ) {
     if (stories.isEmpty()) {
         onDismiss()
@@ -190,6 +193,9 @@ fun StoryViewer(
     var current by remember { mutableStateOf(startIndex.coerceIn(0, stories.size - 1)) }
     androidx.compose.runtime.LaunchedEffect(pager.currentPage) { current = pager.currentPage }
     val story = stories[current]
+    androidx.compose.runtime.LaunchedEffect(story.id) {
+        if (story.author.id != meId) onTrackView(story)
+    }
 
     BackHandler(onBack = onDismiss)
     Dialog(
@@ -207,7 +213,12 @@ fun StoryViewer(
             ) { page ->
                 val item = stories[page]
                 val url = item.media.firstOrNull()
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .then(if (url == null) Modifier.background(StoryStyles.brushFor(item.style)) else Modifier),
+                    contentAlignment = Alignment.Center,
+                ) {
                     if (url != null && isVideoUrl(url)) {
                         MomentVideoPlayer(
                             url = url,
@@ -290,6 +301,51 @@ fun StoryViewer(
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 20.dp)
+                    .padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                if (story.author.id == meId) {
+                    androidx.compose.material3.TextButton(
+                        onClick = { onShowViewers(story) },
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.Black.copy(alpha = 0.45f)),
+                    ) {
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Visible),
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (story.viewCount == 0) "Belum dilihat" else "${story.viewCount} dilihat",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                } else {
+                    androidx.compose.material3.TextButton(
+                        onClick = { onReply(story) },
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.Black.copy(alpha = 0.45f)),
+                    ) {
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Reply),
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Balas", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
         }
     }
 }
@@ -299,10 +355,11 @@ fun StoryViewer(
 fun CreateStoryScreen(
     user: User?,
     onBack: () -> Unit,
-    onPost: (String, List<Uri>) -> Unit,
+    onPost: (String, List<Uri>, String?) -> Unit,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     var uris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var style by rememberSaveable { mutableStateOf(StoryStyles.STYLES.first()) }
     var showPicker by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
@@ -319,7 +376,7 @@ fun CreateStoryScreen(
                 },
                 actions = {
                     NusaButton(
-                        onClick = { onPost(text, uris) },
+                        onClick = { onPost(text, uris, style.takeIf { uris.isEmpty() }) },
                         enabled = text.isNotBlank() || uris.isNotEmpty(),
                         shape = RoundedCornerShape(20.dp),
                         colors = androidx.compose.material3.ButtonDefaults.buttonColors(
@@ -355,6 +412,21 @@ fun CreateStoryScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (uris.isEmpty()) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    StoryStyles.STYLES.forEach { option ->
+                        StoryStyles.Swatch(
+                            style = option,
+                            selected = style == option,
+                            onClick = { style = option },
+                        )
+                    }
+                }
+            }
             androidx.compose.foundation.text.BasicTextField(
                 value = text,
                 onValueChange = { if (it.length <= 500) text = it },

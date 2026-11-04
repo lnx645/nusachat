@@ -94,30 +94,38 @@ class Conversation_model extends CI_Model
     public function forUser(int $id, int $userId): ?array
     {
         return $this->store->one(
-            'SELECT c.*, m.last_read_message_id, m.role, m.muted, m.archived,
+            'SELECT c.*, m.last_read_message_id, m.role, m.muted, m.archived, m.pinned,
                     (SELECT COUNT(*) FROM messages msg
                      WHERE msg.conversation_id = c.id AND msg.id > m.last_read_message_id
-                       AND msg.sender_id <> ? AND msg.revoked_at IS NULL) AS unread_count
+                       AND msg.sender_id <> ? AND msg.revoked_at IS NULL
+                       AND NOT EXISTS (SELECT 1 FROM hidden_messages h WHERE h.user_id = ? AND h.message_id = msg.id)) AS unread_count
              FROM conversations c
              JOIN conversation_members m ON m.conversation_id = c.id
              WHERE c.id = ? AND m.user_id = ?',
-            [$userId, $id, $userId]
+            [$userId, $userId, $id, $userId]
         );
     }
 
-    public function listFor(int $userId, int $limit = 100): array
+    public function listFor(int $userId, int $limit = 100, ?string $before = null): array
     {
+        $params = [$userId, $userId, $userId];
+        $where = 'm.user_id = ?';
+        if ($before !== null && $before !== '') {
+            $where .= ' AND COALESCE(c.last_message_at, c.created_at) < ?';
+            $params[] = $before;
+        }
         return $this->store->all(
-            'SELECT c.*, m.last_read_message_id, m.role, m.muted, m.archived,
+            'SELECT c.*, m.last_read_message_id, m.role, m.muted, m.archived, m.pinned,
                     (SELECT COUNT(*) FROM messages msg
                      WHERE msg.conversation_id = c.id AND msg.id > m.last_read_message_id
-                       AND msg.sender_id <> ? AND msg.revoked_at IS NULL) AS unread_count
+                       AND msg.sender_id <> ? AND msg.revoked_at IS NULL
+                       AND NOT EXISTS (SELECT 1 FROM hidden_messages h WHERE h.user_id = ? AND h.message_id = msg.id)) AS unread_count
              FROM conversations c
              JOIN conversation_members m ON m.conversation_id = c.id
-             WHERE m.user_id = ?
-             ORDER BY COALESCE(c.last_message_at, c.created_at) DESC
+             WHERE ' . $where . '
+             ORDER BY m.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC
              LIMIT ' . max(1, min(200, $limit)),
-            [$userId, $userId]
+            $params
         );
     }
 
@@ -367,5 +375,68 @@ class Conversation_model extends CI_Model
             'id = ?',
             [$conversationId]
         );
+    }
+
+    /**
+     * Tandai belum dibaca: mundurkan penanda baca ke sebelum message_id
+     * (atau sebelum pesan terakhir bila kosong) agar unread_count > 0.
+     */
+    public function markUnread(int $conversationId, int $userId, int $messageId = 0): int
+    {
+        if ($messageId > 0) {
+            $target = $messageId - 1;
+        } else {
+            $lastId = (int) $this->store->value(
+                'SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?',
+                [$conversationId]
+            );
+            $target = max(0, $lastId - 1);
+        }
+        $this->store->update(
+            'conversation_members',
+            ['last_read_message_id' => $target],
+            'conversation_id = ? AND user_id = ?',
+            [$conversationId, $userId]
+        );
+        return $target;
+    }
+
+    public function setPinned(int $conversationId, int $userId, bool $pinned): void
+    {
+        $this->store->update(
+            'conversation_members',
+            ['pinned' => $pinned ? 1 : 0],
+            'conversation_id = ? AND user_id = ?',
+            [$conversationId, $userId]
+        );
+    }
+
+    /**
+     * Alihkan kepemilikan grup: target menjadi owner, owner lama jadi admin.
+     */
+    public function transferOwnership(int $conversationId, int $newOwnerId): void
+    {
+        $row = $this->find($conversationId);
+        if (!$row) {
+            return;
+        }
+        $oldOwner = (int) $row['created_by'];
+        $this->store->begin();
+        try {
+            $this->store->update(
+                'conversations',
+                ['created_by' => $newOwnerId, 'updated_at' => now_iso()],
+                'id = ?',
+                [$conversationId]
+            );
+            $this->setRole($conversationId, $newOwnerId, 'owner');
+            if ($oldOwner !== $newOwnerId && $this->isMember($conversationId, $oldOwner)) {
+                $this->setRole($conversationId, $oldOwner, 'admin');
+            }
+            $this->store->commit();
+        } catch (Throwable $e) {
+            $this->store->rollback();
+            throw $e;
+        }
     }
 }

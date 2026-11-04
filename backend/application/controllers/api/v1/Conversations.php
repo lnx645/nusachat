@@ -17,7 +17,9 @@ class Conversations extends MY_Controller
     {
         $this->require_method(['GET']);
         $user = $this->require_auth();
-        $rows = $this->conversation_model->listFor((int) $user['id']);
+        $limit = $this->param('limit') !== null ? $this->int_param('limit', 100) : 100;
+        $before = $this->param('before') !== null ? $this->str_param('before') : null;
+        $rows = $this->conversation_model->listFor((int) $user['id'], $limit, $before);
         $archivedOnly = $this->param('archived') !== null && $this->bool_param('archived');
         $rows = array_values(array_filter(
             $rows,
@@ -32,7 +34,12 @@ class Conversations extends MY_Controller
             $row['last_message'] = $lastRow ? message_dto($lastRow) : null;
             $conversations[] = $this->present($row, (int) $user['id']);
         }
-        $this->ok(['conversations' => $conversations]);
+        $last = end($rows);
+        $this->ok([
+            'conversations' => $conversations,
+            'has_more' => count($rows) >= max(1, min(200, $limit)),
+            'next_before' => $last ? ($last['last_message_at'] ?? $last['created_at']) : null,
+        ]);
     }
 
     public function show(): void
@@ -151,6 +158,18 @@ class Conversations extends MY_Controller
                 return $ts === false || $ts >= $cutoff;
             }));
         }
+        // Hapus-untuk-saya: saring pesan yang disembunyikan viewer.
+        $hidden = $this->message_model->hiddenIds(
+            (int) $user['id'],
+            array_map(static fn (array $m): int => (int) $m['id'], $rows)
+        );
+        if ($hidden) {
+            $hiddenSet = array_flip($hidden);
+            $rows = array_values(array_filter(
+                $rows,
+                static fn (array $m): bool => !isset($hiddenSet[(int) $m['id']])
+            ));
+        }
 
         $this->message_model->markDelivered($id, (int) $user['id']);
 
@@ -178,7 +197,7 @@ class Conversations extends MY_Controller
         $this->assertCanSend($row, $user);
 
         $type = $this->str_param('type');
-        $allowed = ['text', 'image', 'file', 'audio', 'video', 'location'];
+        $allowed = ['text', 'image', 'file', 'audio', 'video', 'location', 'sticker'];
         if (!in_array($type, $allowed, true)) {
             $this->fail('Unsupported message type.', 422, 'invalid_type');
         }
@@ -189,6 +208,12 @@ class Conversations extends MY_Controller
         if ($type === 'text' && $body === '') {
             $this->fail('Message cannot be empty.', 422, 'empty_message');
         }
+        if ($type === 'sticker') {
+            // Stiker emoji bawaan: body berisi satu emoji/id stiker pendek.
+            if ($body === '' || mb_strlen($body) > 24) {
+                $this->fail('Sticker must be 1-24 characters.', 422, 'invalid_sticker');
+            }
+        }
         if ($type === 'location') {
             $lat = $attachmentMeta['lat'] ?? null;
             $lng = $attachmentMeta['lng'] ?? null;
@@ -197,7 +222,7 @@ class Conversations extends MY_Controller
             }
             $attachmentMeta['lat'] = (float) $lat;
             $attachmentMeta['lng'] = (float) $lng;
-        } elseif ($type !== 'text' && $attachmentUrl === '') {
+        } elseif ($type !== 'text' && $type !== 'sticker' && $attachmentUrl === '') {
             $this->fail('attachment_url is required for this message type.', 422, 'missing_attachment');
         }
         if (mb_strlen($body) > 4000) {
@@ -533,6 +558,17 @@ class Conversations extends MY_Controller
                 }));
             }
         }
+        $hidden = $this->message_model->hiddenIds(
+            (int) $user['id'],
+            array_map(static fn (array $m): int => (int) $m['id'], $rows)
+        );
+        if ($hidden) {
+            $hiddenSet = array_flip($hidden);
+            $rows = array_values(array_filter(
+                $rows,
+                static fn (array $m): bool => !isset($hiddenSet[(int) $m['id']])
+            ));
+        }
         $rows = $this->message_model->withExtras($rows, (int) $user['id']);
         $this->ok([
             'messages' => array_map('message_dto', $rows),
@@ -612,6 +648,137 @@ class Conversations extends MY_Controller
             [$id, (int) $user['id']]
         );
         $this->ok(['archived' => $archived]);
+    }
+
+    public function pin_chat(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['id']);
+        $id = $this->int_param('id');
+        if (!$this->conversation_model->isMember($id, (int) $user['id'])) {
+            $this->fail('Conversation not found.', 404, 'not_found');
+        }
+        $pinned = $this->param('pinned') !== null ? $this->bool_param('pinned') : true;
+        $this->conversation_model->setPinned($id, (int) $user['id'], $pinned);
+        $this->ok(['pinned' => $pinned]);
+    }
+
+    public function mark_unread(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['id']);
+        $id = $this->int_param('id');
+        if (!$this->conversation_model->isMember($id, (int) $user['id'])) {
+            $this->fail('Conversation not found.', 404, 'not_found');
+        }
+        $messageId = $this->param('message_id') !== null ? $this->int_param('message_id') : 0;
+        if ($messageId > 0) {
+            $message = $this->message_model->find($messageId);
+            if (!$message || (int) $message['conversation_id'] !== $id) {
+                $this->fail('Message not found.', 404, 'not_found');
+            }
+        }
+        $lastRead = $this->conversation_model->markUnread($id, (int) $user['id'], $messageId);
+        $row = $this->conversation_model->forUser($id, (int) $user['id']);
+        $this->ok(['last_read_message_id' => $lastRead, 'unread_count' => (int) ($row['unread_count'] ?? 0)]);
+    }
+
+    public function search_all(): void
+    {
+        $this->require_method(['GET']);
+        $user = $this->require_auth();
+        $query = trim($this->str_param('q'));
+        if (mb_strlen($query) < 2 || mb_strlen($query) > 100) {
+            $this->fail('Search query must be 2-100 characters.', 422, 'invalid_query');
+        }
+        if (!$this->throttle('searchall:' . (int) $user['id'], 30, 60)) {
+            $this->fail('Too many searches. Please slow down.', 429, 'rate_limited');
+        }
+        $limit = $this->int_param('limit', 30);
+        $rows = $this->message_model->withExtras(
+            $this->message_model->searchAll((int) $user['id'], $query, $limit),
+            (int) $user['id']
+        );
+        $this->ok(['messages' => array_map(
+            static function (array $row): array {
+                $dto = message_dto($row);
+                $dto['conversation_title'] = $row['conversation_title'] ?? null;
+                $dto['conversation_type'] = $row['conversation_type'] ?? null;
+                return $dto;
+            },
+            $rows
+        )]);
+    }
+
+    /**
+     * Siapa saja yang sudah membaca pesan ini (last_read >= message_id).
+     */
+    public function message_reads(): void
+    {
+        $this->require_method(['GET']);
+        $user = $this->require_auth();
+        $id = $this->int_param('id');
+        $messageId = $this->int_param('message_id');
+        if (!$this->conversation_model->isMember($id, (int) $user['id'])) {
+            $this->fail('Conversation not found.', 404, 'not_found');
+        }
+        $message = $this->message_model->find($messageId);
+        if (!$message || (int) $message['conversation_id'] !== $id) {
+            $this->fail('Message not found.', 404, 'not_found');
+        }
+        $rows = $this->store->all(
+            'SELECT u.id, u.username, u.display_name, u.avatar_url, u.gender
+             FROM conversation_members m JOIN users u ON u.id = m.user_id
+             WHERE m.conversation_id = ? AND m.last_read_message_id >= ? AND u.is_active = 1
+             ORDER BY u.display_name ASC LIMIT 100',
+            [$id, $messageId]
+        );
+        $this->ok([
+            'message_id' => $messageId,
+            'read_by' => array_map(
+                static fn (array $r): array => [
+                    'id' => (int) $r['id'],
+                    'username' => $r['username'] ?? null,
+                    'display_name' => $r['display_name'] ?? null,
+                    'avatar_url' => $r['avatar_url'] ?? null,
+                    'gender' => $r['gender'] ?? null,
+                ],
+                $rows
+            ),
+        ]);
+    }
+
+    public function transfer_owner(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['id', 'user_id']);
+
+        $id = $this->int_param('id');
+        $targetId = $this->int_param('user_id');
+        $row = $this->conversation_model->find($id);
+        if (!$row || $row['type'] !== 'group') {
+            $this->fail('Group not found.', 404, 'not_found');
+        }
+        if (!$this->conversation_model->isOwner($id, (int) $user['id'])) {
+            $this->fail('Only the owner can transfer ownership.', 403, 'forbidden');
+        }
+        if ($targetId === (int) $user['id']) {
+            $this->fail('You already own this group.', 422, 'invalid_target');
+        }
+        if (!$this->conversation_model->isMember($id, $targetId)) {
+            $this->fail('This user is not a member of the group.', 404, 'not_found');
+        }
+        $this->conversation_model->transferOwnership($id, $targetId);
+        $targetUser = $this->user_model->find($targetId);
+        $targetName = $targetUser['display_name'] ?? ('#' . $targetId);
+        $this->pushSystemEvent($id, (int) $user['id'], $user['display_name'] . ' mengalihkan kepemilikan grup ke ' . $targetName);
+        $this->realtime_model->push($this->conversation_model->memberIds($id), 'conversation_updated', [
+            'conversation_id' => $id,
+        ]);
+        $this->ok(['owner_id' => $targetId]);
     }
 
     public function invite(): void
@@ -948,6 +1115,13 @@ class Conversations extends MY_Controller
         if ($this->param('avatar_url') !== null) {
             $fields['avatar_url'] = trim($this->str_param('avatar_url')) ?: null;
         }
+        if ($this->param('description') !== null) {
+            $description = trim($this->str_param('description'));
+            if (mb_strlen($description) > 300) {
+                $this->fail('Group description is limited to 300 characters.', 422, 'invalid_description');
+            }
+            $fields['description'] = $description === '' ? null : $description;
+        }
         if (!$fields) {
             $this->fail('No fields to update.', 422, 'validation_error');
         }
@@ -1069,6 +1243,8 @@ class Conversations extends MY_Controller
             'video' => 'Mengirim video',
             'audio' => 'Mengirim pesan suara',
             'location' => 'Berbagi lokasi',
+            'sticker' => 'Mengirim stiker',
+            'redpacket' => 'Mengirim amplop merah',
             default => 'Mengirim lampiran',
         };
         $unmutedIds = $this->unmutedMemberIds($id, (int) $user['id']);
@@ -1109,11 +1285,22 @@ class Conversations extends MY_Controller
         if (!str_contains($body, '@')) {
             return [];
         }
+        $members = $this->conversation_model->members($conversationId);
+        // @semua / @all menyebut semua anggota (selain pengirim).
+        if (preg_match('/@(semua|all)\b/iu', $body)) {
+            $all = [];
+            foreach ($members as $member) {
+                if ((int) $member['id'] !== $senderId) {
+                    $all[] = (int) $member['id'];
+                }
+            }
+            return $all;
+        }
         if (!preg_match_all('/@([A-Za-z0-9._]{4,20})/', $body, $matches)) {
             return [];
         }
         $byName = [];
-        foreach ($this->conversation_model->members($conversationId) as $member) {
+        foreach ($members as $member) {
             if (isset($member['username'])) {
                 $byName[strtolower((string) $member['username'])] = (int) $member['id'];
             }
@@ -1167,9 +1354,11 @@ class Conversations extends MY_Controller
             );
             foreach ($members as $member) {
                 if ((int) $member['id'] !== $viewerId) {
-                    $dto['title'] = $member['display_name'];
+                    $remark = $this->friend_model->remark($viewerId, (int) $member['id']);
+                    $dto['title'] = $remark ?? $member['display_name'];
                     $dto['avatar_url'] = $member['avatar_url'];
                     $peer = user_dto($member);
+                    $peer['remark'] = $remark;
                     // Attach friendship status for public profile / button
                     $fs = $this->friend_model->findBetween($viewerId, (int) $member['id']);
                     if ($fs) {

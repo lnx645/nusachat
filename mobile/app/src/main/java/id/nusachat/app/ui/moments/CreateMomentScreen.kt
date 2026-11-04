@@ -61,11 +61,12 @@ import id.nusachat.app.ui.theme.NusaIcons
 fun CreateMomentScreen(
     user: User?,
     onBack: () -> Unit,
-    onPost: (String, List<Uri>) -> Unit,
+    onPost: (String, List<Uri>, String) -> Unit,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     var imageUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var showPicker by remember { mutableStateOf(false) }
+    var audience by rememberSaveable { mutableStateOf("friends") }
     val context = LocalContext.current
 
     BackHandler(onBack = onBack)
@@ -82,7 +83,7 @@ fun CreateMomentScreen(
                 },
                 actions = {
                     NusaButton(
-                        onClick = { onPost(text, imageUris) },
+                        onClick = { onPost(text, imageUris, audience) },
                         enabled = text.isNotBlank() || imageUris.isNotEmpty(),
                         shape = RoundedCornerShape(20.dp),
                         colors = ButtonDefaults.buttonColors(
@@ -135,8 +136,20 @@ fun CreateMomentScreen(
                 NusaAvatar(name = user?.displayName ?: "NusaChat", url = user?.avatarUrl, gender = user?.gender, seed = user?.id, size = 36.dp)
                 Column(modifier = Modifier.padding(start = 10.dp).weight(1f)) {
                     Text(user?.displayName ?: "NusaChat", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
-                    Text("@${user?.username ?: "nusa"} • Teman saja", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    Text("@${user?.username ?: "nusa"}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                 }
+                androidx.compose.material3.FilterChip(
+                    selected = audience == "friends",
+                    onClick = { audience = if (audience == "friends") "private" else "friends" },
+                    label = { Text(if (audience == "friends") "Teman" else "Hanya saya") },
+                    leadingIcon = {
+                        Icon(
+                            painter = painterResource(id = if (audience == "friends") NusaIcons.Contacts else NusaIcons.Lock),
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                        )
+                    },
+                )
             }
             androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), thickness = 0.7.dp)
             // Text area ala WeChat: tanpa border, hint besar

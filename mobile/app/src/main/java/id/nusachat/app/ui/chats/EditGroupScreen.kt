@@ -50,6 +50,7 @@ fun EditGroupScreen(
     onBack: () -> Unit,
 ) {
     var title by remember(conversation.id) { mutableStateOf(conversation.title) }
+    var description by remember(conversation.id) { mutableStateOf(conversation.description.orEmpty()) }
     var error by remember { mutableStateOf<String?>(null) }
     var uploading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -74,13 +75,16 @@ fun EditGroupScreen(
         val t = title.trim()
         if (t.length < 2) { error = "Nama grup minimal 2 karakter."; return }
         if (t.length > 60) { error = "Nama grup maksimal 60 karakter."; return }
+        val d = description.trim()
+        if (d.length > 300) { error = "Deskripsi maksimal 300 karakter."; return }
         error = null
         scope.launch {
             try {
                 val newTitle = if (t != conversation.title) t else null
                 val newAvatar = if (avatarUrl != conversation.avatarUrl) avatarUrl else null
-                if (newTitle == null && newAvatar == null) { onBack(); return@launch }
-                vm.updateGroupInfo(conversation.id, newTitle, newAvatar)
+                val newDesc = if (d != conversation.description.orEmpty()) d else null
+                if (newTitle == null && newAvatar == null && newDesc == null) { onBack(); return@launch }
+                vm.updateGroupInfo(conversation.id, newTitle, newAvatar, newDesc)
                 onBack()
             } catch (e: Exception) {
                 error = e.message ?: "Gagal menyimpan"
@@ -166,6 +170,15 @@ fun EditGroupScreen(
                     onValueChange = { if (it.length <= 60) title = it },
                     counter = "${title.length}/60",
                     singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(16.dp))
+                NusaLineInput(
+                    label = "Deskripsi grup",
+                    value = description,
+                    onValueChange = { if (it.length <= 300) description = it },
+                    counter = "${description.length}/300",
+                    singleLine = false,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (error != null) {

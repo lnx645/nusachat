@@ -219,7 +219,7 @@ fun IncomingCallScreen(
                 verticalArrangement = Arrangement.Center,
             ) {
                 Text(
-                    text = "PANGGILAN MASUK",
+                    text = if (state.video) "PANGGILAN VIDEO MASUK" else "PANGGILAN MASUK",
                     color = NusaGreen,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
@@ -335,7 +335,7 @@ private fun CallTopBar() {
 }
 
 @Composable
-private fun PulsingAvatar(
+internal fun PulsingAvatar(
     peer: User?,
     name: String,
     active: Boolean,

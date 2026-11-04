@@ -39,6 +39,7 @@ class Calls extends MY_Controller
             'status' => $row['status'],
             'created_at' => $row['created_at'],
             'updated_at' => $row['updated_at'],
+            'answered_at' => $row['answered_at'] ?? null,
             'ended_at' => $row['ended_at'] ?? null,
         ];
     }
@@ -156,6 +157,8 @@ class Calls extends MY_Controller
             $this->fail('Invalid SDP answer.', 422, 'invalid_sdp');
         }
         $call = $this->call_model->setStatus((int) $call['id'], 'active');
+        $this->store->update('calls', ['answered_at' => now_iso()], 'id = ? AND answered_at IS NULL', [(int) $call['id']]);
+        $call = $this->call_model->find((int) $call['id']);
         $payload = ['call' => $this->call_dto($call), 'sdp' => $sdp, 'from' => user_dto($user)];
         $this->notify((int) $call['caller_id'], 'call_answer', $payload, 'Panggilan dijawab', 'Panggilanmu dijawab');
         $this->ok(['call' => $this->call_dto($call)]);
@@ -242,12 +245,23 @@ class Calls extends MY_Controller
         if ($me !== (int) $call['caller_id'] && $me !== (int) $call['callee_id']) {
             $this->fail('You are not part of this call.', 403, 'forbidden');
         }
+        $wasRinging = $call['status'] === 'ringing' && empty($call['answered_at']);
+        $callerId = (int) $call['caller_id'];
         $call = $this->call_model->setStatus((int) $call['id'], 'ended');
-        $peerId = $me === (int) $call['caller_id'] ? (int) $call['callee_id'] : (int) $call['caller_id'];
+        $peerId = $me === $callerId ? (int) $call['callee_id'] : $callerId;
         $this->realtime_model->push([$peerId], 'call_end', [
             'call' => $this->call_dto($call),
             'reason' => 'ended',
         ]);
+        // Penelepon membatalkan sebelum diangkat: beri tahu yang ditelepon.
+        if ($wasRinging && $me === $callerId && ($this->app['features']['push'] ?? true)) {
+            $calleeId = (int) $call['callee_id'];
+            push_notify([$calleeId], 'Panggilan tak terjawab', ($user['display_name'] ?? 'Seseorang') . ' meneleponmu', [
+                'event' => 'call_missed',
+                'call_id' => (string) $call['id'],
+                'caller_id' => (string) $callerId,
+            ]);
+        }
         $this->ok(['call' => $this->call_dto($call)]);
     }
 
@@ -430,6 +444,56 @@ class Calls extends MY_Controller
             'from_user_id' => $me,
         ]);
         $this->ok(['sent' => true]);
+    }
+
+    /**
+     * Riwayat panggilan: 1-1 milikku + room grup yang kuikuti.
+     */
+    public function history(): void
+    {
+        $this->require_method(['GET']);
+        $user = $this->require_auth();
+        $me = (int) $user['id'];
+        $limit = $this->int_param('limit', 30);
+        $beforeId = $this->param('before_id') !== null ? $this->int_param('before_id') : 0;
+        $rows = $this->call_model->historyFor($me, $limit, $beforeId);
+        $this->ok(['calls' => array_map(
+            function (array $row) use ($me): array {
+                $dto = $this->call_dto($row);
+                $isRoom = !empty($row['conversation_id']);
+                if ($isRoom) {
+                    $dto['direction'] = (int) $row['caller_id'] === $me ? 'outgoing' : 'incoming';
+                    $dto['peer'] = null;
+                    $dto['group_title'] = $row['group_title'] ?? null;
+                    $dto['missed'] = false;
+                } else {
+                    $outgoing = (int) $row['caller_id'] === $me;
+                    $dto['direction'] = $outgoing ? 'outgoing' : 'incoming';
+                    $peerId = $outgoing ? (int) $row['callee_id'] : (int) $row['caller_id'];
+                    $peer = $this->user_model->find($peerId);
+                    $dto['peer'] = $peer ? user_dto($peer) : ['id' => $peerId];
+                    $staleRinging = $row['status'] === 'ringing'
+                        && strtotime($row['created_at']) < time() - 300;
+                    $dto['missed'] = !$outgoing && empty($row['answered_at'])
+                        && in_array($row['status'], ['ended', 'rejected', 'missed'], true);
+                    if (!$outgoing && $staleRinging) {
+                        $dto['missed'] = true;
+                    }
+                    $dto['group_title'] = null;
+                }
+                $dto['duration'] = $this->callDuration($row);
+                return $dto;
+            },
+            $rows
+        )]);
+    }
+
+    private function callDuration(array $row): int
+    {
+        if (empty($row['answered_at']) || empty($row['ended_at'])) {
+            return 0;
+        }
+        return max(0, strtotime($row['ended_at']) - strtotime($row['answered_at']));
     }
 
     public function room_state(): void

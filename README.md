@@ -6,19 +6,19 @@ Aplikasi chat orisinal bergaya messenger: obrolan langsung dan grup, momen, kont
 
 ## Fitur
 
-- Autentikasi JWT HS256 + refresh token berputar, logout mencabut sesi lewat `token_version`. Ganti kata sandi dari aplikasi.
-- Chat langsung dan grup, indikator mengetik, status terkirim/dibaca, balas pesan, tarik pesan, edit pesan, reaksi emoji, teruskan pesan, sematkan pesan, arsip obrolan, cari pesan, mention `@username`, kirim ulang saat gagal, lampiran foto/video/audio/file, dan pengiriman idempoten lewat `client_id`.
-- Grup: buat, tambah/keluarkan anggota (owner + admin), keluar grup, bisu notifikasi, info anggota, undang via tautan, persetujuan admin, role admin.
-- Daftar teman, pencarian pengguna, permintaan pertemanan, hapus teman, blokir/buka blokir, hapus akun permanen, dan sinkronisasi kontak HP (izin `READ_CONTACTS`).
+- Autentikasi JWT HS256 + refresh token berputar, logout mencabut sesi lewat `token_version`. Ganti kata sandi, lupa kata sandi (token reset), ganti username, dan manajemen sesi per perangkat.
+- Chat langsung dan grup, indikator mengetik, status terkirim/dibaca, balas pesan, tarik pesan, edit pesan, reaksi emoji, teruskan pesan, sematkan pesan + sematkan chat, arsip obrolan, cari pesan per chat & global, tandai belum dibaca, pesan berbintang, hapus-untuk-saya, pilih banyak, mention `@username`/`@semua`, stiker emoji, pesan suara rekam-di-tempat, kirim ulang saat gagal, lampiran foto/video/audio/file, draf tersimpan, unduh media, ekspor chat, dan pengiriman idempoten lewat `client_id`.
+- Grup: buat, tambah/keluarkan anggota (owner + admin), keluar grup, bisu notifikasi, info + deskripsi grup, cari anggota, alih kepemilikan, undang via tautan, persetujuan admin, role admin.
+- Daftar teman, pencarian pengguna, permintaan pertemanan + sapaan, nama panggilan (remark), tautan profil `nusachat://user/<nama>`, hapus teman, blokir/buka blokir, hapus akun permanen, sinkronisasi kontak HP (izin `READ_CONTACTS`), dan pelaporan konten.
 - Orang terdekat berbasis koordinat kasar (Haversine), bukan pelacakan real-time.
-- Momen teks + foto/video (maks 9), suka, komentar, hapus, posting ulang (reshare), bagikan ke chat, dan pagination "muat momen lama".
-- Story 24 jam: teks + media (maks 4), strip story di Momen, viewer geser, hapus otomatis saat kedaluwarsa.
-- Dompet koin: top up, kirim ke teman, riwayat transaksi (koin demo, bukan uang sungguhan).
-- Profil: nama, bio, HP, gender, tanggal lahir, discoverable, dan foto profil.
+- Momen teks + foto/video (maks 9), audiens teman/privat, edit, suka + daftar penyuka, komentar + hapus komentar, hapus, posting ulang (reshare), bagikan ke chat/aplikasi lain, dan pagination "muat momen lama".
+- Story 24 jam: teks + media (maks 4), strip story di Momen, viewer geser, lacak tontonan + daftar viewer, balas story ke chat, hapus otomatis saat kedaluwarsa.
+- Dompet koin: top up, kirim ke teman, tagih koin, amplop merah luck-draw di chat, PIN dompet, riwayat transaksi (koin demo, bukan uang sungguhan).
+- Profil: username, nama, bio, HP, gender, tanggal lahir, discoverable, dan foto profil (crop persegi otomatis).
 - Upload gambar/audio/video/PDF ke `storage/uploads`.
 - Gateway WebSocket PHP CLI tanpa dependency eksternal.
-- Push notification FCM: data-only payload, channel Pesan/Panggilan, registrasi token via `/push/register`.
-- Voice/video call 1-1 via WebRTC (STUN Google) + signaling REST `/calls/*` + realtime `call_*`; tombol telepon dan video di chat langsung.
+- Push notification FCM: data-only payload, channel Pesan/Panggilan, registrasi token via `/push/register`, pengaturan notifikasi per kategori + bunyi/getar.
+- Voice/video call 1-1 via WebRTC (STUN Google) + signaling REST `/calls/*` + realtime `call_*`; tombol telepon dan video di chat langsung; riwayat panggilan + penanda tak terjawab.
 - Panggilan grup suara (mesh WebRTC): buat room dari info grup, gabung dari notifikasi, daftar partisipan realtime.
 - Klien Android Compose dengan 4 tab: Obrolan, Kontak, Jelajah, Saya.
 
@@ -79,7 +79,7 @@ python3 tools/smoke.py      # REST
 python3 tools/ws_smoke.py   # WebSocket
 ```
 
-Status terakhir: REST **127/127** dan WebSocket **6/6** lolos.
+Status terakhir: REST **265/265** dan WebSocket **13/13** lolos (termasuk 2 cek deteksi reuse refresh-token). CI (`.github/workflows/ci.yml`) menjalankan lint + migrate fresh + kedua smoke ini tiap push/PR ke `main`.
 
 ## Menjalankan Android
 
@@ -95,6 +95,8 @@ cd mobile
 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+GIF memakai Giphy API (key default sudah tertanam di `build.gradle.kts`, bisa dioverride via `-PGIF_API_KEY=...` atau env `GIF_API_KEY`). Pengaturan → Bahasa menyediakan Indonesia/English untuk shell aplikasi (tab + pengaturan) dan locale sistem; layar lain masih Indonesia. Layar ≥840dp (tablet/landscape) memakai mode dua-panel daftar + isi chat, dan umpan momen dibatasi 680dp.
 
 Pastikan HP dan komputer berada di jaringan yang sama, API listen di `0.0.0.0:8080` (bukan `127.0.0.1`), dan firewall mengizinkan TCP `8080` serta `8090`.
 

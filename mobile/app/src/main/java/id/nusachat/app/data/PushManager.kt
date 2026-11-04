@@ -67,18 +67,22 @@ object PushManager {
     }
 
     private const val KEY_CHANNEL_VER = "channel_ver"
-    private const val CHANNEL_VER = 2
+    private const val CHANNEL_VER = 3
 
     fun createChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         // Channel yang sudah ada di HP tidak ikut berubah saat kode diubah:
-        // hapus + buat ulang sekali (versi tercatat) agar suara eksplisit berlaku.
+        // hapus + buat ulang bila versi/setting bunyi berubah.
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (prefs.getInt(KEY_CHANNEL_VER, 0) < CHANNEL_VER) {
+        val settings = context.getSharedPreferences("nusachat.settings", Context.MODE_PRIVATE)
+        val soundOn = settings.getBoolean("notif_sound", true)
+        val vibrateOn = settings.getBoolean("notif_vibrate", true)
+        val version = CHANNEL_VER * 10 + (if (soundOn) 2 else 0) + (if (vibrateOn) 1 else 0)
+        if (prefs.getInt(KEY_CHANNEL_VER, 0) != version) {
             runCatching { manager.deleteNotificationChannel(CHANNEL_MESSAGES) }
             runCatching { manager.deleteNotificationChannel(CHANNEL_CALLS) }
-            prefs.edit().putInt(KEY_CHANNEL_VER, CHANNEL_VER).apply()
+            prefs.edit().putInt(KEY_CHANNEL_VER, version).apply()
         }
         val chatSound = android.media.RingtoneManager.getDefaultUri(
             android.media.RingtoneManager.TYPE_NOTIFICATION
@@ -86,7 +90,8 @@ object PushManager {
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_MESSAGES, "Pesan", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Notifikasi pesan, pertemanan, dan momen"
-                setSound(chatSound, null)
+                if (soundOn) setSound(chatSound, null) else setSound(null, null)
+                enableVibration(vibrateOn)
             }
         )
         manager.createNotificationChannel(
@@ -163,11 +168,21 @@ object PushManager {
     fun showDataNotification(context: Context, data: Map<String, String>) {
         val event = data["event"].orEmpty()
         if (event == "message" && isAppForeground(context)) return
+        val settings = context.getSharedPreferences("nusachat.settings", Context.MODE_PRIVATE)
+        val chatEvents = setOf("message", "friend_request", "friend_accepted", "wallet_received", "wallet_requested", "wallet_request_paid")
+        val momentEvents = setOf("moment_liked", "moment_comment", "moment_new", "story_new")
+        if (event in chatEvents && !settings.getBoolean("notif_messages", true)) return
+        if (event in momentEvents && !settings.getBoolean("notif_moments", true)) return
         val title = data["title"] ?: when (event) {
             "call_offer" -> "Panggilan suara masuk"
             "message" -> "Pesan baru"
             "friend_request" -> "Permintaan pertemanan"
             "friend_accepted" -> "Pertemanan diterima"
+            "wallet_received" -> "Koin diterima"
+            "wallet_requested" -> "Tagihan koin"
+            "wallet_request_paid" -> "Tagihan dibayar"
+            "moment_comment" -> "Komentar baru"
+            "moment_liked" -> "Momen disukai"
             else -> "NusaChat"
         }
         val body = data["body"] ?: ""

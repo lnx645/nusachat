@@ -56,6 +56,12 @@ fun MessageMenuContent(
     onRetry: () -> Unit,
     onShowInfo: (Message) -> Unit,
     onDismiss: () -> Unit,
+    onStar: (Message) -> Unit = {},
+    onSelect: (Message) -> Unit = {},
+    onHide: (Message) -> Unit = {},
+    onReport: (Message) -> Unit = {},
+    onSave: (Message) -> Unit = {},
+    onShare: (Message) -> Unit = {},
 ) {
     var shown by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { shown = true }
@@ -145,6 +151,46 @@ fun MessageMenuContent(
                 },
             )
         }
+        if (usable) {
+            MessageMenuRow(
+                label = "Bintangi",
+                icon = NusaIcons.Star,
+                onClick = { onStar(message) },
+            )
+            MessageMenuRow(
+                label = "Pilih",
+                icon = NusaIcons.Check,
+                onClick = { onSelect(message) },
+            )
+        }
+        if (usable && !message.attachmentUrl.isNullOrBlank()) {
+            MessageMenuRow(
+                label = "Simpan",
+                icon = NusaIcons.Download,
+                onClick = { onSave(message) },
+            )
+        }
+        if (copyText != null) {
+            MessageMenuRow(
+                label = "Bagikan",
+                icon = NusaIcons.Share,
+                onClick = { onShare(message) },
+            )
+        }
+        if (usable) {
+            MessageMenuRow(
+                label = "Hapus untuk saya",
+                icon = NusaIcons.Close,
+                onClick = { onHide(message) },
+            )
+        }
+        if (usable && !mine) {
+            MessageMenuRow(
+                label = "Laporkan",
+                icon = NusaIcons.Flag,
+                onClick = { onReport(message) },
+            )
+        }
         if (canRevoke) {
             MessageMenuRow(
                 label = "Tarik pesan",
@@ -206,9 +252,14 @@ private fun MessageMenuRow(
     }
 }
 
-/** Dialog rincian pesan untuk aksi "Info". */
+/** Dialog rincian pesan untuk aksi "Info", termasuk daftar pembaca. */
 @Composable
-fun MessageInfoDialog(message: Message, onDismiss: () -> Unit) {
+fun MessageInfoDialog(
+    message: Message,
+    readers: List<id.nusachat.app.data.User> = emptyList(),
+    readersLoading: Boolean = false,
+    onDismiss: () -> Unit,
+) {
     NusaDialog(
         onDismissRequest = onDismiss,
         title = { Text("Info pesan") },
@@ -221,6 +272,40 @@ fun MessageInfoDialog(message: Message, onDismiss: () -> Unit) {
                 Text("Tipe: ${message.type}")
                 Spacer(Modifier.height(4.dp))
                 Text("Status: ${message.status}")
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = if (readersLoading) "Dibaca oleh: memuat…"
+                    else if (readers.isEmpty()) "Dibaca oleh: belum ada"
+                    else "Dibaca oleh (${readers.size}):",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                readers.take(10).forEach { user ->
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        id.nusachat.app.ui.components.NusaAvatar(
+                            name = user.displayName,
+                            url = user.avatarUrl,
+                            gender = user.gender,
+                            seed = user.id,
+                            size = 24.dp,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = user.displayName,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                        )
+                    }
+                }
+                if (readers.size > 10) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "+${readers.size - 10} lainnya",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         },
         confirmButton = {

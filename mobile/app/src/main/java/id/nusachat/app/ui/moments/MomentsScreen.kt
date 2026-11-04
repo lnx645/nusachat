@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -58,6 +59,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -77,8 +81,14 @@ import id.nusachat.app.ui.components.EmptyState
 import id.nusachat.app.ui.components.MomentSkeleton
 import id.nusachat.app.ui.components.NusaActionSheet
 import id.nusachat.app.ui.components.NusaAvatar
+import id.nusachat.app.ui.components.LikersSheet
 import id.nusachat.app.ui.components.NusaConfirmSheet
+import id.nusachat.app.ui.components.NusaDialog
+import id.nusachat.app.ui.components.NusaTextButton
+import id.nusachat.app.ui.components.NusaTextField
+import id.nusachat.app.ui.components.ReportSheet
 import id.nusachat.app.ui.components.SheetAction
+import id.nusachat.app.ui.components.StoryViewersSheet
 import id.nusachat.app.ui.components.SkeletonRow
 import id.nusachat.app.ui.components.formatMomentTime
 
@@ -105,6 +115,52 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
     var showStoryComposer by remember { mutableStateOf(false) }
     var storyViewer by remember { mutableStateOf<List<Story>?>(null) }
     var storyStartIndex by remember { mutableStateOf(0) }
+    var editTarget by remember { mutableStateOf<Moment?>(null) }
+    var reportTarget by remember { mutableStateOf<Moment?>(null) }
+    var storyReplyTarget by remember { mutableStateOf<Story?>(null) }
+    val likers by vm.likers.collectAsStateWithLifecycle()
+    val likersMomentId by vm.likersMomentId.collectAsStateWithLifecycle()
+    val storyViewerCount by vm.storyViewerCount.collectAsStateWithLifecycle()
+    val storyViewers by vm.storyViewers.collectAsStateWithLifecycle()
+    val storyViewersId by vm.storyViewersId.collectAsStateWithLifecycle()
+    val tagFeedTag by vm.tagFeedTag.collectAsStateWithLifecycle()
+    val tagFeed by vm.tagFeed.collectAsStateWithLifecycle()
+    val tagFeedLoading by vm.tagFeedLoading.collectAsStateWithLifecycle()
+
+    if (tagFeedTag != null) {
+        TagFeedScreen(
+            tag = tagFeedTag!!,
+            moments = tagFeed,
+            loading = tagFeedLoading,
+            meId = me?.id ?: 0L,
+            onBack = vm::closeTagFeed,
+            onLike = { vm.toggleLike(it) },
+            onComment = { vm.openComments(it.id) },
+            onDelete = { vm.deleteMoment(it) },
+            onShowLikers = { vm.loadLikers(it.id) },
+            onTagClick = { vm.openTagFeed(it) },
+        )
+        if (commentsMomentId != null && commentMoment != null) {
+            MomentCommentsScreen(
+                moment = commentMoment!!,
+                comments = comments,
+                loading = commentsLoading,
+                onBack = vm::closeComments,
+                onSend = { text, parentId -> vm.addComment(text, parentId) },
+                myId = me?.id ?: 0L,
+                onDelete = { vm.deleteComment(it) },
+                onToggleLike = { vm.toggleCommentLike(it) },
+            )
+        }
+        if (likersMomentId != null) {
+            LikersSheet(
+                title = "Disukai ${likers.size} orang",
+                users = likers,
+                onDismiss = { vm.clearLikers() },
+            )
+        }
+        return
+    }
 
     if (commentsMomentId != null && commentMoment != null) {
         MomentCommentsScreen(
@@ -113,6 +169,9 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
             loading = commentsLoading,
             onBack = vm::closeComments,
             onSend = { text, parentId -> vm.addComment(text, parentId) },
+            myId = me?.id ?: 0L,
+            onDelete = { vm.deleteComment(it) },
+            onToggleLike = { vm.toggleCommentLike(it) },
         )
         return
     }
@@ -139,10 +198,18 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
             )
         },
     ) { padding ->
-        LazyColumn(
+        // Tablet/landscape: batasi lebar umpan agar nyaman dibaca.
+        val wideFeed = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 840
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (wideFeed) Modifier.width(680.dp) else Modifier),
         ) {
             item(key = "cover") {
                 // Cover ala WeChat: foto sampul + avatar bundar di tepi — banner default pakai warna aplikasi
@@ -294,6 +361,16 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
                         onShare = { shareTarget = moment },
                         onReshare = { vm.reshareMoment(moment) },
                         onImageClick = { idx -> viewer = moment.media to idx },
+                        onShowLikers = { vm.loadLikers(moment.id) },
+                        onEdit = { editTarget = moment },
+                        onReport = { reportTarget = moment },
+                        onShareExternal = {
+                            vm.shareText(
+                                "${moment.author.displayName} (@${moment.author.username}):\n${moment.body}",
+                                "Bagikan momen",
+                            )
+                        },
+                        onTagClick = { vm.openTagFeed(it) },
                     )
                 }
                 if (hasMore) {
@@ -309,6 +386,7 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
                 }
             }
             item(key = "bottom-space") { Spacer(Modifier.height(16.dp)) }
+        }
         }
     }
 
@@ -329,10 +407,47 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
         CreateMomentScreen(
             user = me,
             onBack = { showComposer = false },
-            onPost = { text, uris ->
+            onPost = { text, uris, audience ->
                 showComposer = false
-                vm.createMoment(text, uris)
+                vm.createMomentAudience(text, uris, audience)
             },
+        )
+    }
+
+    editTarget?.let { target ->
+        EditMomentDialog(
+            moment = target,
+            onConfirm = { text ->
+                vm.editMoment(target, text)
+                editTarget = null
+            },
+            onDismiss = { editTarget = null },
+        )
+    }
+
+    reportTarget?.let { target ->
+        ReportSheet(
+            onSubmit = { reason, details ->
+                vm.createReport("moment", target.id, reason, details)
+                reportTarget = null
+            },
+            onDismiss = { reportTarget = null },
+        )
+    }
+
+    if (likersMomentId != null) {
+        LikersSheet(
+            title = "Disukai ${likers.size} orang",
+            users = likers,
+            onDismiss = { vm.clearLikers() },
+        )
+    }
+
+    if (storyViewersId != null) {
+        StoryViewersSheet(
+            count = storyViewerCount,
+            viewers = storyViewers,
+            onDismiss = { vm.clearStoryViewers() },
         )
     }
 
@@ -340,9 +455,9 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
         CreateStoryScreen(
             user = me,
             onBack = { showStoryComposer = false },
-            onPost = { text, uris ->
+            onPost = { text, uris, style ->
                 showStoryComposer = false
-                vm.createStory(text, uris)
+                vm.createStory(text, uris, style)
             },
         )
     }
@@ -354,7 +469,53 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
             meId = me?.id ?: 0L,
             onDelete = { vm.deleteStory(it) },
             onDismiss = { storyViewer = null },
+            onTrackView = { vm.viewStory(it) },
+            onShowViewers = { vm.loadStoryViewers(it.id) },
+            onReply = { storyReplyTarget = it },
         )
+    }
+
+    storyReplyTarget?.let { story ->
+        NusaBottomSheet(onDismissRequest = { storyReplyTarget = null }) {
+            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                Text(
+                    text = "Balas story ke chat",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+                androidx.compose.foundation.lazy.LazyColumn(
+                    modifier = Modifier.heightIn(max = 360.dp)
+                ) {
+                    items(conversations, key = { it.id }) { conv ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    vm.shareStoryToChat(story, conv.id)
+                                    storyReplyTarget = null
+                                }
+                                .padding(horizontal = 20.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            NusaAvatar(
+                                name = conv.displayTitle,
+                                url = conv.avatarUrl,
+                                size = 40.dp,
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                text = conv.displayTitle,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 
     shareTarget?.let { target ->
@@ -402,6 +563,69 @@ fun MomentsScreen(vm: AppViewModel, onBack: () -> Unit) {
 
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TagFeedScreen(
+    tag: String,
+    moments: List<Moment>,
+    loading: Boolean,
+    meId: Long,
+    onBack: () -> Unit,
+    onLike: (Moment) -> Unit,
+    onComment: (Moment) -> Unit,
+    onDelete: (Moment) -> Unit,
+    onShowLikers: (Moment) -> Unit,
+    onTagClick: (String) -> Unit,
+) {
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            NusaTopAppBar(
+                title = { Text("#$tag", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    NusaIconButton(onClick = onBack) {
+                        Icon(painter = painterResource(id = NusaIcons.Back), contentDescription = "Kembali")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(padding),
+        ) {
+            when {
+                loading && moments.isEmpty() -> {
+                    item(key = "loading") { MomentSkeleton() }
+                    item(key = "loading2") { MomentSkeleton() }
+                }
+                moments.isEmpty() -> {
+                    item(key = "empty") {
+                        EmptyState(
+                            icon = NusaIcons.Photo,
+                            title = "Belum ada momen #$tag",
+                            subtitle = "Momen teman dengan tagar ini akan muncul di sini.",
+                        )
+                    }
+                }
+                else -> {
+                    items(moments, key = { it.id }) { moment ->
+                        MomentItem(
+                            moment = moment,
+                            isMine = meId == moment.author.id,
+                            onLike = { onLike(moment) },
+                            onComment = { onComment(moment) },
+                            onDelete = { onDelete(moment) },
+                            onShowLikers = { onShowLikers(moment) },
+                            onTagClick = onTagClick,
+                        )
+                    }
+                }
+            }
+            item(key = "bottom-space") { Spacer(Modifier.height(16.dp)) }
+        }
+    }
+}
+
 @Composable
 private fun MomentItem(
     moment: Moment,
@@ -412,6 +636,11 @@ private fun MomentItem(
     onShare: () -> Unit = {},
     onReshare: () -> Unit = {},
     onImageClick: (Int) -> Unit = {},
+    onShowLikers: () -> Unit = {},
+    onEdit: () -> Unit = {},
+    onReport: () -> Unit = {},
+    onShareExternal: () -> Unit = {},
+    onTagClick: (String) -> Unit = {},
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -450,11 +679,36 @@ private fun MomentItem(
                         )
                     }
                 }
-                Text(
-                    text = "@${moment.author.username}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "@${moment.author.username}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (moment.audience == "private") {
+                        Spacer(Modifier.width(6.dp))
+                        Icon(
+                            painter = painterResource(id = NusaIcons.Lock),
+                            contentDescription = "Hanya saya",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(11.dp),
+                        )
+                        Spacer(Modifier.width(2.dp))
+                        Text(
+                            "Hanya saya",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (moment.editedAt != null) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "• diedit",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 moment.reshared?.let { info ->
                     Spacer(Modifier.height(2.dp))
                     Text(
@@ -465,10 +719,33 @@ private fun MomentItem(
                 }
                 if (moment.body.isNotBlank()) {
                     Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = moment.body,
-                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
-                        color = MaterialTheme.colorScheme.onSurface,
+                    val tagColor = MaterialTheme.colorScheme.primary
+                    val annotated = remember(moment.id, moment.body) {
+                        buildAnnotatedString {
+                            val regex = Regex("#[A-Za-z0-9_]{2,30}")
+                            var last = 0
+                            regex.findAll(moment.body).forEach { m ->
+                                append(moment.body.substring(last, m.range.first))
+                                pushStringAnnotation(tag = "TAG", annotation = m.value.drop(1))
+                                withStyle(SpanStyle(color = tagColor, fontWeight = FontWeight.SemiBold)) {
+                                    append(m.value)
+                                }
+                                pop()
+                                last = m.range.last + 1
+                            }
+                            append(moment.body.substring(last))
+                        }
+                    }
+                    ClickableText(
+                        text = annotated,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            lineHeight = 20.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        ),
+                        onClick = { offset ->
+                            annotated.getStringAnnotations(tag = "TAG", start = offset, end = offset)
+                                .firstOrNull()?.let { onTagClick(it.item) }
+                        },
                     )
                 }
                 if (moment.media.isNotEmpty()) {
@@ -485,12 +762,13 @@ private fun MomentItem(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    // bubbles like/comment count
+                    // bubbles like/comment count — ketuk suka untuk daftar penyuka
                     if (moment.likeCount > 0 || moment.commentCount > 0) {
                         Row(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable(enabled = moment.likeCount > 0, onClick = onShowLikers)
                                 .padding(horizontal = 8.dp, vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -596,15 +874,19 @@ private fun MomentItem(
     if (menuOpen) {
         val shareActions = listOf(
             SheetAction("Bagikan ke chat", NusaIcons.Forward) { menuOpen = false; onShare() },
+            SheetAction("Bagikan ke aplikasi lain", NusaIcons.Share) { menuOpen = false; onShareExternal() },
             SheetAction("Posting ulang ke momen", NusaIcons.Refresh) { menuOpen = false; onReshare() },
         )
         NusaActionSheet(
             title = moment.author.displayName,
             subtitle = "@${moment.author.username}",
             actions = shareActions + if (isMine) {
-                listOf(SheetAction("Hapus momen", NusaIcons.Delete, danger = true) { menuOpen = false; confirmDelete = true })
+                listOf(
+                    SheetAction("Edit momen", NusaIcons.Edit) { menuOpen = false; onEdit() },
+                    SheetAction("Hapus momen", NusaIcons.Delete, danger = true) { menuOpen = false; confirmDelete = true },
+                )
             } else {
-                emptyList()
+                listOf(SheetAction("Laporkan", NusaIcons.Flag) { menuOpen = false; onReport() })
             },
             onDismiss = { menuOpen = false },
         )
@@ -619,6 +901,32 @@ private fun MomentItem(
             onDismiss = { confirmDelete = false },
         )
     }
+}
+
+@Composable
+private fun EditMomentDialog(moment: Moment, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember(moment.id) { mutableStateOf(moment.body) }
+    NusaDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit momen") },
+        text = {
+            NusaTextField(
+                value = text,
+                onValueChange = { if (it.length <= 2000) text = it },
+                maxLines = 5,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            NusaTextButton(
+                onClick = { if (text.isNotBlank()) onConfirm(text.trim()) },
+                enabled = text.isNotBlank() && text.trim() != moment.body,
+            ) { Text("Simpan") }
+        },
+        dismissButton = {
+            NusaTextButton(onClick = onDismiss) { Text("Batal") }
+        },
+    )
 }
 
 @Composable

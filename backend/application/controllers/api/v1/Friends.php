@@ -16,12 +16,14 @@ class Friends extends MY_Controller
         $user = $this->require_auth();
         $rows = $this->friend_model->friends((int) $user['id']);
         $blockedIds = $this->friend_model->blockedIds((int) $user['id']);
+        $remarks = $this->friend_model->remarksFor((int) $user['id']);
         $friends = [];
         foreach ($rows as $row) {
             $dto = user_dto($row);
             $dto['friendship_id'] = (int) $row['friendship_id'];
             $dto['friends_since'] = $row['friends_since'];
             $dto['blocked_by_me'] = in_array((int) $row['id'], $blockedIds, true);
+            $dto['remark'] = $remarks[(int) $row['id']] ?? null;
             $key = min((int) $user['id'], (int) $row['id']) . ':' . max((int) $user['id'], (int) $row['id']);
             $conversation = $this->conversation_model->findDirect($key);
             $dto['conversation_id'] = $conversation ? (int) $conversation['id'] : null;
@@ -49,6 +51,7 @@ class Friends extends MY_Controller
                 $out[] = [
                     'request_id' => (int) $row['request_id'],
                     'status' => $row['status'],
+                    'greeting' => $row['greeting'] ?? null,
                     'created_at' => $row['created_at'],
                     'user' => user_dto($row),
                 ];
@@ -101,10 +104,15 @@ class Friends extends MY_Controller
             $this->fail('Too many friend requests. Try again later.', 429, 'rate_limited');
         }
 
-        $requestId = $this->friend_model->create((int) $user['id'], $targetId);
+        $greeting = trim($this->str_param('message'));
+        if (mb_strlen($greeting) > 160) {
+            $this->fail('Greeting is limited to 160 characters.', 422, 'greeting_too_long');
+        }
+        $requestId = $this->friend_model->create((int) $user['id'], $targetId, $greeting !== '' ? $greeting : null);
         $this->realtime_model->push([$targetId], 'friend_request', [
             'request_id' => $requestId,
             'user' => user_dto($user),
+            'greeting' => $greeting !== '' ? $greeting : null,
         ]);
         push_notify([$targetId], 'Permintaan pertemanan', ($user['display_name'] ?? 'Seseorang') . ' ingin berteman', [
             'event' => 'friend_request',
@@ -233,5 +241,23 @@ class Friends extends MY_Controller
             'request_id' => $row ? (int) $row['id'] : null,
             'direction' => $row ? ((int) $row['requester_id'] === (int) $user['id'] ? 'outgoing' : 'incoming') : null,
         ]);
+    }
+
+    public function remark(): void
+    {
+        $this->require_method(['POST']);
+        $user = $this->require_auth();
+        $this->require_fields(['user_id']);
+
+        $targetId = $this->int_param('user_id');
+        if (!$this->friend_model->areFriends((int) $user['id'], $targetId)) {
+            $this->fail('You can only set a remark for friends.', 403, 'not_friends');
+        }
+        $remark = $this->param('remark') !== null ? trim($this->str_param('remark')) : null;
+        if ($remark !== null && mb_strlen($remark) > 40) {
+            $this->fail('Remark is limited to 40 characters.', 422, 'remark_too_long');
+        }
+        $this->friend_model->setRemark((int) $user['id'], $targetId, $remark);
+        $this->ok(['user_id' => $targetId, 'remark' => $this->friend_model->remark((int) $user['id'], $targetId)]);
     }
 }

@@ -12,8 +12,10 @@ import androidx.compose.ui.res.painterResource
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -52,7 +55,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -63,8 +68,12 @@ import id.nusachat.app.ui.AppViewModel
 import kotlinx.coroutines.launch
 import id.nusachat.app.ui.theme.NusaIcons
 import id.nusachat.app.ui.components.EmptyState
+import id.nusachat.app.ui.components.NusaActionSheet
 import id.nusachat.app.ui.components.NusaConfirmSheet
+import id.nusachat.app.ui.components.NusaDialog
 import id.nusachat.app.ui.components.NusaSearchField
+import id.nusachat.app.ui.components.ProfileLinkSheet
+import id.nusachat.app.ui.components.SheetAction
 import id.nusachat.app.ui.components.SectionLabel
 import id.nusachat.app.ui.components.SkeletonList
 import id.nusachat.app.ui.components.UnreadBadge
@@ -76,6 +85,9 @@ fun ContactsScreen(
     onOpenFriends: () -> Unit,
     onOpenChatWith: (User) -> Unit,
     onOpenProfile: () -> Unit = {},
+    onScanQr: () -> Unit = {},
+    scanSeed: String? = null,
+    onScanConsumed: () -> Unit = {},
 ) {
     val session by vm.sessionState.collectAsStateWithLifecycle()
     val me = session.user
@@ -90,7 +102,20 @@ fun ContactsScreen(
     LaunchedEffect(Unit) { vm.loadBlocked() }
     var showCreateGroup by remember { mutableStateOf(false) }
     var removeTarget by remember { mutableStateOf<User?>(null) }
+    var friendMenu by remember { mutableStateOf<User?>(null) }
+    var remarkTarget by remember { mutableStateOf<User?>(null) }
+    var greetTarget by remember { mutableStateOf<User?>(null) }
+    var showMyLink by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+
+    androidx.compose.runtime.LaunchedEffect(scanSeed) {
+        if (!scanSeed.isNullOrBlank()) {
+            query = scanSeed
+            vm.searchUsers(parseProfileLink(scanSeed) ?: scanSeed)
+            onScanConsumed()
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -150,10 +175,36 @@ fun ContactsScreen(
                     query = it
                     if (it.trim().length < 2) vm.clearSearch()
                 },
-                placeholder = "Cari teman",
+                placeholder = "Cari teman / tempel tautan",
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                onSearch = { vm.searchUsers(query) },
+                onSearch = {
+                    val linkUser = parseProfileLink(query)
+                    vm.searchUsers(linkUser ?: query)
+                },
             )
+            parseProfileLink(query)?.let { linked ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { vm.searchUsers(linked) }
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        painter = painterResource(id = NusaIcons.Link),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Tambah @$linked",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
 
             // Profil diri ala LINE Home.
             if (me != null && query.isBlank()) {
@@ -208,6 +259,7 @@ fun ContactsScreen(
                     results = searchResults,
                     loading = searchLoading,
                     onOpenChatWith = onOpenChatWith,
+                    onAdd = { greetTarget = it },
                 )
             } else {
                 val grouped = remember(filteredFriends) {
@@ -278,6 +330,30 @@ fun ContactsScreen(
                                     subtitle = if (matched.isEmpty()) "Cari teman dari HP" else "${matched.size} kontak ditemukan",
                                     badge = 0,
                                     onClick = { requestSync() },
+                                )
+                                androidx.compose.material3.HorizontalDivider(
+                                    modifier = Modifier.padding(start = 56.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant,
+                                    thickness = 0.7.dp,
+                                )
+                                FunctionRow(
+                                    icon = NusaIcons.Qr,
+                                    title = "Tautanku",
+                                    subtitle = "Bagikan tautan profilmu",
+                                    badge = 0,
+                                    onClick = { showMyLink = true },
+                                )
+                                androidx.compose.material3.HorizontalDivider(
+                                    modifier = Modifier.padding(start = 56.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant,
+                                    thickness = 0.7.dp,
+                                )
+                                FunctionRow(
+                                    icon = NusaIcons.Scan,
+                                    title = "Pindai kode QR",
+                                    subtitle = "Tambah teman lewat kamera",
+                                    badge = 0,
+                                    onClick = onScanQr,
                                 )
                             }
                         }
@@ -383,6 +459,7 @@ fun ContactsScreen(
                                 ContactFriendRow(
                                     user = friend,
                                     onClick = { onOpenChatWith(friend) },
+                                    onLongClick = { friendMenu = friend },
                                 )
                             }
                         }
@@ -445,6 +522,124 @@ fun ContactsScreen(
         )
     }
 
+    friendMenu?.let { friend ->
+        NusaActionSheet(
+            title = friend.familiarName,
+            subtitle = "@${friend.username}",
+            actions = listOf(
+                SheetAction("Chat", NusaIcons.Chat) { friendMenu = null; onOpenChatWith(friend) },
+                SheetAction("Nama panggilan", NusaIcons.Edit) { friendMenu = null; remarkTarget = friend },
+                SheetAction("Hapus teman", NusaIcons.Delete, danger = true) { friendMenu = null; removeTarget = friend },
+                SheetAction("Blokir", NusaIcons.Flag, danger = true) { vm.blockUser(friend); friendMenu = null },
+            ),
+            onDismiss = { friendMenu = null },
+        )
+    }
+
+    remarkTarget?.let { friend ->
+        RemarkDialog(
+            user = friend,
+            onConfirm = { vm.setRemark(friend.id, it); remarkTarget = null },
+            onDismiss = { remarkTarget = null },
+        )
+    }
+
+    greetTarget?.let { user ->
+        GreetingSheet(
+            user = user,
+            onSend = { vm.sendFriendRequestWithMessage(user, it); greetTarget = null },
+            onDismiss = { greetTarget = null },
+        )
+    }
+
+    if (showMyLink && me != null) {
+        ProfileLinkSheet(
+            username = me.username,
+            displayName = me.displayName,
+            onCopy = {
+                clipboard.setText(AnnotatedString("nusachat://user/${me.username}"))
+                showMyLink = false
+            },
+            onShare = { vm.shareText("Tambahkan aku di NusaChat: nusachat://user/${me.username}", "Bagikan profil") },
+            onDismiss = { showMyLink = false },
+        )
+    }
+}
+
+/** Ekstrak username dari tautan profil nusachat://user/<nama>. */
+private fun parseProfileLink(text: String): String? {
+    val match = Regex("nusachat://user/([A-Za-z0-9_.]{2,20})").find(text.trim())
+    return match?.groupValues?.get(1)
+}
+
+@Composable
+private fun RemarkDialog(user: User, onConfirm: (String?) -> Unit, onDismiss: () -> Unit) {
+    var text by remember(user.id) { mutableStateOf(user.remark.orEmpty()) }
+    NusaDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Nama panggilan") },
+        text = {
+            Column {
+                Text(
+                    "Hanya terlihat olehmu untuk ${user.displayName}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                NusaTextField(
+                    value = text,
+                    onValueChange = { if (it.length <= 40) text = it },
+                    placeholder = { Text("cth. Bestie SMA") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            NusaTextButton(onClick = { onConfirm(text.trim().ifBlank { null }) }) { Text("Simpan") }
+        },
+        dismissButton = {
+            NusaTextButton(onClick = onDismiss) { Text("Batal") }
+        },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GreetingSheet(user: User, onSend: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember(user.id) { mutableStateOf("") }
+    NusaBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+            Text(
+                "Tambah ${user.displayName}",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Sertakan sapaan agar dikenali (opsional).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            NusaTextField(
+                value = text,
+                onValueChange = { if (it.length <= 160) text = it },
+                placeholder = { Text("cth. Halo, aku Budi dari kantor") },
+                maxLines = 3,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(14.dp))
+            NusaButton(
+                onClick = { onSend(text.trim()) },
+                modifier = Modifier.fillMaxWidth().height(44.dp),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Text("Kirim permintaan", fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
 }
 
 @Composable
@@ -454,6 +649,7 @@ private fun SearchResults(
     results: List<User>,
     loading: Boolean,
     onOpenChatWith: (User) -> Unit,
+    onAdd: (User) -> Unit = { vm.sendFriendRequest(it) },
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         SectionLabel("Hasil pencarian untuk \"$query\"")
@@ -495,7 +691,7 @@ private fun SearchResults(
                                 "incoming" -> NusaTextButton(onClick = { vm.loadRequests() }) {
                                     Text("Undangan")
                                 }
-                                else -> NusaIconButton(onClick = { vm.sendFriendRequest(user) }) {
+                                else -> NusaIconButton(onClick = { onAdd(user) }) {
                                     Icon(
                                         painter = painterResource(id = NusaIcons.PersonAdd),
                                         contentDescription = "Tambah teman",
@@ -514,12 +710,13 @@ private fun SearchResults(
 }
 
 /** Baris teman ala LINE: avatar, nama, @username, status message bubble di kanan. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ContactFriendRow(user: User, onClick: () -> Unit) {
+private fun ContactFriendRow(user: User, onClick: () -> Unit, onLongClick: () -> Unit = {}) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 16.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -548,13 +745,13 @@ private fun ContactFriendRow(user: User, onClick: () -> Unit) {
                 .padding(horizontal = 12.dp),
         ) {
             Text(
-                text = user.displayName,
+                text = user.familiarName,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
             )
             Text(
-                text = "@${user.username}",
+                text = if (user.remark.isNullOrBlank()) "@${user.username}" else "${user.displayName} • @${user.username}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,

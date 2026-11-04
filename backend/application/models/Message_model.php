@@ -314,4 +314,95 @@ class Message_model extends CI_Model
             ['delivered', $conversationId, $readerId, 'sent']
         );
     }
+
+    /**
+     * Hapus untuk saya: sembunyikan pesan dari daftar viewer saja.
+     */
+    public function hide(int $messageId, int $userId): void
+    {
+        try {
+            $this->store->insert('hidden_messages', [
+                'user_id' => $userId,
+                'message_id' => $messageId,
+                'created_at' => now_iso(),
+            ]);
+        } catch (Throwable $e) {
+            // Sudah disembunyikan: unique constraint.
+        }
+    }
+
+    /** @return int[] id pesan yang disembunyikan viewer dari daftar ini */
+    public function hiddenIds(int $userId, array $messageIds): array
+    {
+        $messageIds = array_values(array_unique(array_map('intval', $messageIds)));
+        if (!$messageIds) {
+            return [];
+        }
+        $placeholders = implode(',', array_fill(0, count($messageIds), '?'));
+        $rows = $this->store->all(
+            'SELECT message_id FROM hidden_messages WHERE user_id = ? AND message_id IN (' . $placeholders . ')',
+            array_merge([$userId], $messageIds)
+        );
+        return array_map(static fn (array $r): int => (int) $r['message_id'], $rows);
+    }
+
+    public function star(int $conversationId, int $messageId, int $userId): void
+    {
+        try {
+            $this->store->insert('starred_messages', [
+                'user_id' => $userId,
+                'conversation_id' => $conversationId,
+                'message_id' => $messageId,
+                'created_at' => now_iso(),
+            ]);
+        } catch (Throwable $e) {
+            // Sudah dibintangi: unique constraint.
+        }
+    }
+
+    public function unstar(int $messageId, int $userId): void
+    {
+        $this->store->delete('starred_messages', 'user_id = ? AND message_id = ?', [$userId, $messageId]);
+    }
+
+    /** @return array<int, array> pesan berbintang + judul percakapan */
+    public function starred(int $userId, int $limit = 50): array
+    {
+        $limit = max(1, min(100, $limit));
+        return $this->store->all(
+            'SELECT m.*, u.display_name AS sender_display_name, u.username AS sender_username,
+                    u.avatar_url AS sender_avatar_url, s.created_at AS starred_at,
+                    c.type AS conversation_type, c.title AS conversation_title
+             FROM starred_messages s
+             JOIN messages m ON m.id = s.message_id
+             JOIN users u ON u.id = m.sender_id
+             JOIN conversations c ON c.id = s.conversation_id
+             WHERE s.user_id = ?
+             ORDER BY s.id DESC LIMIT ' . $limit,
+            [$userId]
+        );
+    }
+
+    /**
+     * Cari pesan di semua percakapan milik viewer (terbaru dulu).
+     *
+     * @return array<int, array>
+     */
+    public function searchAll(int $userId, string $query, int $limit = 30): array
+    {
+        $limit = max(1, min(50, $limit));
+        return $this->store->all(
+            'SELECT m.*, u.display_name AS sender_display_name, u.username AS sender_username,
+                    u.avatar_url AS sender_avatar_url,
+                    c.type AS conversation_type, c.title AS conversation_title
+             FROM messages m
+             JOIN users u ON u.id = m.sender_id
+             JOIN conversations c ON c.id = m.conversation_id
+             JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
+             WHERE m.body LIKE ? AND m.revoked_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM hidden_messages h WHERE h.user_id = ? AND h.message_id = m.id)
+             ORDER BY m.id DESC LIMIT ' . $limit,
+            [$userId, '%' . $query . '%', $userId]
+        );
+    }
 }

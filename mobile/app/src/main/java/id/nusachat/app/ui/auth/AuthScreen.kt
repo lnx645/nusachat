@@ -26,11 +26,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,6 +58,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import id.nusachat.app.data.GoogleAuthHelper
 import id.nusachat.app.ui.AppViewModel
+import id.nusachat.app.ui.components.NusaBottomSheet
 import id.nusachat.app.ui.components.NusaButton
 import id.nusachat.app.ui.components.NusaIconButton
 import id.nusachat.app.ui.components.NusaProgress
@@ -324,7 +327,17 @@ private fun LoginPage(vm: AppViewModel, onBack: () -> Unit) {
             if (loading) NusaProgress(modifier = Modifier.size(20.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
             else Text("Masuk", fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
-        Spacer(Modifier.height(16.dp))
+        var showForgot by rememberSaveable { mutableStateOf(false) }
+        TextButton(
+            onClick = { showForgot = true },
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+        ) {
+            Text("Lupa kata sandi?", color = MaterialTheme.colorScheme.primary)
+        }
+        if (showForgot) {
+            ForgotPasswordSheet(vm = vm, onDismiss = { showForgot = false })
+        }
+        Spacer(Modifier.height(8.dp))
         Surface(
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
@@ -336,6 +349,119 @@ private fun LoginPage(vm: AppViewModel, onBack: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ForgotPasswordSheet(vm: AppViewModel, onDismiss: () -> Unit) {
+    var step by rememberSaveable { mutableStateOf(0) }
+    var login by rememberSaveable { mutableStateOf("") }
+    var token by rememberSaveable { mutableStateOf("") }
+    var newPassword by rememberSaveable { mutableStateOf("") }
+    var sentToDev by rememberSaveable { mutableStateOf<String?>(null) }
+    var done by rememberSaveable { mutableStateOf(false) }
+    val loading by vm.authLoading.collectAsStateWithLifecycle()
+    val error by vm.authError.collectAsStateWithLifecycle()
+
+    NusaBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+            Text("Lupa kata sandi", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(4.dp))
+            when {
+                done -> {
+                    Text(
+                        "Kata sandi diganti. Silakan masuk dengan sandi barumu.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    NusaButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                    ) { Text("Tutup", fontWeight = FontWeight.Bold) }
+                }
+                step == 0 -> {
+                    Text(
+                        "Masukkan nama pengguna / nomor HP. Tautan reset dikirim (demo: token langsung tampil).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    NusaTextField(
+                        value = login,
+                        onValueChange = { login = it },
+                        label = { Text("Nama pengguna atau nomor HP") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (error != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(error.orEmpty(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    NusaButton(
+                        onClick = {
+                            vm.clearAuthError()
+                            vm.forgotPassword(login) { devToken ->
+                                sentToDev = devToken
+                                step = 1
+                            }
+                        },
+                        enabled = !loading && login.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        if (loading) NusaProgress(modifier = Modifier.size(20.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
+                        else Text("Kirim tautan reset", fontWeight = FontWeight.Bold)
+                    }
+                }
+                else -> {
+                    Text(
+                        if (sentToDev != null) "Mode demo — token resetmu: $sentToDev" else "Masukkan token dari SMS/email dan sandi baru.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    NusaTextField(
+                        value = token,
+                        onValueChange = { token = it.trim() },
+                        label = { Text("Token reset") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    NusaTextField(
+                        value = newPassword,
+                        onValueChange = { newPassword = it },
+                        label = { Text("Kata sandi baru (min. 6)") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (error != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(error.orEmpty(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    NusaButton(
+                        onClick = {
+                            vm.clearAuthError()
+                            vm.resetPassword(token, newPassword) { done = true }
+                        },
+                        enabled = !loading && token.isNotBlank() && newPassword.length >= 6,
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        if (loading) NusaProgress(modifier = Modifier.size(20.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
+                        else Text("Ganti kata sandi", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
         }
     }
 }

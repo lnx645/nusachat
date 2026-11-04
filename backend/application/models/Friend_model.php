@@ -28,16 +28,67 @@ class Friend_model extends CI_Model
         return $row !== null && $row['status'] === 'accepted';
     }
 
-    public function create(int $from, int $to): int
+    public function create(int $from, int $to, ?string $message = null): int
     {
         $now = now_iso();
         return $this->store->insert('friendships', [
             'requester_id' => $from,
             'addressee_id' => $to,
             'status' => 'pending',
+            'message' => $message,
             'created_at' => $now,
             'updated_at' => $now,
         ]);
+    }
+
+    /**
+     * Nama panggilan pribadi untuk seorang teman (hanya terlihat olehku).
+     */
+    public function setRemark(int $userId, int $friendId, ?string $remark): void
+    {
+        if ($remark === null || trim($remark) === '') {
+            $this->store->delete('friend_remarks', 'user_id = ? AND friend_id = ?', [$userId, $friendId]);
+            return;
+        }
+        $existing = $this->store->one(
+            'SELECT id FROM friend_remarks WHERE user_id = ? AND friend_id = ?',
+            [$userId, $friendId]
+        );
+        if ($existing) {
+            $this->store->update(
+                'friend_remarks',
+                ['remark' => mb_substr(trim($remark), 0, 40), 'updated_at' => now_iso()],
+                'id = ?',
+                [(int) $existing['id']]
+            );
+            return;
+        }
+        $this->store->insert('friend_remarks', [
+            'user_id' => $userId,
+            'friend_id' => $friendId,
+            'remark' => mb_substr(trim($remark), 0, 40),
+            'updated_at' => now_iso(),
+        ]);
+    }
+
+    public function remark(int $userId, int $friendId): ?string
+    {
+        $remark = $this->store->value(
+            'SELECT remark FROM friend_remarks WHERE user_id = ? AND friend_id = ?',
+            [$userId, $friendId]
+        );
+        return is_string($remark) && $remark !== '' ? $remark : null;
+    }
+
+    /** @return array<int, string> friend_id => remark */
+    public function remarksFor(int $userId): array
+    {
+        $rows = $this->store->all('SELECT friend_id, remark FROM friend_remarks WHERE user_id = ?', [$userId]);
+        $out = [];
+        foreach ($rows as $row) {
+            $out[(int) $row['friend_id']] = (string) $row['remark'];
+        }
+        return $out;
     }
 
     public function accept(int $id, int $userId): bool
@@ -148,13 +199,13 @@ class Friend_model extends CI_Model
     public function pending(int $userId): array
     {
         $incoming = $this->store->all(
-            'SELECT f.id AS request_id, f.status, f.created_at, u.*
+            'SELECT f.id AS request_id, f.status, f.message AS greeting, f.created_at, u.*
              FROM friendships f JOIN users u ON u.id = f.requester_id
              WHERE f.addressee_id = ? AND f.status = ? ORDER BY f.id DESC',
             [$userId, 'pending']
         );
         $outgoing = $this->store->all(
-            'SELECT f.id AS request_id, f.status, f.created_at, u.*
+            'SELECT f.id AS request_id, f.status, f.message AS greeting, f.created_at, u.*
              FROM friendships f JOIN users u ON u.id = f.addressee_id
              WHERE f.requester_id = ? AND f.status = ? ORDER BY f.id DESC',
             [$userId, 'pending']

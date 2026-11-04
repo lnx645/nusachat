@@ -105,10 +105,20 @@ class Auth extends MY_Controller
             $this->fail('Too many refresh attempts.', 429, 'rate_limited');
         }
 
-        $row = $this->token_model->consumeRefresh($refresh);
-        if (!$row) {
+        $result = $this->token_model->consumeRefreshStrict($refresh);
+        if ($result['status'] === 'reused') {
+            // Token yang sudah dirotasi dipakai ulang → kemungkinan curian.
+            // Keluarga token sudah dicabut di model; naikkan token_version
+            // agar access token curian pun langsung mati.
+            $row = $result['row'];
+            $this->user_model->bumpTokenVersion((int) $row['user_id']);
+            log_message('error', 'Refresh token reuse detected for user ' . (int) $row['user_id']);
+            $this->fail('Session has been revoked, please log in again.', 401, 'token_revoked');
+        }
+        if ($result['status'] !== 'ok') {
             $this->fail('Refresh token is invalid or expired.', 401, 'invalid_refresh_token');
         }
+        $row = $result['row'];
         $user = $this->user_model->find((int) $row['user_id']);
         if (!$user || (int) $user['is_active'] !== 1) {
             $this->fail('Account not found.', 401, 'unauthorized');
@@ -224,6 +234,99 @@ class Auth extends MY_Controller
             'user' => user_dto($user, true),
             'auth' => $this->token_model->issue($user, $this->device_name(), $this->app),
         ], 201);
+    }
+
+    /**
+     * Minta token reset kata sandi. Selalu 200 agar username/HP tidak bisa
+     * dienumerasi. Demo: di development token dikembalikan langsung karena
+     * belum ada gateway SMS/email; di produksi token hanya dicatat di log.
+     */
+    public function forgot(): void
+    {
+        $this->require_method(['POST']);
+        $this->require_fields(['login']);
+        if (!$this->throttle('forgot:' . client_ip(), 10, 3600)) {
+            $this->fail('Too many requests. Try again later.', 429, 'rate_limited');
+        }
+
+        $identifier = strtolower($this->str_param('login'));
+        $user = $identifier !== '' ? $this->user_model->findByLogin($identifier) : null;
+        if ($user && (int) $user['is_active'] === 1) {
+            $token = bin2hex(random_bytes(24));
+            $this->store->insert('password_resets', [
+                'user_id' => (int) $user['id'],
+                'token_hash' => hash('sha256', $token),
+                'expires_at' => iso_plus(900),
+                'created_at' => now_iso(),
+            ]);
+            if (($this->app['env'] ?? 'production') !== 'production') {
+                $this->ok(['sent' => true, 'reset_token' => $token, 'expires_in' => 900]);
+            }
+            log_message('info', 'Password reset requested for user ' . (int) $user['id']);
+        }
+        $this->ok(['sent' => true]);
+    }
+
+    public function reset(): void
+    {
+        $this->require_method(['POST']);
+        $this->require_fields(['token', 'new_password']);
+        if (!$this->throttle('reset:' . client_ip(), 20, 3600)) {
+            $this->fail('Too many requests. Try again later.', 429, 'rate_limited');
+        }
+
+        $row = $this->store->one(
+            'SELECT * FROM password_resets WHERE token_hash = ? AND used_at IS NULL',
+            [hash('sha256', $this->str_param('token'))]
+        );
+        if (!$row || strtotime($row['expires_at']) < time()) {
+            $this->fail('Reset token is invalid or expired.', 401, 'invalid_reset_token');
+        }
+        $new = (string) $this->param('new_password');
+        if (mb_strlen($new) < 6 || mb_strlen($new) > 72) {
+            $this->fail('New password must be 6-72 characters.', 422, 'invalid_password');
+        }
+        $user = $this->user_model->find((int) $row['user_id']);
+        if (!$user || (int) $user['is_active'] !== 1) {
+            $this->fail('Account not found.', 404, 'not_found');
+        }
+
+        $this->store->update('password_resets', ['used_at' => now_iso()], 'id = ?', [(int) $row['id']]);
+        $this->user_model->setPassword((int) $user['id'], password_hash($new, PASSWORD_DEFAULT));
+        $this->token_model->revokeAll((int) $user['id']);
+        $this->ok(['message' => 'Password has been reset. Please log in.']);
+    }
+
+    /**
+     * Daftar sesi aktif milik sendiri (untuk layar "Perangkat saya").
+     */
+    public function sessions(): void
+    {
+        $this->require_method(['GET']);
+        $user = $this->require_auth();
+        $rows = $this->token_model->listActive((int) $user['id']);
+        $this->ok(['sessions' => array_map(
+            static fn (array $r): array => [
+                'jti' => $r['jti'],
+                'device' => $r['device'],
+                'created_at' => $r['created_at'],
+                'last_used_at' => $r['last_used_at'],
+                'expires_at' => $r['expires_at'],
+            ],
+            $rows
+        )]);
+    }
+
+    public function revoke_session(): void
+    {
+        $this->require_method(['POST', 'DELETE']);
+        $user = $this->require_auth();
+        $this->require_fields(['jti']);
+        $jti = $this->str_param('jti');
+        if ($jti === '' || !$this->token_model->revokeByJti((int) $user['id'], $jti)) {
+            $this->fail('Session not found.', 404, 'not_found');
+        }
+        $this->ok(['revoked' => true]);
     }
 
     public function check_username(): void

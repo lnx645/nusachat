@@ -10,6 +10,9 @@ data class VoiceCall(
     val status: String,
     val kind: String = "audio",
     val conversationId: Long? = null,
+    val createdAt: String = "",
+    val answeredAt: String? = null,
+    val endedAt: String? = null,
 )
 
 internal fun JSONObject.toVoiceCall(): VoiceCall = VoiceCall(
@@ -20,6 +23,9 @@ internal fun JSONObject.toVoiceCall(): VoiceCall = VoiceCall(
     status = optString("status", "ringing"),
     kind = optString("kind", "audio"),
     conversationId = if (has("conversation_id") && !isNull("conversation_id")) optLong("conversation_id") else null,
+    createdAt = optString("created_at"),
+    answeredAt = if (has("answered_at") && !isNull("answered_at")) optString("answered_at") else null,
+    endedAt = if (has("ended_at") && !isNull("ended_at")) optString("ended_at") else null,
 )
 
 data class RoomParticipant(
@@ -132,5 +138,18 @@ class CallRepository(private val api: ApiClient) {
                 .put("sdp", sdp)
                 .put("signal", signal)
         )
+    }
+
+    suspend fun history(limit: Int = 30, beforeId: Long? = null): List<CallHistoryItem> {
+        val data = api.get(
+            "/calls/history",
+            mapOf("limit" to limit.toString(), "before_id" to beforeId?.toString())
+        )
+        val array = data.optJSONArray("calls") ?: org.json.JSONArray()
+        val result = mutableListOf<CallHistoryItem>()
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { result.add(it.toCallHistory()) }
+        }
+        return result
     }
 }

@@ -81,20 +81,26 @@ $run = static function (string $statement) use ($pdo, &$count): void {
     }
     $count++;
 };
-// ALTER dulu agar indeks yang merujuk kolom baru tidak gagal di database lama.
+// Urutan tiga fase: CREATE dulu (DB kosong butuh tabel sebelum ALTER),
+// lalu ALTER (kolom baru untuk DB lama), terakhir sisanya (indeks dkk.
+// yang boleh merujuk kolom baru). Aman di-run ulang: CREATE/INDEX
+// memakai IF NOT EXISTS, ALTER yang duplikat diabaikan di $run.
+$creates = [];
 $alters = [];
 $rest = [];
 foreach ($statements as $statement) {
     if ($statement === '' || strpos($statement, '--') === 0) {
         continue;
     }
-    if (preg_match('/^\s*ALTER\s+TABLE/i', $statement)) {
+    if (preg_match('/^\s*CREATE\s+TABLE/i', $statement)) {
+        $creates[] = $statement;
+    } elseif (preg_match('/^\s*ALTER\s+TABLE/i', $statement)) {
         $alters[] = $statement;
     } else {
         $rest[] = $statement;
     }
 }
-foreach (array_merge($alters, $rest) as $statement) {
+foreach (array_merge($creates, $alters, $rest) as $statement) {
     $run($statement);
 }
 echo "OK: {$count} statements executed using " . basename($schema) . ".\n";

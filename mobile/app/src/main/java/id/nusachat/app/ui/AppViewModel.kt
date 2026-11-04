@@ -27,10 +27,19 @@ import id.nusachat.app.data.MomentComment
 import id.nusachat.app.data.PinnedMessage
 import id.nusachat.app.data.Reaction
 import id.nusachat.app.data.CallForegroundService
+import id.nusachat.app.data.CallHistoryItem
+import id.nusachat.app.data.MediaHelper
 import id.nusachat.app.data.PushManager
+import id.nusachat.app.data.RedPacket
+import id.nusachat.app.data.ReportItem
+import id.nusachat.app.data.SessionItem
 import id.nusachat.app.data.SessionStore
+import id.nusachat.app.data.SettingsStore
+import id.nusachat.app.data.StoryViewer
+import id.nusachat.app.data.GifClient
 import id.nusachat.app.data.User
 import id.nusachat.app.data.VoiceCall
+import id.nusachat.app.data.WalletRequestItem
 import id.nusachat.app.data.WebRtcCallManager
 import id.nusachat.app.data.toMessage
 import id.nusachat.app.data.toUser
@@ -76,6 +85,7 @@ data class ChatUiState(
     val searchResults: List<Message> = emptyList(),
     val detail: Conversation? = null,
     val muting: Boolean = false,
+    val initialUnread: Int = 0,
 )
 
 data class NearbyState(
@@ -102,6 +112,8 @@ data class CallUiState(
     val muted: Boolean = false,
     val speaker: Boolean = false,
     val remoteSdp: String? = null,
+    val video: Boolean = false,
+    val videoMuted: Boolean = false,
 )
 
 data class GroupCallUiState(
@@ -123,6 +135,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val chatThemeStore = ChatThemeStore(application)
     private val rtc = WebRtcCallManager(application.applicationContext)
     val e2ee = E2eeManager(application.applicationContext)
+    val settings = SettingsStore(application)
 
     val sessionState = MutableStateFlow(SessionState())
     val authLoading = MutableStateFlow(false)
@@ -162,6 +175,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val pushReady = MutableStateFlow(false)
     val inviteLink = MutableStateFlow<String?>(null)
     val joinRequests = MutableStateFlow<List<GroupJoinRequest>>(emptyList())
+
+    // ------------------------------------------------------- state 0.2.0 ---
+    val globalSearching = MutableStateFlow(false)
+    val globalSearchResults = MutableStateFlow<List<Message>>(emptyList())
+    val starredMessages = MutableStateFlow<List<Message>>(emptyList())
+    val starredLoading = MutableStateFlow(false)
+    val selectedMessages = MutableStateFlow<Set<Long>>(emptySet())
+    val callHistory = MutableStateFlow<List<CallHistoryItem>>(emptyList())
+    val callHistoryLoading = MutableStateFlow(false)
+    val missedCalls = MutableStateFlow(0)
+    val walletHasPin = MutableStateFlow(false)
+    val walletIncoming = MutableStateFlow<List<WalletRequestItem>>(emptyList())
+    val walletOutgoing = MutableStateFlow<List<WalletRequestItem>>(emptyList())
+    val redPacket = MutableStateFlow<RedPacket?>(null)
+    val redPacketLoading = MutableStateFlow(false)
+    val sessions = MutableStateFlow<List<SessionItem>>(emptyList())
+    val sessionsLoading = MutableStateFlow(false)
+    val likers = MutableStateFlow<List<User>>(emptyList())
+    val likersMomentId = MutableStateFlow<Long?>(null)
+    val storyViewerCount = MutableStateFlow(0)
+    val storyViewers = MutableStateFlow<List<StoryViewer>>(emptyList())
+    val storyViewersId = MutableStateFlow<Long?>(null)
+    val myReports = MutableStateFlow<List<ReportItem>>(emptyList())
+    val downloading = MutableStateFlow<String?>(null)
+    val gifResults = MutableStateFlow<List<GifClient.Gif>>(emptyList())
+    val gifLoading = MutableStateFlow(false)
 
     private var socket: ChatSocket? = null
     private var activeChatId: Long? = null
@@ -380,6 +419,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         commentsMomentId.value = null
         callState.value = CallUiState()
         readUpTo.clear()
+        globalSearchResults.value = emptyList()
+        starredMessages.value = emptyList()
+        selectedMessages.value = emptySet()
+        callHistory.value = emptyList()
+        missedCalls.value = 0
+        walletIncoming.value = emptyList()
+        walletOutgoing.value = emptyList()
+        redPacket.value = null
+        sessions.value = emptyList()
     }
 
     private fun loadInitial() {
@@ -389,6 +437,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         refreshMoments()
         registerPush()
         publishDeviceKey()
+        loadCallHistory()
     }
 
     private fun publishDeviceKey() {
@@ -611,6 +660,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 loadWallet()
                 message.value = "Koin ${data.optLong("amount")} diterima."
             }
+            "wallet_requested" -> {
+                loadWalletRequests()
+                message.value = "Tagihan koin masuk."
+            }
+            "wallet_request_paid" -> {
+                loadWallet()
+                loadWalletRequests()
+                message.value = "Tagihan ${data.optLong("amount")} koin dibayar."
+            }
+            "wallet_request_declined" -> loadWalletRequests()
+            "redpacket_claimed" -> {
+                val packetId = data.optLong("packet_id")
+                if (packetId > 0 && redPacket.value?.id == packetId) {
+                    loadRedPacket(packetId)
+                }
+                loadWallet()
+            }
+            "story_viewed" -> {
+                val storyId = data.optLong("story_id")
+                if (storyId > 0 && storyViewersId.value == storyId) {
+                    loadStoryViewers(storyId)
+                }
+                stories.value = stories.value.map {
+                    if (it.id == storyId) it.copy(viewCount = it.viewCount + 1) else it
+                }
+            }
             "keys_updated" -> onKeysUpdated(data)
             "presence" -> {
                 val userId = data.optLong("user_id")
@@ -657,7 +732,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val pendingIce = mutableListOf<JSONObject>()
     private var callIceJob: Job? = null
 
-    fun startVoiceCall(peer: User) {
+    fun startVoiceCall(peer: User) = startCall(peer, "audio")
+
+    fun startVideoCall(peer: User) = startCall(peer, "video")
+
+    fun rtcManager(): WebRtcCallManager = rtc
+
+    fun toggleVideoMute() {
+        val muted = !callState.value.videoMuted
+        rtc.setVideoMuted(muted)
+        callState.value = callState.value.copy(videoMuted = muted)
+    }
+
+    fun switchCallCamera() = rtc.switchCamera()
+
+    private fun startCall(peer: User, kind: String) {
         if (callState.value.status in listOf("dialing", "active", "ringing")) {
             message.value = "Sudah ada panggilan aktif."
             return
@@ -667,10 +756,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         if (!rtc.isSupported()) {
-            message.value = "Panggilan suara tidak didukung di perangkat ini."
+            message.value = "Panggilan tidak didukung di perangkat ini."
             return
         }
-        callState.value = CallUiState(call = null, peer = peer, outgoing = true, status = "dialing")
+        rtc.videoEnabled = kind == "video"
+        callState.value = CallUiState(call = null, peer = peer, outgoing = true, status = "dialing", video = kind == "video")
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 rtc.ensureFactory()
@@ -699,7 +789,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 rtc.onDisconnected = {
                     if (callState.value.status == "active") endCallLocal()
                 }
-                val created = calls.offer(peer.id, offer.description, "audio")
+                val created = calls.offer(peer.id, offer.description, kind)
                 callState.value = callState.value.copy(
                     call = created,
                     status = "dialing",
@@ -727,10 +817,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val call = current.call ?: return
         val sdp = current.remoteSdp ?: return
         if (!rtc.isSupported()) {
-            message.value = "Panggilan suara tidak didukung di perangkat ini."
+            message.value = "Panggilan tidak didukung di perangkat ini."
             endCallLocal()
             return
         }
+        rtc.videoEnabled = call.kind == "video"
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 rtc.ensureFactory()
@@ -963,6 +1054,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         callState.value = CallUiState(
             call = call, peer = peer, outgoing = false,
             status = "ringing", remoteSdp = sdp.ifBlank { null },
+            video = call.kind == "video",
         )
         startCallService()
     }
@@ -1008,6 +1100,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun onCallEnded(data: JSONObject) {
         endCallLocal()
+        loadCallHistory()
     }
 
     /**
@@ -1045,6 +1138,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (callState.value.status == "ended") callState.value = CallUiState()
             }
         }
+        loadCallHistory()
     }
 
     private fun incomingMessage(conversationId: Long, incoming: Message) {
@@ -1105,10 +1199,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     messages = dec,
                     loading = false,
                     hasMore = page.hasMore,
+                    initialUnread = conversation.unreadCount,
                 )
                 page.messages.lastOrNull()?.let { markReadInternal(conversation.id, it.id) }
                 refreshConversations()
                 loadPins()
+                // Anggota + username untuk saran @mention (juga dipakai header grup).
+                loadConversationDetail()
             } catch (e: Exception) {
                 handleError(e)
                 chat.value = chat.value.copy(
@@ -1707,8 +1804,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         refreshConversations()
     }
 
-    suspend fun updateGroupInfo(conversationId: Long, title: String? = null, avatarUrl: String? = null) {
-        val updated = repository.updateGroupInfo(conversationId, title, avatarUrl)
+    suspend fun updateGroupInfo(conversationId: Long, title: String? = null, avatarUrl: String? = null, description: String? = null) {
+        val updated = repository.updateGroupInfo(conversationId, title, avatarUrl, description)
         if (chat.value.conversation?.id == conversationId) {
             chat.value = chat.value.copy(conversation = updated, detail = updated)
         }
@@ -2274,7 +2371,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createStory(text: String, uris: List<android.net.Uri>) {
+    fun createStory(text: String, uris: List<android.net.Uri>, style: String? = null) {
         val trimmed = text.trim()
         if (trimmed.isBlank() && uris.isEmpty()) {
             message.value = "Tulis sesuatu atau pilih foto."
@@ -2287,7 +2384,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val media = uris.take(4).map { repository.upload(it) }
-                val story = repository.createStory(trimmed, media)
+                val story = repository.createStory(trimmed, media, style.orEmpty())
                 stories.value = listOf(story) + stories.value
                 message.value = "Story dibagikan, hilang dalam 24 jam."
             } catch (e: Exception) {
@@ -2410,7 +2507,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleLike(moment: Moment) {
         val liked = !moment.likedByMe
-        moments.value = moments.value.map {
+        val applyLike: (Moment) -> Moment = {
             if (it.id == moment.id) {
                 it.copy(
                     likedByMe = liked,
@@ -2418,11 +2515,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             } else it
         }
+        moments.value = moments.value.map(applyLike)
+        tagFeed.value = tagFeed.value.map(applyLike)
         viewModelScope.launch {
             try {
                 if (liked) repository.likeMoment(moment.id) else repository.unlikeMoment(moment.id)
             } catch (e: Exception) {
-                moments.value = moments.value.map {
+                val revert: (Moment) -> Moment = {
                     if (it.id == moment.id) {
                         it.copy(
                             likedByMe = moment.likedByMe,
@@ -2430,6 +2529,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     } else it
                 }
+                moments.value = moments.value.map(revert)
+                tagFeed.value = tagFeed.value.map(revert)
                 handleError(e)
             }
         }
@@ -2560,4 +2661,974 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         format.timeZone = TimeZone.getTimeZone("UTC")
         return format.format(Date())
     }
+
+    // ------------------------------------------------------------- lupa sandi
+
+    /** onSent dipanggil dengan token (server dev) atau null (produksi: cek SMS/email). */
+    fun forgotPassword(login: String, onSent: (String?) -> Unit) {
+        if (login.isBlank()) {
+            authError.value = "Isi nama pengguna atau nomor HP."
+            return
+        }
+        authLoading.value = true
+        viewModelScope.launch {
+            try {
+                onSent(repository.forgotPassword(login.trim()))
+            } catch (e: Exception) {
+                authError.value = e.message ?: "Gagal meminta reset."
+            } finally {
+                authLoading.value = false
+            }
+        }
+    }
+
+    fun resetPassword(token: String, newPassword: String, onDone: () -> Unit) {
+        if (token.isBlank() || newPassword.length < 6) {
+            authError.value = "Token dan sandi baru (min. 6 karakter) wajib diisi."
+            return
+        }
+        authLoading.value = true
+        viewModelScope.launch {
+            try {
+                repository.resetPassword(token.trim(), newPassword)
+                onDone()
+            } catch (e: Exception) {
+                authError.value = e.message ?: "Reset gagal."
+            } finally {
+                authLoading.value = false
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ sesi
+
+    fun loadSessions() {
+        sessionsLoading.value = true
+        viewModelScope.launch {
+            try {
+                sessions.value = repository.sessions()
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                sessionsLoading.value = false
+            }
+        }
+    }
+
+    fun revokeSession(item: SessionItem) {
+        viewModelScope.launch {
+            try {
+                repository.revokeSession(item.jti)
+                sessions.value = sessions.value.filterNot { it.jti == item.jti }
+                // Bila sesi perangkat ini yang dicabut, keluar sekalian.
+                val mine = session.refreshToken?.substringBefore(".")
+                if (!mine.isNullOrBlank() && mine == item.jti) {
+                    logout()
+                } else {
+                    message.value = "Sesi dicabut."
+                }
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun setMutedById(conversation: Conversation, muted: Boolean) {
+        viewModelScope.launch {
+            try {
+                repository.muteConversation(conversation.id, muted)
+                conversations.value = conversations.value.map {
+                    if (it.id == conversation.id) it.copy(muted = muted) else it
+                }
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun setArchivedById(conversation: Conversation, archived: Boolean) {
+        viewModelScope.launch {
+            try {
+                repository.archiveConversation(conversation.id, archived)
+                conversations.value = conversations.value.map {
+                    if (it.id == conversation.id) it.copy(archived = archived) else it
+                }
+                refreshConversations()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun clearHistoryById(conversation: Conversation) {
+        viewModelScope.launch {
+            try {
+                repository.clearHistory(conversation.id)
+                refreshConversations()
+                message.value = "Riwayat dihapus untuk saya."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    // ------------------------------------------------------- pin & belum dibaca
+
+    fun togglePinChat(conversation: Conversation) {
+        viewModelScope.launch {
+            try {
+                val pinned = repository.pinChat(conversation.id, !conversation.pinned)
+                conversations.value = conversations.value.map {
+                    if (it.id == conversation.id) it.copy(pinned = pinned) else it
+                }.sortedWith(compareByDescending<Conversation> { it.pinned }.thenByDescending { it.lastMessageAt ?: "" })
+                message.value = if (pinned) "Chat disematkan ke atas." else "Sematan chat dilepas."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun markChatUnread(conversation: Conversation) {
+        viewModelScope.launch {
+            try {
+                val count = repository.markUnread(conversation.id)
+                conversations.value = conversations.value.map {
+                    if (it.id == conversation.id) it.copy(unreadCount = count) else it
+                }
+                message.value = "Ditandai belum dibaca."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun searchAllChats(query: String) {
+        if (query.trim().length < 2) {
+            globalSearchResults.value = emptyList()
+            return
+        }
+        globalSearching.value = true
+        viewModelScope.launch {
+            try {
+                globalSearchResults.value = repository.searchAll(query.trim()).map { e2ee.decryptMessage(it) }
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                globalSearching.value = false
+            }
+        }
+    }
+
+    fun clearGlobalSearch() {
+        globalSearchResults.value = emptyList()
+    }
+
+    // ------------------------------------------------- pilih banyak & bintang
+
+    fun toggleSelectMessage(messageId: Long) {
+        val current = selectedMessages.value.toMutableSet()
+        if (!current.add(messageId)) current.remove(messageId)
+        selectedMessages.value = current
+    }
+
+    fun clearSelection() {
+        selectedMessages.value = emptySet()
+    }
+
+    fun forwardSelected(toConversationId: Long, onDone: () -> Unit = {}) {
+        val ids = selectedMessages.value.toList()
+        if (ids.isEmpty()) return
+        val state = chat.value
+        viewModelScope.launch {
+            try {
+                ids.mapNotNull { id -> state.messages.firstOrNull { it.id == id } }
+                    .sortedBy { it.id }
+                    .forEach { msg ->
+                        val body = if (msg.type == "text") e2ee.encrypt(toConversationId, msg.body.orEmpty()) else null
+                        repository.forwardMessage(msg.id, toConversationId, UUID.randomUUID().toString(), body)
+                    }
+                clearSelection()
+                refreshConversations()
+                message.value = "${ids.size} pesan diteruskan."
+                onDone()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun starSelected() {
+        val ids = selectedMessages.value.toList()
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                ids.forEach { runCatching { repository.starMessage(it) } }
+                clearSelection()
+                message.value = "${ids.size} pesan dibintangi."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun deleteSelectedForMe() {
+        val ids = selectedMessages.value.toList()
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                ids.forEach { runCatching { repository.hideMessage(it) } }
+                chat.value = chat.value.copy(messages = chat.value.messages.filterNot { it.id in ids })
+                clearSelection()
+                refreshConversations()
+                message.value = "${ids.size} pesan dihapus untuk saya."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun starMessage(msg: Message) {
+        viewModelScope.launch {
+            try {
+                repository.starMessage(msg.id)
+                message.value = "Pesan dibintangi."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun loadStarred() {
+        starredLoading.value = true
+        viewModelScope.launch {
+            try {
+                starredMessages.value = repository.starredMessages().map { e2ee.decryptMessage(it) }
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                starredLoading.value = false
+            }
+        }
+    }
+
+    fun unstarMessage(msg: Message) {
+        viewModelScope.launch {
+            try {
+                repository.unstarMessage(msg.id)
+                starredMessages.value = starredMessages.value.filterNot { it.id == msg.id }
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun hideMessage(msg: Message) {
+        viewModelScope.launch {
+            try {
+                repository.hideMessage(msg.id)
+                chat.value = chat.value.copy(messages = chat.value.messages.filterNot { it.id == msg.id })
+                refreshConversations()
+                message.value = "Pesan dihapus untuk saya."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    // ------------------------------------------------------ stiker & suara
+
+    fun sendSticker(emoji: String) {
+        val state = chat.value
+        val conversation = state.conversation ?: return
+        if (emoji.isBlank()) return
+        val me = session.user ?: return
+        val clientId = UUID.randomUUID().toString()
+        val replyToId = state.replyTo?.takeIf { it.id > 0 }?.id
+        val pending = Message(
+            id = -System.currentTimeMillis(),
+            conversationId = conversation.id,
+            sender = me,
+            type = "sticker",
+            body = emoji,
+            attachmentUrl = null,
+            status = "sending",
+            createdAt = nowIso(),
+            clientId = clientId,
+            pending = true,
+            replyToId = replyToId,
+        )
+        chat.value = state.copy(messages = state.messages + pending, replyTo = null)
+        viewModelScope.launch {
+            try {
+                val sent = repository.sendSticker(conversation.id, emoji, clientId, replyToId)
+                mergeSentMessage(clientId, sent)
+                refreshConversations()
+            } catch (e: Exception) {
+                val current = chat.value
+                chat.value = current.copy(
+                    messages = current.messages.map {
+                        if (it.clientId == clientId) it.copy(status = "failed", pending = false) else it
+                    }
+                )
+                handleError(e)
+            }
+        }
+    }
+
+    fun sendVoiceFile(uri: Uri, replyToId: Long? = null) {
+        val conversation = chat.value.conversation ?: return
+        chat.value = chat.value.copy(sendingFile = true)
+        viewModelScope.launch {
+            try {
+                val url = repository.upload(uri)
+                val sent = repository.sendAttachment(
+                    conversation.id, url, "audio",
+                    UUID.randomUUID().toString(), "Pesan suara", replyToId,
+                )
+                incomingMessage(conversation.id, sent)
+                refreshConversations()
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                chat.value = chat.value.copy(sendingFile = false)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ GIF Giphy
+
+    fun loadTrendingGifs() {
+        if (!GifClient.hasKey) return
+        gifLoading.value = true
+        viewModelScope.launch {
+            try {
+                gifResults.value = GifClient.trending()
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                gifLoading.value = false
+            }
+        }
+    }
+
+    fun searchGifs(query: String) {
+        if (!GifClient.hasKey || query.trim().length < 2) return
+        gifLoading.value = true
+        viewModelScope.launch {
+            try {
+                gifResults.value = GifClient.search(query)
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                gifLoading.value = false
+            }
+        }
+    }
+
+    fun clearGifs() {
+        gifResults.value = emptyList()
+    }
+
+    /**
+     * Kirim GIF: unduh ke cache, unggah sebagai lampiran image, kirim.
+     * Server memvalidasi kepemilikan upload, jadi URL remote mentah ditolak.
+     */
+    fun sendGif(remoteUrl: String) {
+        val conversation = chat.value.conversation ?: return
+        chat.value = chat.value.copy(sendingFile = true)
+        viewModelScope.launch {
+            try {
+                val app = getApplication<Application>()
+                val name = "gif_${System.currentTimeMillis()}.gif"
+                val file = MediaHelper.downloadToCache(app, remoteUrl, name)
+                val uri = androidx.core.content.FileProvider.getUriForFile(app, app.packageName + ".fileprovider", file)
+                val url = repository.upload(uri)
+                runCatching { file.delete() }
+                val sent = repository.sendAttachment(
+                    conversation.id, url, "image",
+                    UUID.randomUUID().toString(), "GIF", null,
+                )
+                incomingMessage(conversation.id, sent)
+                refreshConversations()
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                chat.value = chat.value.copy(sendingFile = false)
+            }
+        }
+    }
+
+    // ------------------------------------------------------- unduh & bagikan
+
+    fun downloadMedia(url: String, nameHint: String?, onSaved: (Uri, String) -> Unit = { _, _ -> }) {
+        if (downloading.value != null) return
+        downloading.value = url
+        viewModelScope.launch {
+            try {
+                val saved = MediaHelper.download(getApplication(), url, nameHint)
+                message.value = "Tersimpan: ${saved.displayName}."
+                onSaved(saved.uri, saved.mime)
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                downloading.value = null
+            }
+        }
+    }
+
+    fun exportChat(conversation: Conversation) {
+        viewModelScope.launch {
+            try {
+                val page = repository.messages(conversation.id, limit = 100)
+                val lines = page.messages.map { e2ee.decryptMessage(it) }.map { msg ->
+                    val name = msg.sender?.familiarName ?: "?"
+                    val text = when (msg.type) {
+                        "text" -> msg.body.orEmpty()
+                        "sticker" -> msg.body.orEmpty()
+                        "image" -> "[Foto]"
+                        "video" -> "[Video]"
+                        "audio" -> "[Audio]"
+                        "location" -> "[Lokasi]"
+                        "redpacket" -> "[Amplop merah]"
+                        "system" -> msg.body.orEmpty()
+                        else -> "[Lampiran]"
+                    }
+                    "[${msg.createdAt}] $name: $text"
+                }
+                val header = "Riwayat chat: ${conversation.displayTitle}\nDiekspor ${nowIso()} via NusaChat\n\n"
+                MediaHelper.shareText(getApplication(), header + lines.joinToString("\n"), "Ekspor chat")
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun shareText(text: String, title: String = "Bagikan") {
+        MediaHelper.shareText(getApplication(), text, title)
+    }
+
+    // ---------------------------------------------------------------- laporan
+
+    fun createReport(targetType: String, targetId: Long, reason: String, details: String = "") {
+        viewModelScope.launch {
+            try {
+                repository.createReport(targetType, targetId, reason, details)
+                message.value = "Laporan terkirim. Terima kasih."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun loadReports() {
+        viewModelScope.launch {
+            try {
+                myReports.value = repository.myReports()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    // ------------------------------------------------- momen & story lanjutan
+
+    fun createMomentAudience(text: String, imageUris: List<Uri>, audience: String) {
+        if (creatingMoment.value) return
+        creatingMoment.value = true
+        viewModelScope.launch {
+            try {
+                val urls = imageUris.map { repository.upload(it) }
+                val moment = repository.createMoment(text.trim(), urls, audience)
+                moments.value = listOf(moment) + moments.value
+                message.value = if (audience == "private") "Momen privat tersimpan." else "Momen dibagikan."
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                creatingMoment.value = false
+            }
+        }
+    }
+
+    fun editMoment(moment: Moment, body: String) {
+        viewModelScope.launch {
+            try {
+                val updated = repository.editMoment(moment.id, body.trim())
+                moments.value = moments.value.map { if (it.id == moment.id) it.copy(body = updated.body, editedAt = updated.editedAt) else it }
+                message.value = "Momen diubah."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun loadLikers(momentId: Long) {
+        likersMomentId.value = momentId
+        viewModelScope.launch {
+            try {
+                likers.value = repository.momentLikers(momentId)
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun clearLikers() {
+        likersMomentId.value = null
+        likers.value = emptyList()
+    }
+
+    fun deleteComment(comment: MomentComment) {
+        viewModelScope.launch {
+            try {
+                repository.deleteComment(comment.id)
+                comments.value = comments.value.filterNot { it.id == comment.id || it.parentId == comment.id }
+                commentsMomentId.value?.let { mid ->
+                    moments.value = moments.value.map {
+                        if (it.id == mid) it.copy(commentCount = (it.commentCount - 1).coerceAtLeast(0)) else it
+                    }
+                }
+                message.value = "Komentar dihapus."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun toggleCommentLike(comment: MomentComment) {
+        val like = !comment.likedByMe
+        comments.value = comments.value.map {
+            if (it.id == comment.id) it.copy(likedByMe = like, likeCount = (it.likeCount + if (like) 1 else -1).coerceAtLeast(0)) else it
+        }
+        viewModelScope.launch {
+            try {
+                val count = repository.toggleCommentLike(comment.id, like)
+                comments.value = comments.value.map {
+                    if (it.id == comment.id) it.copy(likedByMe = like, likeCount = count) else it
+                }
+            } catch (e: Exception) {
+                comments.value = comments.value.map { if (it.id == comment.id) comment else it }
+                handleError(e)
+            }
+        }
+    }
+
+    // ------------------------------------------------------- info dibaca pesan
+    val readsTitle = MutableStateFlow("")
+    val readsUsers = MutableStateFlow<List<id.nusachat.app.data.User>>(emptyList())
+    val readsLoading = MutableStateFlow(false)
+
+    fun loadMessageReads(conversationId: Long, message: id.nusachat.app.data.Message) {
+        readsTitle.value = message.body?.take(60)?.ifBlank { null }
+            ?: when (message.type) {
+                "image" -> "Foto"
+                "video" -> "Video"
+                "audio", "voice" -> "Pesan suara"
+                "file" -> "Berkas"
+                "location" -> "Lokasi"
+                "contact" -> "Kontak"
+                "sticker" -> "Stiker"
+                "redpacket" -> "Angpao"
+                else -> "Pesan"
+            }
+        readsUsers.value = emptyList()
+        readsLoading.value = true
+        viewModelScope.launch {
+            try {
+                readsUsers.value = repository.messageReads(conversationId, message.id)
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                readsLoading.value = false
+            }
+        }
+    }
+
+    fun clearMessageReads() {
+        readsTitle.value = ""
+        readsUsers.value = emptyList()
+    }
+
+    // ------------------------------------------------------------- umpan tagar
+    val tagFeedTag = MutableStateFlow<String?>(null)
+    val tagFeed = MutableStateFlow<List<id.nusachat.app.data.Moment>>(emptyList())
+    val tagFeedLoading = MutableStateFlow(false)
+
+    fun openTagFeed(tag: String) {
+        tagFeedTag.value = tag
+        tagFeed.value = emptyList()
+        tagFeedLoading.value = true
+        viewModelScope.launch {
+            try {
+                tagFeed.value = repository.momentsByTag(tag)
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                tagFeedLoading.value = false
+            }
+        }
+    }
+
+    fun closeTagFeed() {
+        tagFeedTag.value = null
+        tagFeed.value = emptyList()
+    }
+
+    fun viewStory(story: id.nusachat.app.data.Story) {
+        stories.value = stories.value.map {
+            if (it.id == story.id) it.copy(viewedByMe = true) else it
+        }
+        viewModelScope.launch {
+            runCatching { repository.viewStory(story.id) }
+        }
+    }
+
+    fun loadStoryViewers(storyId: Long) {
+        storyViewersId.value = storyId
+        viewModelScope.launch {
+            try {
+                val (count, viewers) = repository.storyViewers(storyId)
+                storyViewerCount.value = count
+                storyViewers.value = viewers
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun clearStoryViewers() {
+        storyViewersId.value = null
+        storyViewers.value = emptyList()
+        storyViewerCount.value = 0
+    }
+
+    fun shareStoryToChat(story: id.nusachat.app.data.Story, conversationId: Long) {
+        viewModelScope.launch {
+            try {
+                val text = buildString {
+                    append("Story ${story.author.familiarName}")
+                    if (story.body.isNotBlank()) append(": ${story.body}")
+                    story.media.firstOrNull()?.let { append("\n$it") }
+                }
+                repository.sendMessage(conversationId, e2ee.encrypt(conversationId, text), UUID.randomUUID().toString())
+                refreshConversations()
+                message.value = "Story dibagikan ke chat."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    // ------------------------------------------------- teman & grup lanjutan
+
+    fun sendFriendRequestWithMessage(user: User, greeting: String) {
+        viewModelScope.launch {
+            try {
+                repository.sendFriendRequest(user.id, greeting.trim())
+                searchResults.value = searchResults.value.map {
+                    if (it.id == user.id) it.copy(friendStatus = "pending") else it
+                }
+                loadRequests()
+                message.value = "Permintaan dikirim ke ${user.displayName}."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun setRemark(userId: Long, remark: String?) {
+        viewModelScope.launch {
+            try {
+                repository.setRemark(userId, remark?.trim()?.ifBlank { null })
+                loadFriends()
+                refreshConversations()
+                message.value = if (remark.isNullOrBlank()) "Nama panggilan dihapus." else "Nama panggilan disimpan."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun updateGroupDescription(description: String) {
+        val conversation = chat.value.conversation ?: chat.value.detail ?: return
+        viewModelScope.launch {
+            try {
+                val updated = repository.updateGroupInfo(conversation.id, null, null, description.trim())
+                chat.value = chat.value.copy(detail = updated, conversation = updated)
+                refreshConversations()
+                message.value = "Deskripsi grup diperbarui."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun transferOwnership(userId: Long) {
+        val conversation = chat.value.conversation ?: chat.value.detail ?: return
+        viewModelScope.launch {
+            try {
+                repository.transferOwnership(conversation.id, userId)
+                loadConversationDetail()
+                refreshConversations()
+                message.value = "Kepemilikan grup dialihkan."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- riwayat call
+
+    fun loadCallHistory() {
+        if (sessionState.value.user == null) return
+        callHistoryLoading.value = true
+        viewModelScope.launch {
+            try {
+                val list = calls.history()
+                callHistory.value = list
+                val seen = settings.lastSeenCallId()
+                missedCalls.value = list.count { it.missed && it.call.id > seen }
+            } catch (e: Exception) {
+                // Riwayat gagal dimuat: jangan ganggu layar lain.
+            } finally {
+                callHistoryLoading.value = false
+            }
+        }
+    }
+
+    fun markCallsSeen() {
+        val maxId = callHistory.value.maxOfOrNull { it.call.id } ?: 0L
+        settings.markCallsSeen(maxId)
+        missedCalls.value = 0
+    }
+
+    // ------------------------------------------------- dompet: PIN & tagihan
+
+    fun loadWalletFull() {
+        viewModelScope.launch {
+            try {
+                val (balance, hasPin) = repository.walletInfo()
+                walletBalance.value = balance
+                walletHasPin.value = hasPin
+                walletTxns.value = repository.walletHistory()
+                loadWalletRequests()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun loadWalletRequests() {
+        viewModelScope.launch {
+            try {
+                val (incoming, outgoing) = repository.walletRequests()
+                walletIncoming.value = incoming
+                walletOutgoing.value = outgoing
+            } catch (e: Exception) {
+                // Tagihan opsional: jangan gagalkan layar dompet.
+            }
+        }
+    }
+
+    fun setWalletPin(pin: String, oldPin: String? = null, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                walletHasPin.value = repository.setWalletPin(pin, oldPin)
+                message.value = "PIN dompet disimpan."
+                onDone()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun walletTransferPin(
+        toUser: User,
+        amount: Long,
+        note: String,
+        pin: String?,
+        onPinRequired: () -> Unit,
+        onDone: () -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            try {
+                walletBalance.value = repository.walletTransfer(toUser.id, amount, note.ifBlank { null }, pin)
+                walletTxns.value = repository.walletHistory()
+                message.value = "Terkirim ke ${toUser.displayName}."
+                onDone()
+            } catch (e: Exception) {
+                if (e is ApiException && e.code == "pin_required") onPinRequired()
+                else handleError(e)
+            }
+        }
+    }
+
+    fun requestMoney(toUser: User, amount: Long, note: String) {
+        viewModelScope.launch {
+            try {
+                repository.requestMoney(toUser.id, amount, note.ifBlank { null })
+                loadWalletRequests()
+                message.value = "Tagihan dikirim ke ${toUser.displayName}."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun payWalletRequest(item: WalletRequestItem, pin: String?, onPinRequired: () -> Unit) {
+        viewModelScope.launch {
+            try {
+                walletBalance.value = repository.payWalletRequest(item.id, pin)
+                walletTxns.value = repository.walletHistory()
+                loadWalletRequests()
+                message.value = "Tagihan dibayar."
+            } catch (e: Exception) {
+                if (e is ApiException && e.code == "pin_required") onPinRequired()
+                else handleError(e)
+            }
+        }
+    }
+
+    fun declineWalletRequest(item: WalletRequestItem) {
+        viewModelScope.launch {
+            try {
+                repository.declineWalletRequest(item.id)
+                loadWalletRequests()
+                message.value = "Tagihan ditolak."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    fun cancelWalletRequest(item: WalletRequestItem) {
+        viewModelScope.launch {
+            try {
+                repository.cancelWalletRequest(item.id)
+                loadWalletRequests()
+                message.value = "Tagihan dibatalkan."
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- amplop merah
+
+    fun createRedPacket(total: Long, count: Int, note: String, pin: String?, onPinRequired: () -> Unit, onDone: () -> Unit = {}) {
+        val conversation = chat.value.conversation ?: return
+        viewModelScope.launch {
+            try {
+                val (packet, msg) = repository.createRedPacket(
+                    conversation.id, total, count, note.ifBlank { null }, pin,
+                    UUID.randomUUID().toString(),
+                )
+                incomingMessage(conversation.id, msg)
+                walletBalance.value = repository.wallet()
+                redPacket.value = packet
+                onDone()
+            } catch (e: Exception) {
+                if (e is ApiException && e.code == "pin_required") onPinRequired()
+                else handleError(e)
+            }
+        }
+    }
+
+    fun loadRedPacket(packetId: Long) {
+        redPacketLoading.value = true
+        viewModelScope.launch {
+            try {
+                redPacket.value = repository.redPacket(packetId)
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                redPacketLoading.value = false
+            }
+        }
+    }
+
+    fun clearRedPacket() {
+        redPacket.value = null
+    }
+
+    fun claimRedPacket(packetId: Long) {
+        viewModelScope.launch {
+            try {
+                val (status, amount, packet) = repository.claimRedPacket(packetId)
+                redPacket.value = packet
+                walletBalance.value = repository.wallet()
+                message.value = when (status) {
+                    "claimed" -> "Dapat $amount koin!"
+                    "already" -> "Kamu sudah mengambil $amount koin."
+                    else -> "Amplop sudah habis."
+                }
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    // ------------------------------------------------- profil: username & crop
+
+    fun updateUsername(username: String, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                val user = repository.updateProfile(JSONObject().put("username", username.trim().lowercase()))
+                sessionState.value = SessionState(user, true)
+                message.value = "Username diganti."
+                onDone()
+            } catch (e: Exception) {
+                handleError(e)
+            }
+        }
+    }
+
+    /** Potong tengah persegi sebelum diunggah agar avatar selalu rapi. */
+    fun uploadAvatarCropped(uri: Uri) {
+        if (uploadingAvatar.value) return
+        uploadingAvatar.value = true
+        viewModelScope.launch {
+            try {
+                val cropped = cropCenterSquare(getApplication(), uri)
+                val url = repository.upload(cropped)
+                val user = repository.updateProfile(JSONObject().put("avatar_url", url))
+                sessionState.value = SessionState(user, true)
+                message.value = "Foto profil diperbarui."
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                uploadingAvatar.value = false
+            }
+        }
+    }
+
+    private suspend fun cropCenterSquare(app: Application, uri: Uri): Uri =
+        withContext(Dispatchers.IO) {
+            val fallback = { uri }
+            try {
+                val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                app.contentResolver.openInputStream(uri)?.use {
+                    android.graphics.BitmapFactory.decodeStream(it, null, opts)
+                }
+                val w = opts.outWidth
+                val h = opts.outHeight
+                if (w <= 0 || h <= 0) return@withContext fallback()
+                if (w == h && w <= 1024) return@withContext fallback()
+                var sample = 1
+                while (w / sample > 1024 || h / sample > 1024) sample *= 2
+                val decode = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+                val bmp = app.contentResolver.openInputStream(uri)?.use {
+                    android.graphics.BitmapFactory.decodeStream(it, null, decode)
+                } ?: return@withContext fallback()
+                val side = minOf(bmp.width, bmp.height)
+                val cropped = android.graphics.Bitmap.createBitmap(
+                    bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side
+                )
+                val out = java.io.File(app.cacheDir, "avatar_${System.currentTimeMillis()}.jpg")
+                out.outputStream().use { cropped.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }
+                if (cropped != bmp) bmp.recycle()
+                androidx.core.content.FileProvider.getUriForFile(app, app.packageName + ".fileprovider", out)
+            } catch (e: Exception) {
+                fallback()
+            }
+        }
 }

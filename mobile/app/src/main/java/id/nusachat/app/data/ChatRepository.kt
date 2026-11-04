@@ -339,10 +339,11 @@ class ChatRepository(
         api.post("/conversations/clear", JSONObject().put("id", conversationId))
     }
 
-    suspend fun updateGroupInfo(conversationId: Long, title: String? = null, avatarUrl: String? = null): Conversation {
+    suspend fun updateGroupInfo(conversationId: Long, title: String? = null, avatarUrl: String? = null, description: String? = null): Conversation {
         val body = JSONObject().put("id", conversationId)
         if (title != null) body.put("title", title)
         if (avatarUrl != null) body.put("avatar_url", avatarUrl)
+        if (description != null) body.put("description", description)
         return api.post("/conversations/update_group", body).getJSONObject("conversation").toConversation()
     }
 
@@ -430,8 +431,10 @@ class ChatRepository(
         return incoming to outgoing
     }
 
-    suspend fun sendFriendRequest(userId: Long) {
-        api.post("/friends/send", JSONObject().put("user_id", userId))
+    suspend fun sendFriendRequest(userId: Long, message: String = "") {
+        val body = JSONObject().put("user_id", userId)
+        if (message.isNotBlank()) body.put("message", message)
+        api.post("/friends/send", body)
     }
 
     suspend fun respondFriendRequest(requestId: Long, accept: Boolean) {
@@ -521,9 +524,10 @@ class ChatRepository(
         return api.post("/wallet/topup", JSONObject().put("amount", amount)).optLong("balance", 0L)
     }
 
-    suspend fun walletTransfer(toUserId: Long, amount: Long, note: String?): Long {
+    suspend fun walletTransfer(toUserId: Long, amount: Long, note: String?, pin: String? = null): Long {
         val payload = JSONObject().put("to_user_id", toUserId).put("amount", amount)
         if (!note.isNullOrBlank()) payload.put("note", note)
+        if (!pin.isNullOrBlank()) payload.put("pin", pin)
         return api.post("/wallet/transfer", payload).optLong("balance", 0L)
     }
 
@@ -601,12 +605,12 @@ class ChatRepository(
         return array.toMomentList() to data.optBoolean("has_more", false)
     }
 
-    suspend fun createMoment(body: String, media: List<String>): Moment {
+    suspend fun createMoment(body: String, media: List<String>, audience: String = "friends"): Moment {
         val array = JSONArray()
         media.forEach { array.put(it) }
         val data = api.post(
             "/moments/create",
-            JSONObject().put("body", body).put("media", array)
+            JSONObject().put("body", body).put("media", array).put("audience", audience)
         )
         return data.getJSONObject("moment").toMoment()
     }
@@ -637,14 +641,37 @@ class ChatRepository(
         return result
     }
 
-    suspend fun createStory(body: String, media: List<String>): Story {
+    suspend fun createStory(body: String, media: List<String>, style: String = ""): Story {
         val array = JSONArray()
         media.forEach { array.put(it) }
-        val data = api.post(
-            "/moments/story_create",
-            JSONObject().put("body", body).put("media", array)
-        )
+        val payload = JSONObject().put("body", body).put("media", array)
+        if (style.isNotBlank()) payload.put("style", style)
+        val data = api.post("/moments/story_create", payload)
         return data.getJSONObject("story").toStory()
+    }
+
+    suspend fun toggleCommentLike(commentId: Long, like: Boolean): Int {
+        val path = if (like) "/moments/like_comment" else "/moments/unlike_comment"
+        return api.post(path, JSONObject().put("id", commentId)).optInt("like_count", 0)
+    }
+
+    suspend fun momentsByTag(tag: String, limit: Int = 20): List<Moment> {
+        val data = api.get("/moments/tag", mapOf("tag" to tag, "limit" to limit.toString()))
+        val array = data.optJSONArray("moments") ?: JSONArray()
+        val result = mutableListOf<Moment>()
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { result.add(it.toMoment()) }
+        }
+        return result
+    }
+
+    suspend fun messageReads(conversationId: Long, messageId: Long): List<User> {
+        val data = api.get(
+            "/conversations/message_reads",
+            mapOf("id" to conversationId.toString(), "message_id" to messageId.toString())
+        )
+        val array = data.optJSONArray("read_by") ?: JSONArray()
+        return array.toUserList()
     }
 
     suspend fun deleteStory(storyId: Long) {
@@ -696,4 +723,241 @@ class ChatRepository(
     }
 
     suspend fun sync(): JSONObject = api.get("/sync")
+
+    // ------------------------------------------------------- fitur 0.2.0 ---
+
+    /** Minta reset sandi. Kembali token bila server development, null bila produksi. */
+    suspend fun forgotPassword(login: String): String? {
+        val data = api.post("/auth/forgot", JSONObject().put("login", login))
+        return data.stringOrNull("reset_token")
+    }
+
+    suspend fun resetPassword(token: String, newPassword: String) {
+        api.post("/auth/reset", JSONObject().put("token", token).put("new_password", newPassword))
+    }
+
+    suspend fun sessions(): List<SessionItem> {
+        val array = api.get("/auth/sessions").optJSONArray("sessions") ?: JSONArray()
+        val result = mutableListOf<SessionItem>()
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { result.add(it.toSessionItem()) }
+        }
+        return result
+    }
+
+    suspend fun revokeSession(jti: String) {
+        api.post("/auth/revoke_session", JSONObject().put("jti", jti))
+    }
+
+    data class ConversationsPage(
+        val conversations: List<Conversation>,
+        val hasMore: Boolean,
+        val nextBefore: String?,
+    )
+
+    suspend fun conversationsPage(limit: Int = 100, before: String? = null): ConversationsPage {
+        val data = api.get(
+            "/conversations",
+            mapOf("limit" to limit.toString(), "before" to before)
+        )
+        val array = data.optJSONArray("conversations") ?: JSONArray()
+        val result = mutableListOf<Conversation>()
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { result.add(it.toConversation()) }
+        }
+        return ConversationsPage(result, data.optBoolean("has_more", false), data.stringOrNull("next_before"))
+    }
+
+    suspend fun pinChat(conversationId: Long, pinned: Boolean): Boolean {
+        return api.post(
+            "/conversations/pin_chat",
+            JSONObject().put("id", conversationId).put("pinned", pinned)
+        ).optBoolean("pinned", pinned)
+    }
+
+    suspend fun markUnread(conversationId: Long, messageId: Long? = null): Int {
+        val body = JSONObject().put("id", conversationId)
+        if (messageId != null && messageId > 0) body.put("message_id", messageId)
+        return api.post("/conversations/mark_unread", body).optInt("unread_count", 0)
+    }
+
+    suspend fun searchAll(query: String, limit: Int = 30): List<Message> {
+        val data = api.get("/conversations/search_all", mapOf("q" to query, "limit" to limit.toString()))
+        val array = data.optJSONArray("messages") ?: JSONArray()
+        val result = mutableListOf<Message>()
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { result.add(it.toMessage()) }
+        }
+        return result
+    }
+
+    suspend fun transferOwnership(conversationId: Long, userId: Long): Long {
+        return api.post(
+            "/conversations/transfer_owner",
+            JSONObject().put("id", conversationId).put("user_id", userId)
+        ).optLong("owner_id", userId)
+    }
+
+    suspend fun sendSticker(conversationId: Long, emoji: String, clientId: String, replyToId: Long? = null): Message {
+        val payload = JSONObject()
+            .put("id", conversationId)
+            .put("type", "sticker")
+            .put("body", emoji)
+            .put("client_id", clientId)
+        if (replyToId != null) payload.put("reply_to_id", replyToId)
+        return api.post("/conversations/send", payload).getJSONObject("message").toMessage()
+    }
+
+    suspend fun starMessage(messageId: Long) {
+        api.post("/messages/star", JSONObject().put("message_id", messageId))
+    }
+
+    suspend fun unstarMessage(messageId: Long) {
+        api.post("/messages/unstar", JSONObject().put("message_id", messageId))
+    }
+
+    suspend fun starredMessages(limit: Int = 50): List<Message> {
+        val array = api.get("/messages/starred", mapOf("limit" to limit.toString()))
+            .optJSONArray("messages") ?: JSONArray()
+        val result = mutableListOf<Message>()
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { result.add(it.toMessage()) }
+        }
+        return result
+    }
+
+    suspend fun hideMessage(messageId: Long) {
+        api.post("/messages/hide", JSONObject().put("message_id", messageId))
+    }
+
+    suspend fun setRemark(userId: Long, remark: String?): String? {
+        val body = JSONObject().put("user_id", userId)
+        body.put("remark", remark ?: "")
+        val data = api.post("/friends/remark", body)
+        return data.stringOrNull("remark")
+    }
+
+    suspend fun editMoment(momentId: Long, body: String): Moment {
+        val data = api.post("/moments/edit", JSONObject().put("id", momentId).put("body", body))
+        return data.getJSONObject("moment").toMoment()
+    }
+
+    suspend fun momentLikers(momentId: Long): List<User> {
+        val array = api.get("/moments/likes", mapOf("id" to momentId.toString()))
+            .optJSONArray("users") ?: JSONArray()
+        return array.toUserList()
+    }
+
+    suspend fun deleteComment(commentId: Long) {
+        api.post("/moments/comment_delete", JSONObject().put("id", commentId))
+    }
+
+    suspend fun viewStory(storyId: Long) {
+        api.post("/moments/story_view", JSONObject().put("id", storyId))
+    }
+
+    suspend fun storyViewers(storyId: Long): Pair<Int, List<StoryViewer>> {
+        val data = api.get("/moments/story_views", mapOf("id" to storyId.toString()))
+        val array = data.optJSONArray("viewers") ?: JSONArray()
+        val result = mutableListOf<StoryViewer>()
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { result.add(it.toStoryViewer()) }
+        }
+        return data.optInt("view_count", result.size) to result
+    }
+
+    suspend fun createReport(targetType: String, targetId: Long, reason: String, details: String = ""): Long {
+        val body = JSONObject()
+            .put("target_type", targetType)
+            .put("target_id", targetId)
+            .put("reason", reason)
+        if (details.isNotBlank()) body.put("details", details)
+        return api.post("/reports/create", body).getJSONObject("report").optLong("id")
+    }
+
+    suspend fun myReports(): List<ReportItem> {
+        val array = api.get("/reports/mine").optJSONArray("reports") ?: JSONArray()
+        val result = mutableListOf<ReportItem>()
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { result.add(it.toReport()) }
+        }
+        return result
+    }
+
+    suspend fun walletInfo(): Pair<Long, Boolean> {
+        val data = api.get("/wallet")
+        return data.optLong("balance", 0L) to data.optBoolean("has_pin", false)
+    }
+
+    suspend fun setWalletPin(pin: String, oldPin: String? = null): Boolean {
+        val body = JSONObject().put("pin", pin)
+        if (!oldPin.isNullOrBlank()) body.put("old_pin", oldPin)
+        return api.post("/wallet/set_pin", body).optBoolean("has_pin", true)
+    }
+
+    suspend fun requestMoney(toUserId: Long, amount: Long, note: String?): WalletRequestItem {
+        val body = JSONObject().put("to_user_id", toUserId).put("amount", amount)
+        if (!note.isNullOrBlank()) body.put("note", note)
+        return api.post("/wallet/request_money", body).getJSONObject("request").toWalletRequest()
+    }
+
+    suspend fun walletRequests(): Pair<List<WalletRequestItem>, List<WalletRequestItem>> {
+        val data = api.get("/wallet/requests")
+        fun parse(key: String): List<WalletRequestItem> {
+            val array = data.optJSONArray(key) ?: JSONArray()
+            val result = mutableListOf<WalletRequestItem>()
+            for (i in 0 until array.length()) {
+                array.optJSONObject(i)?.let { result.add(it.toWalletRequest()) }
+            }
+            return result
+        }
+        return parse("incoming") to parse("outgoing")
+    }
+
+    suspend fun payWalletRequest(requestId: Long, pin: String? = null): Long {
+        val body = JSONObject().put("request_id", requestId)
+        if (!pin.isNullOrBlank()) body.put("pin", pin)
+        return api.post("/wallet/request_pay", body).optLong("balance", 0L)
+    }
+
+    suspend fun declineWalletRequest(requestId: Long) {
+        api.post("/wallet/request_decline", JSONObject().put("request_id", requestId))
+    }
+
+    suspend fun cancelWalletRequest(requestId: Long) {
+        api.post("/wallet/request_cancel", JSONObject().put("request_id", requestId))
+    }
+
+    suspend fun createRedPacket(
+        conversationId: Long,
+        total: Long,
+        count: Int,
+        note: String?,
+        pin: String? = null,
+        clientId: String,
+    ): Pair<RedPacket, Message> {
+        val body = JSONObject()
+            .put("conversation_id", conversationId)
+            .put("total", total)
+            .put("count", count)
+            .put("client_id", clientId)
+        if (!note.isNullOrBlank()) body.put("note", note)
+        if (!pin.isNullOrBlank()) body.put("pin", pin)
+        val data = api.post("/wallet/redpacket_create", body)
+        return data.getJSONObject("packet").toRedPacket() to data.getJSONObject("message").toMessage()
+    }
+
+    suspend fun redPacket(packetId: Long): RedPacket {
+        return api.get("/wallet/redpacket", mapOf("id" to packetId.toString()))
+            .getJSONObject("packet").toRedPacket()
+    }
+
+    suspend fun claimRedPacket(packetId: Long): Triple<String, Long, RedPacket> {
+        val data = api.post("/wallet/redpacket_claim", JSONObject().put("packet_id", packetId))
+        return Triple(
+            data.optString("status", "claimed"),
+            data.optLong("amount", 0L),
+            data.getJSONObject("packet").toRedPacket()
+        )
+    }
 }
