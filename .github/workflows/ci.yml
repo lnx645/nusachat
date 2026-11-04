@@ -123,8 +123,13 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      # Runner ubuntu sudah membawa Android SDK (ANDROID_HOME terisi);
+      # tinggal pastikan platform + build-tools API 35 ada.
+      - name: Ensure Android SDK packages
+        run: |
+          MANAGER="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
+          "$MANAGER" --install "platforms;android-35" "build-tools;35.0.0"
+          yes | "$MANAGER" --licenses > /dev/null
 
       - name: Setup Gradle (cache)
         uses: gradle/actions/setup-gradle@v4
