@@ -59,6 +59,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -162,6 +163,11 @@ dependencies {
 
     // Unit test JVM stok (protokol kripto murni, tanpa Android).
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
+    // Backup otomatis harian (WorkManager, lokal saja tanpa cloud).
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")

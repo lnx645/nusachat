@@ -21,10 +21,11 @@ object NvpCodecs {
     const val CHANNELS = 1
     const val TICK_SAMPLES = 320 // 20 ms @16 kHz
 
-    /** Tangga bitrate valid per codec: ultra → hemat → aman. */
+    /** Tangga bitrate valid per codec: ultra → hemat → aman.
+     * Opus dinaikkan (16/24/32k) agar jernih; 8k terbukti sengau/patah. */
     private val ladder = mapOf(
-        Nvp.CODEC_OPUS to intArrayOf(8000, 12000, 16000),
-        Nvp.CODEC_AMR_WB to intArrayOf(6600, 12650, 15850),
+        Nvp.CODEC_OPUS to intArrayOf(16000, 24000, 32000),
+        Nvp.CODEC_AMR_WB to intArrayOf(12650, 15850, 23850),
     )
 
     /** Frame per paket per profil: 60/40/40 ms. */

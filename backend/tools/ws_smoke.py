@@ -256,6 +256,10 @@ def main():
     # Tulis-buta via socket: ack/read/typing tanpa REST (hibrida).
     run_client_event_checks(nusa, sari, conv_id, ws, ws_sari)
 
+    # Presence berbasis socket: connect/disconnect menyiarkan online/offline
+    # ke semua teman chat, tanpa heartbeat polling.
+    run_presence_checks(nusa, ws)
+
     # Live nearby via Erlang (no PHP polling): location.update answers
     # nearby.result, later updates push nearby.changed to subscribers.
     # Gateway satu-satunya adalah Erlang (8091).
@@ -265,6 +269,46 @@ def main():
     ws_sari.close()
     ws.close()
     return finish()
+
+
+def peer_online(token, username):
+    _, payload = http("GET", "/conversations", token=token)
+    convs = payload.get("data", {}).get("conversations", []) if payload.get("ok") else []
+    for conv in convs:
+        if conv.get("peer", {}).get("username") == username:
+            return conv.get("peer", {}).get("online")
+    return None
+
+
+def run_presence_checks(nusa, ws):
+    # Budi berteman + berbagi chat seed dengan nusa, dan tak punya socket
+    # lain selama smoke ini berjalan.
+    budi = login("budi")
+    _, me = http("GET", "/users/me", token=budi)
+    budi_id = me["data"]["user"]["id"]
+
+    ws_budi = WebSocket(WS_URL, budi)
+    ws_budi.read_json(predicate=lambda e: e.get("type") == "connected")
+    try:
+        ev = ws.read_json(predicate=lambda e: (
+            e.get("type") == "presence" and e.get("data", {}).get("user_id") == budi_id
+        ))
+        check("presence online event", ev["data"].get("online") is True, str(ev)[:200])
+    except (TimeoutError, ConnectionError) as exc:
+        check("presence online event", False, f"no event: {exc}")
+    check("peer online true", peer_online(nusa, "budi") is True)
+
+    ws_budi.close()
+    try:
+        ev = ws.read_json(predicate=lambda e: (
+            e.get("type") == "presence"
+            and e.get("data", {}).get("user_id") == budi_id
+            and e.get("data", {}).get("online") is False
+        ))
+        check("presence offline event", True, str(ev)[:200])
+    except (TimeoutError, ConnectionError) as exc:
+        check("presence offline event", False, f"no event: {exc}")
+    check("peer online false", peer_online(nusa, "budi") is False)
 
 
 def run_nearby_live_checks(nusa, sari):
@@ -326,6 +370,12 @@ def run_client_event_checks(nusa, sari, conv_id, ws, ws_sari):
         e.get("type") == "ack" and e.get("data", {}).get("message_id") == msg_id
     ))
     check("ack event via socket", ev["data"].get("user_id") == 1, str(ev)[:200])
+    # Centang 2 abu harus persisten di server (bukan cuma event sesaat):
+    # dibaca SEBELUM fetch penerima agar fetch tak menutupi bug.
+    status, payload = http("GET", f"/conversations/messages?id={conv_id}&after_id={msg_id - 1}", token=sari)
+    got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+    st = next((m.get("status") for m in got if m["id"] == msg_id), None)
+    check("ack via socket marks delivered", st == "delivered", f"status={st}")
     status, payload = http("GET", f"/conversations/messages?id={conv_id}&after_id={msg_id - 1}", token=nusa)
     got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
     exp = next((m.get("expires_at") for m in got if m["id"] == msg_id), None)
@@ -343,6 +393,10 @@ def run_client_event_checks(nusa, sari, conv_id, ws, ws_sari):
         e.get("type") == "read" and e.get("data", {}).get("message_id") == msg_id
     ))
     check("read event via socket", ev["data"].get("user_id") == 1, str(ev)[:200])
+    status, payload = http("GET", f"/conversations/messages?id={conv_id}&after_id={msg_id - 1}", token=sari)
+    got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+    st = next((m.get("status") for m in got if m["id"] == msg_id), None)
+    check("read via socket marks read", st == "read", f"status={st}")
     status, payload = http("GET", f"/conversations/show?id={conv_id}", token=nusa)
     unread = payload.get("data", {}).get("conversation", {}).get("unread_count")
     check("read via socket clears", status == 200 and unread == 0, f"unread={unread}")

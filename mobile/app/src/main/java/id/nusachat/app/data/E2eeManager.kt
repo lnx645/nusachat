@@ -179,6 +179,27 @@ class E2eeManager(private val context: Context) {
 
     private fun keyName(id: Long) = "e2ee_key_$id"
 
+    /** Ekspor semua kunci sesi legacy untuk backup terenkripsi (plaintext ikut dienkrip). */
+    fun exportKeys(): Map<Long, String> {
+        val out = mutableMapOf<Long, String>()
+        for ((k, v) in prefs.all) {
+            if (!k.startsWith("e2ee_key_")) continue
+            val id = k.removePrefix("e2ee_key_").toLongOrNull() ?: continue
+            (v as? String)?.takeIf { it.isNotBlank() }?.let { out[id] = it }
+        }
+        return out
+    }
+
+    /** Impor kunci sesi legacy dari backup (overwrite). */
+    fun importKeys(keys: Map<Long, String>) {
+        if (keys.isEmpty()) return
+        val edit = prefs.edit()
+        keys.forEach { (id, b64) ->
+            if (b64.isNotBlank()) edit.putString(keyName(id), b64)
+        }
+        edit.apply()
+    }
+
     companion object {
         /** Legacy tak terbaca tapi mungkin pulih (ala WhatsApp, tanpa kurung). */
         const val PLACEHOLDER_SYNC = "Pesan ini tidak tersedia, atau membutuhkan waktu untuk ditampilkan."
@@ -207,6 +228,20 @@ class E2eeManager(private val context: Context) {
             if (body == LEGACY_BROKEN || body == LEGACY_SELF || body == LEGACY_ENCRYPTED) return false
             if (body == SessionCrypto.PLACEHOLDER_BROKEN || body == SessionCrypto.PLACEHOLDER_SELF) return false
             return !looksLikeCiphertext(body)
+        }
+
+        /**
+         * Permanen tak-terbaca (kunci hilang/rantai v2 mati): jangan ditampil
+         * atau disimpan — chat terlihat kosong & fresh seperti habis install.
+         * Beda dengan SYNC ("membutuhkan waktu") yang masih bisa heal dan
+         * tetap ditampil/disimpan.
+         */
+        fun isDeadBody(body: String?): Boolean {
+            if (body == null) return false
+            return body == SessionCrypto.PLACEHOLDER_BROKEN ||
+                body == SessionCrypto.PLACEHOLDER_SELF ||
+                body == LEGACY_BROKEN ||
+                body == LEGACY_SELF
         }
 
         /**

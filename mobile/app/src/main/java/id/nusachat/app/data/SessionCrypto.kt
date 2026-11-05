@@ -221,11 +221,11 @@ class SessionCrypto(
     fun decryptOne(msg: Message, myUserId: Long): Message? {
         val body = msg.body
         if (msg.type != "text" || body == null || !EnvelopeV2.looksLikeEnvelope(body)) {
-            return legacy.decryptMessage(msg)
+            return legacy.decryptMessage(msg).also { rememberIncoming(it) }
         }
         val parsed = EnvelopeV2.parse(body) ?: return msg.copy(body = PLACEHOLDER_BROKEN)
         val myDev = identity.deviceId()
-        return when (parsed) {
+        val out = when (parsed) {
             is EnvelopeV2.Parsed.Pairwise -> {
                 if (parsed.fromDevice == myDev) return selfEcho(msg)
                 val part = parsed.parts[myDev] ?: return msg.copy(body = PLACEHOLDER_BROKEN)
@@ -246,12 +246,100 @@ class SessionCrypto(
                 }
                 null
             }
-        }
+        } ?: return null
+        rememberIncoming(out)
+        return out
     }
 
-    /** Saring + dekrip daftar terima (SKDM dibuang). */
+    /** Simpan plaintext yang sudah berhasil dibuka agar pratinjau tak mendekrip ulang. */
+    private fun rememberIncoming(m: Message) {
+        if (m.id <= 0 || m.type != "text") return
+        val b = m.body ?: return
+        if (E2eeManager.isReadableBody(b)) rememberPlain(m.id, b)
+    }
+
+    /**
+     * Dekrip daftar terima; SKDM (null) gugur otomatis.
+     *
+     * Pesan tak-terdekrip DISENGAJA dipertahankan sebagai placeholder
+     * (BUKAN dibuang): membuang = pesan "hilang" dari chat tanpa jejak,
+     * padahal ciphertext masih di server dan kunci bisa pulih — pengguna
+     * tak pernah tahu ada pesan. Placeholder tak masuk cache (disaring
+     * ChatCache) dan dicoba lagi saat kunci berubah (retryPlaceholders).
+     */
     fun processIncoming(list: List<Message>, myUserId: Long): List<Message> =
         list.mapNotNull { decryptOne(it, myUserId) }
+
+    /**
+     * Dekrip KERING untuk preview notif: murni baca, TANPA menyimpan sesi/
+     * rantai dan TANPA mengonsumsi OTPK.
+     *
+     * Dekrip biasa MENGONSUMSI kunci ratchet (sekali pakai, anti-replay):
+     * preview notif yang memakai [decryptOne] akan "memakan" pesan —
+     * dekrip berikutnya saat chat dibuka GAGAL dan pesan hilang permanen
+     * dari perangkat. Lihat [DoubleRatchet.decrypt] (jump < 0 = error).
+     *
+     * @return plaintext, atau null bila tak bisa (notif generik dipakai).
+     */
+    fun previewPlaintext(raw: Message, myUserId: Long): String? {
+        // Sudah pernah dibuka di sesi ini: pakai memori plaintext. Ini juga
+        // mencegah dekrip kering atas ciphertext yang state-nya sudah maju.
+        if (raw.id > 0) {
+            synchronized(plainSent) { plainSent[raw.id] }?.let { return it }
+        }
+        return runCatching {
+            if (raw.type != "text" || raw.body == null || !EnvelopeV2.looksLikeEnvelope(raw.body)) {
+                return@runCatching legacy.decryptMessage(raw).body
+            }
+            val senderId = raw.sender?.id ?: return@runCatching null
+            when (val env = EnvelopeV2.parse(raw.body)) {
+                is EnvelopeV2.Parsed.Pairwise -> previewPairwise(raw, env, senderId)
+                is EnvelopeV2.Parsed.Senderkey -> previewSenderkey(raw.conversationId, env)
+                // SKDM tak pernah di-push; lewati tanpa efek samping
+                // (instalasi rantai hanya di jalur dekrip sungguhan).
+                else -> null
+            }
+        }.getOrNull()
+    }
+
+    /** Cermin kering [decryptPairwise]: sesi in-memory, lalu dibuang. */
+    private fun previewPairwise(
+        raw: Message,
+        env: EnvelopeV2.Parsed.Pairwise,
+        senderId: Long,
+    ): String? = runCatching {
+        val myDev = identity.deviceId()
+        if (env.fromDevice == myDev) {
+            return@runCatching synchronized(plainSent) { plainSent[raw.id] }
+        }
+        val part = env.parts[myDev] ?: return@runCatching null
+        val st = store.loadSession(senderId, env.fromDevice)
+            ?: part.x3dh?.let { buildResponderDry(it) }
+            ?: return@runCatching null
+        DoubleRatchet.decrypt(
+            st, DoubleRatchet.Ciphertext(part.dr, part.nonceB64, part.ctB64)
+        ).plaintext.toString(Charsets.UTF_8)
+    }.getOrNull()
+
+    /** Cermin kering [responderCreate]: intip OTPK, jangan consume. */
+    private fun buildResponderDry(x: X3dh.HandshakeHeader): DoubleRatchet.State? =
+        runCatching {
+            val spkPriv = identity.signedPrekeyPriv(x.signedKeyId) ?: return@runCatching null
+            val otpkPriv = x.onetimeKeyId?.let { identity.peekOtpk(it) }
+            if (x.onetimeKeyId != null && otpkPriv == null) return@runCatching null
+            val res = X3dh.responder(identity.identityDhPrivB64(), spkPriv, otpkPriv, x)
+            DoubleRatchet.initBob(res.sharedKey, spkPriv)
+        }.getOrNull()
+
+    /** Cermin kering [decryptSenderkey]: rantai dibaca, tak disimpan. */
+    private fun previewSenderkey(conversationId: Long, sk: EnvelopeV2.Parsed.Senderkey): String? =
+        runCatching {
+            val chain = store.loadRecvChain(conversationId, sk.fromDevice) ?: return@runCatching null
+            SenderKey.decrypt(
+                chain,
+                SenderKey.GroupCiphertext(sk.fromDevice, sk.index, sk.nonceB64, sk.ctB64, sk.sigB64),
+            ).plaintext.toString(Charsets.UTF_8)
+        }.getOrNull()
 
     /** Gema kiriman sendiri: sesi kirim tak bisa dibuka; pakai memori sesi. */
     private fun selfEcho(msg: Message): Message {

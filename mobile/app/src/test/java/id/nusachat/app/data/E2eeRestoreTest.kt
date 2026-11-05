@@ -120,6 +120,32 @@ class E2eeRestoreTest {
     }
 
     @Test
+    fun deadBodyPermanenDibuang() {
+        // Permanen: v2 rusak, gema sendiri, legacy kurung.
+        assertTrue(E2eeManager.isDeadBody(SessionCrypto.PLACEHOLDER_BROKEN))
+        assertTrue(E2eeManager.isDeadBody(SessionCrypto.PLACEHOLDER_SELF))
+        assertTrue(E2eeManager.isDeadBody(E2eeManager.LEGACY_BROKEN))
+        assertTrue(E2eeManager.isDeadBody(E2eeManager.LEGACY_SELF))
+        // Bukan mati: SYNC masih bisa heal, cipher mentah, teks, null.
+        assertFalse(E2eeManager.isDeadBody(E2eeManager.PLACEHOLDER_SYNC))
+        assertFalse(E2eeManager.isDeadBody(E2eeManager.LEGACY_SYNC))
+        assertFalse(E2eeManager.isDeadBody(E2eeManager.LEGACY_ENCRYPTED))
+        assertFalse(E2eeManager.isDeadBody(cipher))
+        assertFalse(E2eeManager.isDeadBody("halo"))
+        assertFalse(E2eeManager.isDeadBody(null))
+    }
+
+    @Test
+    fun deadHanyaTeks() {
+        val dead = msg(1, SessionCrypto.PLACEHOLDER_BROKEN)
+        assertTrue(id.nusachat.app.data.local.ChatCache.isDeadForDisplay(dead))
+        assertFalse(id.nusachat.app.data.local.ChatCache.isDeadForDisplay(msg(1, "halo")))
+        assertFalse(id.nusachat.app.data.local.ChatCache.isDeadForDisplay(msg(1, null)))
+        val media = msg(1, null).copy(type = "image", attachmentUrl = "https://x/y.jpg")
+        assertFalse(id.nusachat.app.data.local.ChatCache.isDeadForDisplay(media))
+    }
+
+    @Test
     fun deviceBasiBukanHolder() {
         // 2026-11-04T21:00:00Z dalam ms (UTC).
         val now = 1793826000000L

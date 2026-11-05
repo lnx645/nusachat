@@ -145,9 +145,8 @@ butuh respons?**
 Garansi yang dipertahankan:
 
 1. **Offline aman.** Event socket tidak dipersist (langsung ke socket
-   online); status dipulihkan dari penanda persisten (`last_read`,
-   `message_recipients`) saat fetch berikut. Typing yang hilang tidak
-   masalah.
+   online); status dipulihkan dari kolom persisten (`messages.status`)
+   saat fetch berikut. Typing yang hilang tidak masalah.
 2. **Fallback REST.** Klien (`blindWrite`) selalu jatuh ke endpoint REST
    bila socket tutup; endpoint REST tidak dihapus. Kegagalan WS tidak
    pernah fatal.
@@ -155,7 +154,23 @@ Garansi yang dipertahankan:
    `Message_model::ackUpTo` / `markReadUpTo` / `markRead` — satu-satunya
    perbedaan: `markRead` Erlang atomik (`UPDATE ... WHERE last_read < ?`).
 4. **Self-healing.** Ack/read yang hilang (race tutup socket) dikirim
-   ulang saat chat dibuka berikut; badge dihitung ulang dari server.
+   ulang saat reconnect dan saat chat dibuka; badge dihitung ulang dari
+   server.
+
+### Presence + centang (keputusan arsitektur)
+
+- **Online = socket hidup.** Registry Erlang menyiarkan event
+  `presence` (`online` true/false + `last_seen_at`) ke semua teman chat
+  saat socket pertama tersambung / terakhir terputus, dan menulis kolom
+  `users.is_online` (snapshot untuk fetch REST). Tidak ada heartbeat
+  atau polling dalam bentuk apa pun; reset boot (`UPDATE ... SET
+  is_online = 0`) menutup bendera basi bila node crash.
+- **Delivered = diterima ≥1 penerima** (`sent→delivered` saat fetch,
+  ack, atau read pertama). **Read = dibaca SEMUA penerima** (dibanding
+  snapshot `message_recipients`, jadi anggota baru tak memblokir pesan
+  lama); event `read` membawa `fully_read` agar klien grup tak
+  membirukan pesan yang baru dibaca satu anggota. Chat 1-1 berperilaku
+  seperti biasa (abu = sampai, biru = dibaca).
 
 Yang TIDAK dilakukan (sengaja): `message.send` via socket, outbox
 cursor untuk event klien, dan rate-limit per-frame (cukup throttle

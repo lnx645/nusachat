@@ -189,7 +189,29 @@ class Conversations extends MY_Controller
             ));
         }
 
-        $this->message_model->markDelivered($id, (int) $user['id']);
+        // Tandai delivered sebatas yang benar-benar diambil + siarkan ke
+        // pengirim agar centang 2 abu realtime (dulu: status berubah diam).
+        $maxId = 0;
+        $hadSent = false;
+        foreach ($rows as $m) {
+            $mid = (int) $m['id'];
+            if ($mid > $maxId) {
+                $maxId = $mid;
+            }
+            if ((int) $m['sender_id'] !== (int) $user['id'] && ($m['status'] ?? '') === 'sent') {
+                $hadSent = true;
+            }
+        }
+        $this->message_model->markDelivered($id, (int) $user['id'], $maxId);
+        if ($hadSent && $maxId > 0) {
+            $others = array_values(array_diff($this->conversation_model->memberIds($id), [(int) $user['id']]));
+            $this->realtime_model->push($others, 'ack', [
+                'conversation_id' => $id,
+                'user_id' => (int) $user['id'],
+                'message_id' => $maxId,
+                'fully_acked' => [],
+            ]);
+        }
 
         $rows = $this->message_model->withExtras($rows, (int) $user['id']);
         $messages = array_map('message_dto', $rows);
@@ -308,15 +330,19 @@ class Conversations extends MY_Controller
         }
 
         $this->conversation_model->markRead($id, (int) $user['id'], $messageId);
+        // Dibaca = pasti sudah diterima: delivered dulu, baru unanimous read.
+        $this->message_model->markDelivered($id, (int) $user['id'], $messageId);
         $this->message_model->markReadUpTo($id, (int) $user['id'], $messageId);
+        $fullyRead = $this->message_model->readIdsUpTo($id, (int) $user['id'], $messageId);
 
         $others = array_values(array_diff($this->conversation_model->memberIds($id), [(int) $user['id']]));
         $this->realtime_model->push($others, 'read', [
             'conversation_id' => $id,
             'user_id' => (int) $user['id'],
             'message_id' => $messageId,
+            'fully_read' => $fullyRead,
         ]);
-        $this->ok(['message_id' => $messageId]);
+        $this->ok(['message_id' => $messageId, 'fully_read' => $fullyRead]);
     }
 
     public function typing(): void

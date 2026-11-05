@@ -10,6 +10,7 @@ import org.json.JSONObject
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.Camera1Enumerator
+import org.webrtc.Camera2Enumerator
 import org.webrtc.DataChannel
 import org.webrtc.EglBase
 import org.webrtc.IceCandidate
@@ -111,9 +112,11 @@ class WebRtcCallManager(private val context: Context) {
             .setEnableInternalTracer(false)
             .createInitializationOptions()
         PeerConnectionFactory.initialize(initOptions)
-        // Sengaja pakai pemrosesan audio software bawaan WebRTC (AEC/NS):
-        // pemaksa hardware di banyak HP tidak didukung sehingga gema/feedback.
+        // Hardware AEC/NS bila tersedia (lebih jernih di HP modern);
+        // WebRTC otomatis fallback ke software bila tidak didukung.
         val audioModule = JavaAudioDeviceModule.builder(context)
+            .setUseHardwareAcousticEchoCanceler(true)
+            .setUseHardwareNoiseSuppressor(true)
             .createAudioDeviceModule()
         factory = PeerConnectionFactory.builder()
             .setAudioDeviceModule(audioModule)
@@ -123,18 +126,38 @@ class WebRtcCallManager(private val context: Context) {
     fun startAsCaller(): SessionDescription? {
         ensureFactory()
         createPeer()
-        val constraints = MediaConstraints()
+        val constraints = MediaConstraints().apply {
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
+            mandatory.add(
+                MediaConstraints.KeyValuePair(
+                    "OfferToReceiveVideo", if (videoEnabled) "true" else "false",
+                ),
+            )
+        }
         var offer: SessionDescription? = null
         val latch = java.util.concurrent.CountDownLatch(1)
         peer?.createOffer(object : SimpleSdpObserver() {
             override fun onCreateSuccess(desc: SessionDescription) {
                 Log.d("NusaRtc", "offer sdp=" + desc.description)
-                peer?.setLocalDescription(SimpleSdpObserver(), desc)
+                val setLatch = java.util.concurrent.CountDownLatch(1)
+                peer?.setLocalDescription(object : SimpleSdpObserver() {
+                    override fun onSetSuccess() { setLatch.countDown() }
+                    override fun onSetFailure(error: String) {
+                        Log.e("NusaRtc", "setLocalDescription offer gagal: $error")
+                        setLatch.countDown()
+                    }
+                }, desc)
+                // Tunggu local-desc selesai agar ICE gathering jalan;
+                // tanpa ini kadang tidak ada kandidat → sunyi total.
+                setLatch.await(5, java.util.concurrent.TimeUnit.SECONDS)
                 offer = desc
                 onLocalSdp?.invoke(desc)
                 latch.countDown()
             }
-            override fun onCreateFailure(error: String) { latch.countDown() }
+            override fun onCreateFailure(error: String) {
+                Log.e("NusaRtc", "createOffer gagal: $error")
+                latch.countDown()
+            }
         }, constraints)
         latch.await(8, java.util.concurrent.TimeUnit.SECONDS)
         return offer
@@ -153,11 +176,25 @@ class WebRtcCallManager(private val context: Context) {
                 }
                 peer?.createAnswer(object : SimpleSdpObserver() {
                     override fun onCreateSuccess(desc: SessionDescription) {
-                        peer?.setLocalDescription(SimpleSdpObserver(), desc)
+                        val setLatch = java.util.concurrent.CountDownLatch(1)
+                        peer?.setLocalDescription(object : SimpleSdpObserver() {
+                            override fun onSetSuccess() { setLatch.countDown() }
+                            override fun onSetFailure(error: String) {
+                                Log.e("NusaRtc", "setLocalDescription answer gagal: $error")
+                                setLatch.countDown()
+                            }
+                        }, desc)
+                        setLatch.await(5, java.util.concurrent.TimeUnit.SECONDS)
                         onLocalSdp?.invoke(desc)
                         onAnswerReady(desc)
                     }
+                    override fun onCreateFailure(error: String) {
+                        Log.e("NusaRtc", "createAnswer gagal: $error")
+                    }
                 }, constraints)
+            }
+            override fun onSetFailure(error: String) {
+                Log.e("NusaRtc", "setRemoteDescription offer gagal: $error")
             }
         }, offer)
     }
@@ -167,6 +204,9 @@ class WebRtcCallManager(private val context: Context) {
         peer?.setRemoteDescription(object : SimpleSdpObserver() {
             override fun onSetSuccess() {
                 drainPendingIce()
+            }
+            override fun onSetFailure(error: String) {
+                Log.e("NusaRtc", "setRemoteDescription answer gagal: $error")
             }
         }, answer)
     }
@@ -269,6 +309,11 @@ class WebRtcCallManager(private val context: Context) {
     }
 
     fun close() {
+        onIceCandidate = null
+        onConnected = null
+        onDisconnected = null
+        onRemoteVideo = null
+        onLocalSdp = null
         runCatching { localAudio?.dispose() }
         runCatching { peer?.close() }
         runCatching { peer?.dispose() }
@@ -308,8 +353,9 @@ class WebRtcCallManager(private val context: Context) {
             override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) {
                 when (newState) {
                     PeerConnection.PeerConnectionState.CONNECTED -> scope.launch(Dispatchers.Main) { onConnected?.invoke() }
+                    // DISCONNECTED transient saat handshake/jaringan goyang — jangan
+                    // langsung end (itu sumber putus/sunyi intermiten).
                     PeerConnection.PeerConnectionState.FAILED,
-                    PeerConnection.PeerConnectionState.DISCONNECTED,
                     PeerConnection.PeerConnectionState.CLOSED -> scope.launch(Dispatchers.Main) { onDisconnected?.invoke() }
                     else -> Unit
                 }
@@ -342,6 +388,9 @@ class WebRtcCallManager(private val context: Context) {
         val audioConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("googTypingNoiseDetection", "true"))
         }
         val source: AudioSource = factory!!.createAudioSource(audioConstraints)
         localAudio = factory!!.createAudioTrack("ARDAMSa0", source).apply { setEnabled(true) }
@@ -360,7 +409,8 @@ class WebRtcCallManager(private val context: Context) {
         val source = factory!!.createVideoSource(capturer.isScreencast)
         videoSource = source
         capturer.initialize(helper, context, source.capturerObserver)
-        runCatching { capturer.startCapture(640, 480, 24) }
+        // 480x360 hemat bandwidth agar video tetap jalan di jaringan lemah.
+        runCatching { capturer.startCapture(480, 360, 24) }
         localVideo = factory!!.createVideoTrack("ARDAMSv0", source).apply { setEnabled(true) }
         peer?.addTrack(localVideo, listOf("ARDAMS"))
         localRenderer?.let { view ->
@@ -372,6 +422,20 @@ class WebRtcCallManager(private val context: Context) {
     }
 
     private fun createCameraCapturer(): VideoCapturer? {
+        // Camera2 lebih stabil di HP modern (Infinix/Xiaomi); fallback ke Camera1.
+        runCatching {
+            val enumerator = Camera2Enumerator(context)
+            for (name in enumerator.deviceNames) {
+                if (enumerator.isFrontFacing(name)) {
+                    return enumerator.createCapturer(name, null)
+                }
+            }
+            for (name in enumerator.deviceNames) {
+                if (!enumerator.isFrontFacing(name)) {
+                    return enumerator.createCapturer(name, null)
+                }
+            }
+        }
         val enumerator = Camera1Enumerator(false)
         for (name in enumerator.deviceNames) {
             if (enumerator.isFrontFacing(name)) {
@@ -387,6 +451,8 @@ class WebRtcCallManager(private val context: Context) {
     }
 
     private fun closePeerOnly() {
+        runCatching { localAudio?.dispose() }
+        localAudio = null
         runCatching { peer?.close() }
         runCatching { peer?.dispose() }
         peer = null

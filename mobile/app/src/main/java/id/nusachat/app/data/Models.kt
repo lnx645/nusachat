@@ -276,6 +276,28 @@ fun List<Message>.capChatWindow(max: Int = CHAT_MEMORY_WINDOW): List<Message> {
     return (pending + rest).sortedBy { it.id }
 }
 
+/**
+ * Gabung delta server ke daftar lokal: server MENANG (status segar),
+ * kecuali [keepExisting] bilang delta tak-terbaca dan cache terbaca —
+ * itupun statusnya tetap diambil dari server. Murni + di-unit-test.
+ */
+fun mergeServerDelta(
+    base: List<Message>,
+    delta: List<Message>,
+    pending: List<Message> = emptyList(),
+    keepExisting: (existing: Message, incoming: Message) -> Boolean = { _, _ -> false },
+): List<Message> {
+    if (delta.isEmpty()) return (base + pending).distinctBy { it.id }.sortedBy { it.id }
+    val baseById = base.associateBy { it.id }
+    val deltaIds = delta.map { it.id }.toSet()
+    val won = delta.map { d ->
+        val b = baseById[d.id]
+        if (b != null && keepExisting(b, d)) b.copy(status = d.status) else d
+    }
+    return (won + base.filter { it.id !in deltaIds } + pending)
+        .distinctBy { it.id }.sortedBy { it.id }
+}
+
 internal fun JSONObject.stringOrNull(key: String): String? {
     if (!has(key) || isNull(key)) return null
     return optString(key).takeIf { it.isNotBlank() }

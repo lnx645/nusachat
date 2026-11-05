@@ -120,11 +120,9 @@ if (!function_exists('absolute_upload_url')) {
 if (!function_exists('user_dto')) {
     function user_dto(array $row, bool $self = false): array
     {
+        // Online = kolom `is_online' (ditulis transisi socket Erlang),
+        // bukan ambang last_seen: tanpa heartbeat, ambang waktu basi.
         $lastSeen = $row['last_seen_at'] ?? null;
-        $online = false;
-        if ($lastSeen) {
-            $online = (time() - strtotime($lastSeen)) < 90;
-        }
         $dto = [
             'id' => (int) $row['id'],
             'uuid' => $row['uuid'] ?? null,
@@ -133,7 +131,7 @@ if (!function_exists('user_dto')) {
             'avatar_url' => $row['avatar_url'] ?? null,
             'bio' => $row['bio'] ?? null,
             'gender' => $row['gender'] ?? null,
-            'online' => $online,
+            'online' => !empty($row['is_online']),
             'last_seen_at' => $lastSeen,
         ];
         // Friend count (social stat) — best effort, fallback 0

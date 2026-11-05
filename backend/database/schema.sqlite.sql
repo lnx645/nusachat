@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
     location_updated_at TEXT,
     discoverable INTEGER NOT NULL DEFAULT 1,
     last_seen_at TEXT,
+    is_online INTEGER NOT NULL DEFAULT 0,
     token_version INTEGER NOT NULL DEFAULT 0,
     is_active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
@@ -478,3 +479,5 @@ CREATE TABLE IF NOT EXISTS message_recipients (
 CREATE INDEX IF NOT EXISTS idx_recipients_user ON message_recipients (user_id);
 ALTER TABLE messages ADD COLUMN expires_at TEXT;
 CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages (expires_at);
+-- Presence berbasis socket: ditulis transisi connect/disconnect Erlang.
+ALTER TABLE users ADD COLUMN is_online INTEGER NOT NULL DEFAULT 0;

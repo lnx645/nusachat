@@ -86,6 +86,19 @@ interface ChatDao {
     @Query("SELECT * FROM messages WHERE conversation_id = :conversationId")
     suspend fun allForConversation(conversationId: Long): List<CachedMessage>
 
+    @Query("SELECT * FROM messages WHERE conversation_id = :conversationId AND id > 0 AND id <= :messageId")
+    suspend fun upTo(conversationId: Long, messageId: Long): List<CachedMessage>
+
+    /** Monotonik: sent→delivered; read tak pernah turun. */
+    @Query("UPDATE messages SET status = 'delivered' WHERE id IN (:ids) AND status = 'sent'")
+    suspend fun markDelivered(ids: List<Long>)
+
+    @Query("UPDATE messages SET status = 'read' WHERE id IN (:ids) AND status IN ('sent', 'delivered')")
+    suspend fun markRead(ids: List<Long>)
+
+    @Query("SELECT * FROM messages WHERE id > 0 ORDER BY id ASC LIMIT :limit OFFSET :offset")
+    suspend fun allPaged(limit: Int, offset: Int): List<CachedMessage>
+
     @Query("DELETE FROM messages WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<Long>)
 

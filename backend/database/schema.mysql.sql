@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
     location_updated_at VARCHAR(32) NULL,
     discoverable TINYINT(1) NOT NULL DEFAULT 1,
     last_seen_at VARCHAR(32) NULL,
+    is_online TINYINT(1) NOT NULL DEFAULT 0,
     token_version INT NOT NULL DEFAULT 0,
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     created_at VARCHAR(32) NOT NULL,
@@ -528,3 +529,5 @@ CREATE TABLE IF NOT EXISTS message_recipients (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ALTER TABLE messages ADD COLUMN expires_at VARCHAR(32) NULL;
 CREATE INDEX idx_messages_expires ON messages (expires_at);
+-- Presence berbasis socket: ditulis transisi connect/disconnect Erlang.
+ALTER TABLE users ADD COLUMN is_online TINYINT(1) NOT NULL DEFAULT 0;

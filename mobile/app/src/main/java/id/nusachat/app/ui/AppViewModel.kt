@@ -23,6 +23,7 @@ import id.nusachat.app.data.FriendRequest
 import id.nusachat.app.data.LocationHelper
 import id.nusachat.app.data.Message
 import id.nusachat.app.data.capChatWindow
+import id.nusachat.app.data.mergeServerDelta
 import id.nusachat.app.data.GroupJoinRequest
 import id.nusachat.app.data.KeyHolder
 import id.nusachat.app.data.Moment
@@ -63,6 +64,7 @@ import id.nusachat.app.data.toMessage
 import id.nusachat.app.data.toUser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -75,6 +77,11 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
+
+/** Jumlah percakapan yang jendela pesannya ditahan di RAM untuk buka instan. */
+private const val RAM_CHAT_CONVERSATIONS = 24
+/** Percakapan teratas yang cache-nya dipanaskan setelah daftar chat dimuat. */
+private const val RAM_PREFETCH_CONVERSATIONS = 12
 
 data class SessionState(
     val user: User? = null,
@@ -280,14 +287,46 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val readUpTo = mutableMapOf<Long, Long>()
     private val ackUpTo = mutableMapOf<Long, Long>()
 
+    /**
+     * Jendela pesan terakhir per percakapan di RAM. Dibaca SINKRON saat
+     * [openChat] supaya pesan sudah ada di frame pertama, tanpa menunggu
+     * Room (SQLCipher) atau jaringan. Isinya plaintext yang sama dengan cache.
+     */
+    private val chatRam = object : LinkedHashMap<Long, List<Message>>(16, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<Long, List<Message>>?,
+        ): Boolean = size > RAM_CHAT_CONVERSATIONS
+    }
+
     init {
         networkMonitor.start()
+        // Jendela RAM mengikuti setiap perubahan pesan chat aktif (kirim,
+        // edit, hapus, delta) agar buka ulang tetap instan.
+        viewModelScope.launch {
+            var lastConv: Long? = null
+            var lastMessages: List<Message> = emptyList()
+            chat.collect { st ->
+                val convId = st.conversation?.id ?: return@collect
+                if (convId == lastConv && st.messages === lastMessages) return@collect
+                lastConv = convId
+                lastMessages = st.messages
+                rememberChatRam(convId, st.messages)
+            }
+        }
         // Online kembali → kirim antre offline.
         viewModelScope.launch {
             var wasOnline = true
             networkMonitor.online.collect { online ->
                 if (online && !wasOnline) flushOutbox()
                 wasOnline = online
+            }
+        }
+        // WS nyambung kembali → kejar pesan yang terlewat + penanda.
+        viewModelScope.launch {
+            var wasRealtime = false
+            realtimeConnected.collect { connected ->
+                if (connected && !wasRealtime) onRealtimeReconnect()
+                wasRealtime = connected
             }
         }
         val saved = session.user
@@ -475,6 +514,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             resetLocalState()
             // Hapus cache chat agar tak tertinggal untuk akun berikutnya.
             runCatching { ChatDatabase.delete(getApplication()) }
+            // Kunci backup milik akun ini: buang + matikan jadwal.
+            runCatching { id.nusachat.app.data.BackupKeys(getApplication()).clear() }
+            runCatching { settings.setBackupAuto(false) }
+            runCatching { id.nusachat.app.data.BackupWorker.ensureScheduled(getApplication(), false) }
+            localBackupPrompt.value = null
+            localBackups.value = emptyList()
             sessionState.value = SessionState(null, true)
         }
     }
@@ -494,6 +539,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun resetLocalState() {
         activeChatId = null
         chat.value = ChatUiState()
+        chatRam.clear()
         conversations.value = emptyList()
         friends.value = emptyList()
         requests.value = RequestsState()
@@ -525,6 +571,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         publishDeviceKey()
         provisionV2()
         loadCallHistory()
+        // Terapkan jadwal backup tersimpan + tawarkan restore file lokal bila install baru.
+        id.nusachat.app.data.BackupWorker.ensureScheduled(getApplication(), settings.backupAuto.value)
+        scanLocalBackups()
+        checkLocalBackupPrompt()
+        // Sapu bangkai placeholder peninggalan versi lama (kosong & fresh).
+        viewModelScope.launch(Dispatchers.IO) { runCatching { chatCache.pruneDead() } }
         startRestoreIfNeeded()
         healSweep()
     }
@@ -548,6 +600,237 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _restore = MutableStateFlow<RestoreState?>(null)
     val restore = _restore.asStateFlow()
     private var restoreJob: Job? = null
+
+    // --------------------------- backup lokal otomatis .updb (tanpa cloud) ---
+    val backupWorking = MutableStateFlow(false)
+    /** Kunci baru — tampilkan sekali, suruh catat (tersimpan terenkripsi di HP). */
+    val backupNewKey = MutableStateFlow<String?>(null)
+    val backupError = MutableStateFlow<String?>(null)
+    /** File .updb di Download/NusaChat. */
+    val localBackups = MutableStateFlow<List<id.nusachat.app.data.local.BackupFileEntry>>(emptyList())
+    /** Prompt restore otomatis di install baru (file ditemukan, cache kosong). */
+    val localBackupPrompt = MutableStateFlow<id.nusachat.app.data.local.BackupFileEntry?>(null)
+
+    fun clearBackupNewKey() {
+        backupNewKey.value = null
+        backupError.value = null
+    }
+
+    /** Nyalakan/matikan backup harian. Menyalakan menyiapkan kunci + jadwal. */
+    fun setBackupAuto(enabled: Boolean) {
+        settings.setBackupAuto(enabled)
+        id.nusachat.app.data.BackupWorker.ensureScheduled(getApplication(), enabled)
+        if (enabled) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val (secret, isNew) = runCatching {
+                    id.nusachat.app.data.BackupKeys(getApplication()).getOrCreateDigits()
+                }.getOrNull() ?: return@launch
+                if (isNew) backupNewKey.value = secret.value
+                scanLocalBackupsNow()
+            }
+        }
+    }
+
+    /** Kunci tersimpan (untuk tombol "Salin kunci"). Null bila belum ada. */
+    fun storedBackupKey(): String? =
+        runCatching { id.nusachat.app.data.BackupKeys(getApplication()).get()?.value }.getOrNull()
+
+    fun scanLocalBackups() {
+        viewModelScope.launch(Dispatchers.IO) { scanLocalBackupsNow() }
+    }
+
+    private suspend fun scanLocalBackupsNow() {
+        val files = runCatching {
+            id.nusachat.app.data.local.BackupFiles(getApplication()).list()
+        }.getOrDefault(emptyList())
+        localBackups.value = files
+    }
+
+    /**
+     * Ganti kunci backup (mode digits/pass). Backup berikutnya memakai kunci
+     * baru; file lama tetap butuh kunci lama. Kunci baru ditampilkan sekali.
+     */
+    fun setBackupKey(mode: String, secret: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val keys = id.nusachat.app.data.BackupKeys(getApplication())
+                if (mode == "pass") keys.setPassphrase(secret.trim())
+                else keys.setDigits(secret.trim())
+                backupNewKey.value = secret.trim()
+                withContext(Dispatchers.Main) {
+                    message.value = "Kunci backup diperbarui. Catat baik-baik."
+                }
+            } catch (e: Exception) {
+                backupError.value = e.message ?: "Kunci tidak valid."
+                withContext(Dispatchers.Main) { handleError(e) }
+            }
+        }
+    }
+
+    /**
+     * Cadangkan sekarang ke folder tetap Download/NusaChat (tanpa picker).
+     * Pakai kunci tersimpan; buat digits baru + tampilkan bila belum ada.
+     */
+    fun backupNow() {
+        if (backupWorking.value) return
+        backupWorking.value = true
+        backupError.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val (secret, isNew) = id.nusachat.app.data.BackupKeys(getApplication()).getOrCreateDigits()
+                val msgs = runCatching { chatCache.exportAll() }.getOrDefault(emptyList())
+                if (msgs.isEmpty()) throw IllegalStateException("Belum ada chat untuk dicadangkan.")
+                val convMeta = if (conversations.value.isNotEmpty()) {
+                    conversations.value.take(500).map {
+                        id.nusachat.app.data.ChatBackup.BackupConv(it.id, it.displayTitle, it.type)
+                    }
+                } else {
+                    msgs.groupBy { it.conversationId }.map { (convId, list) ->
+                        val title = list.firstNotNullOfOrNull {
+                            it.conversationTitle?.takeIf { t -> t.isNotBlank() }
+                        } ?: "Chat"
+                        id.nusachat.app.data.ChatBackup.BackupConv(convId, title, "direct")
+                    }
+                }
+                val payload = id.nusachat.app.data.ChatBackup.Payload(
+                    userId = myId(),
+                    exportedAt = nowIso(),
+                    conversations = convMeta,
+                    messages = msgs,
+                    e2eeKeys = e2ee.exportKeys(),
+                )
+                val blob = if (secret.mode == "pass") {
+                    id.nusachat.app.data.ChatBackup.createBlob(payload, "pass", passphrase = secret.value)
+                } else {
+                    id.nusachat.app.data.ChatBackup.createBlob(payload, "digits", digitsInput = secret.value)
+                }
+                val files = id.nusachat.app.data.local.BackupFiles(getApplication())
+                val bytes = blob.blobB64.toByteArray(Charsets.UTF_8)
+                files.saveFixed(id.nusachat.app.data.local.BackupNames.LATEST, bytes)
+                files.saveFixed(id.nusachat.app.data.local.BackupNames.stampedNow(), bytes)
+                val stamped = files.list().map { it.name }
+                    .filter { id.nusachat.app.data.local.BackupNames.isStamped(it) }
+                val byName = files.list().associateBy { it.name }
+                id.nusachat.app.data.local.BackupNames.prune(stamped)
+                    .forEach { byName[it]?.let { e -> files.delete(e) } }
+                if (isNew) backupNewKey.value = secret.value
+                scanLocalBackupsNow()
+                withContext(Dispatchers.Main) {
+                    message.value = "Backup ${blob.msgCount} pesan tersimpan di Download/NusaChat."
+                }
+            } catch (e: Exception) {
+                backupError.value = e.message ?: "Backup gagal."
+                withContext(Dispatchers.Main) { handleError(e) }
+            } finally {
+                backupWorking.value = false
+            }
+        }
+    }
+
+    /**
+     * Pulihkan dari isi file .updb + kunci. Menimpa cache per id (pesan baru
+     * yang belum ada di backup tidak tertimpa).
+     */
+    fun restoreLocalBlob(blobB64: String, keyInput: String, onDone: (restored: Int) -> Unit = {}) {
+        if (backupWorking.value) return
+        val key = keyInput.trim()
+        if (key.isEmpty()) {
+            backupError.value = "Masukkan kunci 64 digit atau passphrase."
+            onDone(0)
+            return
+        }
+        backupWorking.value = true
+        backupError.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val payload = id.nusachat.app.data.ChatBackup.openBlob(blobB64.trim(), key)
+                runCatching { e2ee.importKeys(payload.e2eeKeys) }
+                val n = runCatching { chatCache.importAll(payload.messages) }.getOrDefault(0)
+                if (n == 0) throw IllegalStateException("Backup kosong atau tidak cocok.")
+                withContext(Dispatchers.Main) {
+                    message.value = "Dipulihkan $n pesan dari file."
+                    refreshConversations()
+                    onDone(n)
+                }
+            } catch (e: Exception) {
+                backupError.value = e.message ?: "Restore gagal."
+                withContext(Dispatchers.Main) { handleError(e) }
+                withContext(Dispatchers.Main) { onDone(0) }
+            } finally {
+                backupWorking.value = false
+            }
+        }
+    }
+
+    /** Pulihkan dari entri file folder tetap. */
+    fun restoreLocalEntry(
+        entry: id.nusachat.app.data.local.BackupFileEntry,
+        keyInput: String,
+        onDone: (restored: Int) -> Unit = {},
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = runCatching {
+                id.nusachat.app.data.local.BackupFiles(getApplication()).read(entry)
+            }.getOrElse {
+                withContext(Dispatchers.Main) { handleError(it) }
+                withContext(Dispatchers.Main) { onDone(0) }
+                return@launch
+            }
+            restoreLocalBlob(text, keyInput, onDone)
+        }
+    }
+
+    fun dismissBackupPrompt() {
+        localBackupPrompt.value = null
+    }
+
+    /** Salin file backup terbaru ke lokasi pilihan (SAF) — untuk pindah HP / Drive. */
+    fun exportLatestCopyTo(uri: android.net.Uri, onDone: (ok: Boolean) -> Unit = {}) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val files = id.nusachat.app.data.local.BackupFiles(getApplication())
+                val latest = files.list().firstOrNull { it.name == id.nusachat.app.data.local.BackupNames.LATEST }
+                    ?: files.list().firstOrNull()
+                    ?: throw IllegalStateException("Belum ada file backup. Cadangkan dulu.")
+                val text = files.read(latest)
+                getApplication<Application>().contentResolver.openOutputStream(uri)?.use {
+                    it.write(text.toByteArray(Charsets.UTF_8))
+                } ?: throw IllegalStateException("Tidak bisa menulis ke lokasi itu.")
+                withContext(Dispatchers.Main) {
+                    message.value = "Salinan ${latest.name} tersimpan."
+                    onDone(true)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { handleError(e) }
+                withContext(Dispatchers.Main) { onDone(false) }
+            }
+        }
+    }
+
+    /**
+     * Install baru + cache kosong + ada file .updb valid di folder tetap →
+     * tawarkan restore otomatis (sekali per install). Dipanggil tiap login.
+     */
+    private fun checkLocalBackupPrompt() {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (runCatching { chatCache.totalCount() }.getOrDefault(-1) != 0) return@launch
+            if (settings.backupPromptShown()) return@launch
+            val files = runCatching {
+                id.nusachat.app.data.local.BackupFiles(getApplication()).list()
+            }.getOrDefault(emptyList())
+            localBackups.value = files
+            val latest = files.firstOrNull { it.name == id.nusachat.app.data.local.BackupNames.LATEST }
+                ?: files.firstOrNull() ?: return@launch
+            val text = runCatching {
+                id.nusachat.app.data.local.BackupFiles(getApplication()).read(latest)
+            }.getOrDefault("").trim()
+            if (text.isEmpty()) return@launch
+            val (msgCount, _, _) = id.nusachat.app.data.ChatBackup.peekInfo(text)
+            if (msgCount <= 0) return@launch
+            settings.markBackupPromptShown()
+            localBackupPrompt.value = latest
+        }
+    }
 
     /** Lewati pemulihan (lanjut tanpa cache; tiap chat sync saat dibuka). */
     fun skipRestore() {
@@ -608,8 +891,143 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Dekrip satu pesan jaringan; null = SKDM (sembunyikan). */
     private fun dec(msg: Message): Message? = sessCrypto.decryptOne(msg, myId())
 
+    /** Permanen tak-terbaca (habis install ulang): buang, tampil kosong & fresh. */
+    private fun isDeadMessage(m: Message): Boolean =
+        m.type == "text" && E2eeManager.isDeadBody(m.body)
+
     /** Dekrip daftar jaringan (SKDM dibuang). */
     private fun decAll(list: List<Message>): List<Message> = sessCrypto.processIncoming(list, myId())
+
+    /**
+     * Id aman untuk cursor/ack: berhenti SEBELUM placeholder mati pertama.
+     * Placeholder tidak masuk cache; kalau cursor/ack melewatinya, server
+     * menyapu ciphertext yang belum pernah terbaca → pesan hilang permanen.
+     */
+    private fun safeSyncId(messages: List<Message>, maxId: Long): Long {
+        val firstDead = messages.asSequence()
+            .filter { it.id > 0 && isDeadMessage(it) }
+            .minOfOrNull { it.id } ?: return maxId
+        return minOf(maxId, firstDead - 1)
+    }
+
+    /** Ingat plaintext terbaca agar gema sendiri (selfEcho) bisa resolved. */
+    private fun rememberReadable(messages: List<Message>) {
+        for (m in messages) {
+            if (m.id > 0 && m.type == "text" && m.body != null &&
+                E2eeManager.isReadableBody(m.body)
+            ) {
+                sessCrypto.rememberPlain(m.id, m.body!!)
+            }
+        }
+    }
+
+    /**
+     * Tambal placeholder milik sendiri ("Pesan terkirim." + ikon kunci) dengan
+     * plaintext yang sudah diketahui (RAM/cache/pending). Tanpa ini pesan
+     * sendiri tampil terkunci setelah restart / memori 500 habis.
+     */
+    private fun healOwnPlaceholders(
+        list: List<Message>,
+        known: Map<Long, Message> = emptyMap(),
+    ): List<Message> {
+        if (list.isEmpty()) return list
+        val me = myId()
+        if (me <= 0) return list
+        var patched = false
+        val out = list.map { m ->
+            if (m.type == "text" && isDeadMessage(m) && m.sender?.id == me) {
+                val local = known[m.id]?.body
+                    ?.takeIf { E2eeManager.isReadableBody(it) }
+                    ?: sessCrypto.previewPlaintext(m, me)?.takeIf { E2eeManager.isReadableBody(it) }
+                if (local != null) {
+                    patched = true
+                    sessCrypto.rememberPlain(m.id, local)
+                    m.copy(body = local)
+                } else m
+            } else m
+        }
+        if (patched) rememberReadable(out)
+        return out
+    }
+
+    /**
+     * Pesan yang bisa ditampilkan SINKRON saat chat dibuka: jendela RAM
+     * (riwayat yang sudah pernah dibaca) + pesan terakhir dari daftar chat.
+     * Tidak menyentuh Room/jaringan supaya frame pertama tidak kosong.
+     */
+    private fun lastMessageSeed(conversation: Conversation): Message? =
+        conversation.lastMessage?.takeIf { m ->
+            m.id > 0 && !isDeadMessage(m) &&
+                (m.type != "text" || (m.body != null && E2eeManager.isReadableBody(m.body)))
+        }
+
+    private fun seedMessagesFor(conversation: Conversation): List<Message> {
+        val ram = chatRam[conversation.id].orEmpty()
+        val last = lastMessageSeed(conversation)
+        val base = if (last != null) {
+            (ram + last).distinctBy { it.id }.sortedBy { it.id }
+        } else {
+            ram
+        }
+        return base.capChatWindow()
+    }
+
+    /** Simpan/ gabung jendela pesan RAM; placeholder mati tidak ikut. */
+    private fun rememberChatRam(conversationId: Long, messages: List<Message>) {
+        if (conversationId <= 0 || messages.isEmpty()) return
+        val merged = (chatRam[conversationId].orEmpty() + messages)
+            .filterNot { isDeadMessage(it) }
+            .distinctBy { it.id }
+            .sortedBy { it.id }
+            .capChatWindow()
+        if (merged.isNotEmpty()) chatRam[conversationId] = merged
+    }
+
+    /**
+     * Panaskan RAM dari cache lokal untuk percakapan teratas, sehingga saat
+     * diketuk riwayatnya sudah siap tanpa query Room di jalur buka chat.
+     * Hanya baca cache (tanpa jaringan/kunci), jadi aman dipanggil sering.
+     */
+    private fun warmChatRam(list: List<Conversation>) {
+        val targets = list.asSequence()
+            .filter { it.id != activeChatId }
+            .filter { conv ->
+                val ram = chatRam[conv.id]
+                val ramLast = ram?.lastOrNull()?.id ?: 0L
+                val lastId = conv.lastMessage?.id ?: 0L
+                ram == null || lastId > ramLast
+            }
+            .take(RAM_PREFETCH_CONVERSATIONS)
+            .toList()
+        if (targets.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            for (conv in targets) {
+                val recent = runCatching { chatCache.recent(conv.id) }.getOrDefault(emptyList())
+                if (recent.isEmpty()) continue
+                withContext(Dispatchers.Main.immediate) { rememberChatRam(conv.id, recent) }
+            }
+        }
+    }
+
+    /**
+     * Isi pesan untuk pratinjau (daftar chat, pin) TANPA mendekrip ulang
+     * ciphertext yang kunci ratchet-nya sudah terpakai. Urutan: RAM → cache
+     * → dekrip kering. Null = tak terbaca; pemanggil jangan tampilkan
+     * placeholder "tidak tersedia".
+     */
+    private suspend fun previewMessageFor(message: Message, cached: Message? = null): Message? {
+        if (message.type != "text") return message
+        val fromRam = if (message.id > 0) {
+            chat.value.messages.firstOrNull { it.id == message.id }?.body
+        } else null
+        val local = sequenceOf(fromRam, cached?.body)
+            .filterNotNull()
+            .firstOrNull { it.isNotBlank() && E2eeManager.isReadableBody(it) }
+        if (local != null) return message.copy(body = local)
+        val dry = sessCrypto.previewPlaintext(message, myId()) ?: return null
+        if (!E2eeManager.isReadableBody(dry)) return null
+        return message.copy(body = dry)
+    }
 
     /** Enkripsi teks untuk percakapan (v2, fallback legacy). */
     private suspend fun encryptFor(conversationId: Long, plain: String): String {
@@ -640,8 +1058,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         keys ?: return
         val haveKey = keys.myKey != null && e2ee.unwrapSessionKey(conversationId, keys.myKey)
         if (haveKey) {
-            // Aku holder: tutup anggota/perangkat yang blob-nya basi.
-            healMissingKeys(conversationId, keys.devices, includeSelf = true)
+            // Kunci untuk mendekrip chat ini sudah ada. Heal perangkat lain
+            // hanya perlu untuk penerima lain — jangan blokir buka chat
+            // dengan beberapa request berurutan.
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { healMissingKeys(conversationId, keys.devices, includeSelf = true) }
+            }
             return
         }
         if (keys.devices.isEmpty()) {
@@ -756,6 +1178,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             for (conv in shared + listOfNotNull(open)) {
                 runCatching { syncKeysNow(conv.id) }
             }
+            val active = chat.value.conversation?.takeIf { it.id == activeChatId }
+            if (active != null &&
+                (active.peer?.id == userId || active.members.any { it.id == userId })
+            ) {
+                retryPlaceholders(active.id)
+            }
         }
     }
 
@@ -764,6 +1192,43 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         refreshConversations()
         loadFriends()
         loadRequests()
+    }
+
+    /**
+     * Coba lagi placeholder tak-terdekrip dengan fetch ulang dari server.
+     * Dipanggil saat kunci berubah (device_added / keys_updated): tanpa
+     * ini placeholder diam selamanya karena kursor sudah lewat.
+     */
+    private fun retryPlaceholders(conversationId: Long) {
+        if (conversationId != activeChatId) return
+        val stale = chat.value.messages
+            .filter { isDeadMessage(it) && it.id > 0 }
+            .takeLast(100)
+        if (stale.isEmpty()) return
+        val fromId = stale.minOf { it.id } - 1
+        viewModelScope.launch {
+            val page = runCatching {
+                repository.messages(conversationId, afterId = fromId, limit = 100)
+            }.getOrNull() ?: return@launch
+            val st = chat.value
+            if (st.conversation?.id != conversationId) return@launch
+            val fresh = decAll(page.messages)
+            if (fresh.isEmpty()) return@launch
+            runCatching { chatCache.saveMessages(fresh) }
+            val keepPending = st.messages.filter { it.pending }
+            val preCap = mergeServerDelta(
+                st.messages.filterNot { it.pending }, fresh, keepPending,
+            ) { existing, incoming -> ChatCache.shouldKeepExisting(existing, incoming) }
+            val merged = preCap.capChatWindow()
+            chat.value = st.copy(messages = merged)
+            // Bila placeholder pulih, cursor/ack boleh maju lagi.
+            val maxId = merged.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0L
+            val syncId = safeSyncId(merged, maxId)
+            if (syncId > 0) {
+                runCatching { chatCache.saveCursor(conversationId, syncId) }
+                ackInternal(conversationId, syncId)
+            }
+        }
     }
 
     // ---------------------------------------------------------------- realtime
@@ -789,6 +1254,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             "message" -> {
                 val conversationId = data.optLong("conversation_id")
                 val raw = data.optJSONObject("message")?.toMessage() ?: return
+                // Placeholder tak-terdekrip dipertahankan (jangan dibuang):
+                // pengguna harus tahu ada pesan + bisa dicoba lagi saat
+                // kunci berubah. SKDM (null) tetap gugur.
                 val message = dec(raw) ?: return
                 incomingMessage(conversationId, message)
             }
@@ -796,15 +1264,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val conversationId = data.optLong("conversation_id")
                 val readerId = data.optLong("user_id")
                 val messageId = data.optLong("message_id")
+                // Server baru mengirim fully_read (biru = dibaca SEMUA);
+                // null = server lama: birukan semua seperti dulu.
+                val fullyRead: Set<Long>? = data.optJSONArray("fully_read")?.let { arr ->
+                    buildSet { for (i in 0 until arr.length()) add(arr.optLong(i)) }
+                }
                 if (conversationId == activeChatId && readerId != session.user?.id) {
                     val state = chat.value
                     chat.value = state.copy(
                         messages = state.messages.map {
-                            if (it.sender?.id == session.user?.id && it.id <= messageId) {
-                                it.copy(status = "read")
+                            if (it.sender?.id == session.user?.id && it.id > 0 && it.id <= messageId) {
+                                when {
+                                    fullyRead == null || it.id in fullyRead -> it.copy(status = "read")
+                                    it.status == "sent" -> it.copy(status = "delivered")
+                                    else -> it
+                                }
                             } else it
                         }
                     )
+                }
+                if (conversationId > 0 && messageId > 0 && readerId != session.user?.id) {
+                    persistReadUpTo(conversationId, messageId, fullyRead)
                 }
             }
             "ack" -> {
@@ -821,6 +1301,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             } else it
                         }
                     )
+                }
+                if (conversationId > 0 && messageId > 0 && ackerId != session.user?.id) {
+                    persistDeliveredUpTo(conversationId, messageId)
                 }
             }
             "typing" -> {
@@ -938,7 +1421,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             "keys_updated" -> onKeysUpdated(data)
             "presence" -> {
                 val userId = data.optLong("user_id")
-                if (userId > 0) onPresenceChanged(userId)
+                // Payload lama tak punya `online' dan selalu berarti online.
+                val online = if (data.has("online")) data.optBoolean("online") else true
+                val lastSeen = data.optString("last_seen_at").ifBlank { null }
+                if (userId > 0) onPresenceChanged(userId, online, lastSeen)
             }
             "device_added" -> {
                 val userId = data.optLong("user_id")
@@ -986,53 +1472,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val pendingIce = mutableListOf<JSONObject>()
     private var callIceJob: Job? = null
+    private var callFocusRequest: android.media.AudioFocusRequest? = null
 
     // ------------------------------------------------------------ NVP/1 voice (tanpa WebRTC)
 
     fun startVoiceCall(peer: User) {
-        if (callState.value.status in listOf("dialing", "active", "ringing")) {
-            message.value = "Sudah ada panggilan aktif."
-            return
-        }
-        if (groupCall.value.status == "active") {
-            message.value = "Sudah ada panggilan grup aktif."
-            return
-        }
-        val codecs = NvpCodecs.probeEncoders()
-        if (codecs.isEmpty()) {
-            message.value = "Panggilan tidak didukung di perangkat ini."
-            return
-        }
-        val rng = SecureRandom()
-        val keyB64 = NvpBase64.encode(ByteArray(32).also { rng.nextBytes(it) })
-        val saltB64 = NvpBase64.encode(ByteArray(4).also { rng.nextBytes(it) })
-        pendingNvpOffer = PendingNvpOffer(peer, codecs, keyB64, saltB64)
-        nvpFallbackUsed = false
-        nvpPreparedArrived = false
-        callState.value = CallUiState(
-            peer = peer, outgoing = true, status = "dialing",
-            nvp = true, nvpCodecs = codecs, nvpKeyB64 = keyB64, nvpSaltB64 = saltB64,
-        )
-        startCallService()
-        val sent = socket?.send(
-            "call.offer",
-            JSONObject().put("to_user_id", peer.id)
-                .put("codecs", JSONArray(codecs))
-                .put("key_ct", keyB64).put("salt", saltB64),
-        ) == true
-        if (!sent) {
-            nvpFallbackOffer()
-            return
-        }
-        // Server lama/WS putus: tak ada prepared → fallback REST.
-        viewModelScope.launch {
-            delay(8000)
-            if (!nvpPreparedArrived && !nvpFallbackUsed &&
-                callState.value.status == "dialing" && callState.value.nvp
-            ) {
-                nvpFallbackOffer()
-            }
-        }
+        // 1-1 voice full WebRTC audio (NVP dinonaktifkan untuk 1-1;
+        // engine NVP dipertahankan hanya untuk group call).
+        startCall(peer, "audio")
     }
 
     /** Fallback REST offer (WS mati / callee offline): sdp = kurir nvp1:. */
@@ -1549,6 +1996,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (conversationId == activeChatId) {
                     val state = chat.value
                     chat.value = state.copy(messages = decAll(state.messages))
+                    retryPlaceholders(conversationId)
                 }
                 refreshConversations()
             }
@@ -1616,7 +2064,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { rtc.handleAnswer(sdp) }
             withContext(Dispatchers.Main) {
-                callState.value = callState.value.copy(status = "active")
+                // Samakan dengan callee: routing earpiece + focus + service.
+                // Tanpa ini penelepon tidak MODE_IN_COMMUNICATION → mic tidak
+                // tertangkap (HP2 sunyi) dan echo suara sendiri.
+                markCallActive()
             }
         }
     }
@@ -1679,6 +2130,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             if (audio != null) {
                 audio.mode = AudioManager.MODE_IN_COMMUNICATION
                 audio.isSpeakerphoneOn = false
+                if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    val attrs = android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                    val req = android.media.AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                        .setAudioAttributes(attrs)
+                        .build()
+                    callFocusRequest = req
+                    audio.requestAudioFocus(req)
+                } else {
+                    @Suppress("DEPRECATION")
+                    audio.requestAudioFocus(
+                        null, AudioManager.STREAM_VOICE_CALL,
+                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
+                    )
+                }
             }
         }
         callState.value = callState.value.copy(status = "active", speaker = false)
@@ -1698,6 +2166,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val app = getApplication<Application>()
         runCatching {
             val audio = app.getSystemService(Application.AUDIO_SERVICE) as? AudioManager
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                callFocusRequest?.let { audio?.abandonAudioFocusRequest(it) }
+            } else {
+                @Suppress("DEPRECATION")
+                audio?.abandonAudioFocus(null)
+            }
+            callFocusRequest = null
             audio?.mode = AudioManager.MODE_NORMAL
             audio?.isSpeakerphoneOn = false
         }
@@ -1715,28 +2190,77 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // Gema kiriman sendiri dari jaringan: jangan timpa cache plaintext
         // (pengirim adalah sumber kebenaran plaintext-nya sendiri).
         val own = incoming.sender?.id != null && incoming.sender?.id == session.user?.id
-        if (incoming.id > 0 && !own) {
-            viewModelScope.launch {
-                runCatching { chatCache.saveMessage(incoming) }
-                runCatching { chatCache.saveCursor(conversationId, incoming.id) }
+        val current = chat.value
+        // Echo sendiri tak bisa didekrip dari ciphertext (kunci kirim tak bisa
+        // dibuka). Bila memori plaintext hilang, jangan timpa pending/cache
+        // terbaca dengan placeholder "Pesan terkirim."
+        val resolved = if (own && isDeadMessage(incoming)) {
+            val pendingMatch = current.messages.firstOrNull { e ->
+                e.id == incoming.id ||
+                    (incoming.clientId != null && e.clientId == incoming.clientId)
+            }
+            val known = pendingMatch?.body?.takeIf { E2eeManager.isReadableBody(it) }
+                ?: sessCrypto.previewPlaintext(incoming, myId())?.takeIf { E2eeManager.isReadableBody(it) }
+            if (known != null) {
+                sessCrypto.rememberPlain(incoming.id, known)
+                incoming.copy(body = known)
+            } else if (pendingMatch != null) {
+                return
+            } else {
+                return
+            }
+        } else {
+            incoming
+        }
+        if (resolved.id > 0 && !isDeadMessage(resolved)) {
+            if (!own) {
+                viewModelScope.launch { runCatching { chatCache.saveMessage(resolved) } }
+            } else {
+                // Echo sendiri yang sudah resolved = plaintext valid, simpan juga.
+                viewModelScope.launch { runCatching { chatCache.saveMessage(resolved) } }
             }
         }
-        val current = chat.value
-        if (current.conversation?.id == conversationId) {
+        // Pesan realtime tetap ditahan di RAM walau chat lain sedang dibuka,
+        // supaya saat chat ini diketuk pesannya sudah ada di frame pertama.
+        if (!isDeadMessage(resolved)) rememberChatRam(conversationId, listOf(resolved))
+        val active = current.conversation?.id == conversationId
+        var merged = current.messages
+        if (active) {
             val cleaned = current.messages.filterNot { existing ->
-                existing.id == incoming.id ||
-                    (incoming.clientId != null && existing.clientId == incoming.clientId)
+                existing.id == resolved.id ||
+                    (resolved.clientId != null && existing.clientId == resolved.clientId)
             }
-            val merged = (cleaned + incoming).distinctBy { it.id }.sortedBy { it.id }
-            val capped = merged.capChatWindow()
+            val all = (cleaned + resolved).distinctBy { it.id }.sortedBy { it.id }
+            val capped = all.capChatWindow()
+            merged = capped
             chat.value = current.copy(
                 messages = capped,
                 typingName = null,
                 // Pesan lama yang terbuang dari RAM tetap bisa digali via beforeId.
-                hasMore = current.hasMore || capped.size < merged.size,
+                hasMore = current.hasMore || capped.size < all.size,
             )
-            if (incoming.sender?.id != session.user?.id) {
-                markReadInternal(conversationId, incoming.id)
+            if (resolved.sender?.id != session.user?.id) {
+                markReadInternal(conversationId, resolved.id)
+            }
+        }
+        if (resolved.id > 0 && !own) {
+            // Placeholder mati tidak boleh di-ack: ciphertext harus tetap
+            // tersedia di server sampai berhasil didekrip (heal/retry).
+            val basis = if (active) merged else listOf(incoming)
+            if (active || !isDeadMessage(incoming)) {
+                val maxId = maxOf(
+                    incoming.id,
+                    basis.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0L,
+                )
+                val syncId = safeSyncId(basis, maxId)
+                if (syncId > 0) {
+                    viewModelScope.launch {
+                        runCatching { chatCache.saveCursor(conversationId, syncId) }
+                    }
+                    // Sampai di perangkat = delivered — foreground maupun
+                    // background — hanya sampai id yang aman.
+                    ackInternal(conversationId, syncId)
+                }
             }
         }
         refreshConversations()
@@ -1750,12 +2274,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val list = repository.conversations()
+                // Plaintext cache diambil sekaligus agar pratinjau tidak
+                // mendekrip ulang ciphertext yang kuncinya sudah terpakai.
+                val previewIds = list.mapNotNull { conv ->
+                    conv.lastMessage?.takeIf { it.type == "text" && it.id > 0 }?.id
+                }
+                val cachedById = runCatching { chatCache.byIds(previewIds) }
+                    .getOrDefault(emptyList())
+                    .associateBy { it.id }
                 conversations.value = list.map { conv ->
                     val last = conv.lastMessage
                     if (last != null && last.type == "text") {
-                        conv.copy(lastMessage = dec(last))
+                        conv.copy(lastMessage = previewMessageFor(last, cachedById[last.id]))
                     } else conv
                 }
+                warmChatRam(conversations.value)
             } catch (e: Exception) {
                 handleError(e)
             } finally {
@@ -1768,7 +2301,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         activeChatId = conversation.id
         // Chat dibuka: hapus notifnya bila ada.
         runCatching { PushManager.cancelForConversation(getApplication(), conversation.id) }
-        chat.value = ChatUiState(conversation = conversation, loading = true, keySyncing = true)
+        // Frame pertama: RAM + pesan terakhir dari daftar chat. Semua sinkron,
+        // jadi layar chat tidak pernah sempat kosong / menampilkan spinner.
+        val lastSeed = lastMessageSeed(conversation)
+        val seeded = seedMessagesFor(conversation)
+        chat.value = ChatUiState(
+            conversation = conversation,
+            messages = seeded,
+            loading = seeded.isEmpty(),
+            keySyncing = true,
+        )
         viewModelScope.launch {
             // 0. Pesan sementara: pangkas cache kedaluwarsa sebelum tampil.
             if (conversation.disappearingDays > 0) {
@@ -1780,34 +2322,75 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 chatCache.queued().filter { it.conversationId == conversation.id }
             }.getOrDefault(emptyList())
             if (cached.isNotEmpty() || queuedHere.isNotEmpty()) {
-                chat.value = chat.value.copy(
-                    messages = (cached + queuedHere).distinctBy { it.id }.sortedBy { it.id },
+                val current = chat.value
+                if (current.conversation?.id != conversation.id) return@launch
+                // Gabung dengan seed (RAM + pesan terakhir) agar pesan baru
+                // dari daftar chat tidak hilang saat cache belum memuatnya.
+                val merged = mergeServerDelta(
+                    current.messages.filterNot { it.pending },
+                    cached,
+                    current.messages.filter { it.pending } + queuedHere,
+                ) { existing, incoming -> ChatCache.shouldKeepExisting(existing, incoming) }
+                rememberReadable(merged)
+                rememberChatRam(conversation.id, merged)
+                chat.value = current.copy(
+                    messages = merged.capChatWindow(),
                     loading = false,
                     hasMore = cached.size >= 40,
                 )
+            } else if (seeded.isNotEmpty()) {
+                chat.value = chat.value.copy(loading = false)
             }
             try {
-                // Tunggu kunci E2EE siap dulu (device baru!) sebelum mendekrip,
-                // kalau tidak pesan terlanjur tampil terenkripsi.
-                runCatching { syncKeysNow(conversation.id) }
-                chat.value = chat.value.copy(keySyncing = false)
                 // 2. Delta dari cursor bila cache ada; kalau tidak, halaman penuh.
                 val cursor = runCatching { chatCache.cursor(conversation.id) }.getOrNull()
                 val useDelta = cursor != null && cursor > 0 && cached.isNotEmpty()
-                val page = if (useDelta) {
-                    repository.messages(conversation.id, afterId = cursor, limit = 100)
-                } else {
-                    repository.messages(conversation.id, limit = 40)
+                // Ambil pesan PARALEL dengan sinkronisasi kunci: dua-duanya
+                // jaringan dan tidak saling bergantung. Dekrip tetap menunggu
+                // syncKeysNow selesai.
+                val pageDeferred = async {
+                    if (useDelta) {
+                        repository.messages(conversation.id, afterId = cursor, limit = 100)
+                    } else {
+                        repository.messages(conversation.id, limit = 40)
+                    }
                 }
-                val dec = decAll(page.messages)
+                // Tunggu kunci E2EE siap dulu (device baru!) sebelum mendekrip,
+                // kalau tidak pesan terlanjur tampil terenkripsi.
+                runCatching { syncKeysNow(conversation.id) }
+                val page = pageDeferred.await()
+                val decRaw = decAll(page.messages)
+                val knownDec = (chat.value.messages + cached).associateBy { it.id }
+                val dec = healOwnPlaceholders(decRaw, knownDec)
+                rememberReadable(dec)
                 runCatching { chatCache.saveMessages(dec) }
                 val current = chat.value
                 if (current.conversation?.id != conversation.id) return@launch
                 val keepPending = current.messages.filter { it.pending }
-                val base = if (useDelta) current.messages.filterNot { it.pending } else emptyList()
-                val merged = (base + dec + keepPending).distinctBy { it.id }.sortedBy { it.id }
-                val maxId = merged.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0L
-                runCatching { chatCache.saveCursor(conversation.id, maxId) }
+                // Seed tetap dipertahankan: pesan terakhir dari daftar chat
+                // mungkin belum ikut halaman jaringan (mis. >100 delta).
+                val base = current.messages.filterNot { it.pending }
+                // Server menang (status segar); cache terbaca dipertahankan
+                // bila delta gagal dekrip (statusnya tetap dari server).
+                val merged = mergeServerDelta(base, dec, keepPending) { existing, incoming ->
+                    ChatCache.shouldKeepExisting(existing, incoming)
+                }
+                rememberChatRam(conversation.id, merged)
+                val displayMaxId = merged.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0L
+                // Cursor/ack tidak boleh melewati pesan yang belum benar-benar
+                // termuat. Seed dari daftar chat (yang mungkin melompati pesan
+                // lain) hanya dipakai untuk tampilan/read, bukan cursor.
+                val cachedIds = cached.map { it.id }.toSet()
+                val decIds = dec.map { it.id }.toSet()
+                val seedOnly = lastSeed
+                    ?.takeIf { it.id !in cachedIds && it.id !in decIds }
+                    ?.id
+                val syncMax = merged
+                    .filter { it.id > 0 && it.id != seedOnly }
+                    .maxOfOrNull { it.id } ?: 0L
+                // Cursor/ack tidak boleh melewati pesan yang gagal disimpan.
+                val syncId = safeSyncId(merged, syncMax)
+                runCatching { chatCache.saveCursor(conversation.id, syncId) }
                 chat.value = ChatUiState(
                     conversation = conversation,
                     messages = merged,
@@ -1815,12 +2398,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     hasMore = if (useDelta) current.hasMore else page.hasMore,
                     initialUnread = conversation.unreadCount,
                 )
-                if (maxId > 0) ackInternal(conversation.id, maxId)
-                page.messages.lastOrNull()?.let { markReadInternal(conversation.id, it.id) }
+                // Force-resend (abaikan dedup): setiap buka chat menutup
+                // tulis-buta yang hilang sebelumnya (anti macet abu).
+                if (displayMaxId > 0) {
+                    resendMarkers(conversation.id, displayMaxId, ackMaxId = syncId)
+                }
                 refreshConversations()
                 loadPins()
                 // Anggota + username untuk saran @mention (juga dipakai header grup).
                 loadConversationDetail()
+                // Kunci bisa sudah pulih sejak placeholder dibuat (mis. HP
+                // sempat mati saat heal dikirim) — coba lagi tiap buka chat.
+                retryPlaceholders(conversation.id)
             } catch (e: Exception) {
                 // Offline + ada cache = tetap tampil, tanpa error menakutkan.
                 if (isNetworkError(e) && chat.value.messages.isNotEmpty()) {
@@ -1839,22 +2428,48 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * User lain baru online (event presence via Erlang): segarkan detail
-     * chat yang sedang dibuka agar "x anggota, y online" / "Online"
-     * terasa realtime tanpa polling.
+     * Presence real-time (online + offline): tambal SEMUA state lokal yang
+     * memegang user ini — tanpa fetch — agar titik hijau, subtitle
+     * "Online"/"x anggota, y online", dan kontak sinkron seketika.
      */
-    private fun onPresenceChanged(userId: Long) {
-        val current = chat.value
-        val conv = current.detail ?: current.conversation ?: return
-        if (conv.id != activeChatId) return
-        val involves = conv.peer?.id == userId || conv.members.any { it.id == userId }
-        if (!involves) return
-        viewModelScope.launch {
-            val updated = runCatching { repository.conversationDetail(conv.id) }.getOrNull()
-                ?: return@launch
-            if (chat.value.conversation?.id == conv.id) {
-                chat.value = chat.value.copy(detail = updated)
-            }
+    private fun onPresenceChanged(userId: Long, online: Boolean, lastSeenAt: String?) {
+        fun patch(u: User): User =
+            if (u.id == userId) u.copy(online = online, lastSeenAt = lastSeenAt ?: u.lastSeenAt) else u
+        fun patchConv(c: Conversation): Conversation {
+            val peer = c.peer?.let(::patch)
+            val members = c.members.map(::patch)
+            if (peer == c.peer && members == c.members) return c
+            return c.copy(peer = peer, members = members)
+        }
+        val st = chat.value
+        val detail = st.detail?.let(::patchConv)
+        val conv = st.conversation?.let(::patchConv)
+        if (detail != st.detail || conv != st.conversation) {
+            chat.value = st.copy(detail = detail, conversation = conv)
+        }
+        conversations.value = conversations.value.map(::patchConv)
+        friends.value = friends.value.map(::patch)
+        searchResults.value = searchResults.value.map(::patch)
+        nearby.value = nearby.value.copy(users = nearby.value.users.map(::patch))
+        val req = requests.value
+        requests.value = req.copy(
+            incoming = req.incoming.map { r -> r.copy(user = patch(r.user)) },
+            outgoing = req.outgoing.map { r -> r.copy(user = patch(r.user)) },
+        )
+    }
+
+    /** Tulis status read/ack ke cache agar tak balik saat buka ulang. */
+    private fun persistReadUpTo(conversationId: Long, messageId: Long, readIds: Set<Long>?) {
+        val me = session.user?.id ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { chatCache.markReadUpTo(conversationId, me, messageId, readIds) }
+        }
+    }
+
+    private fun persistDeliveredUpTo(conversationId: Long, messageId: Long) {
+        val me = session.user?.id ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { chatCache.markOwnUpTo(conversationId, me, messageId, "delivered") }
         }
     }
 
@@ -1870,6 +2485,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Buka chat dari deep-link notifikasi (PushDeepLink). */
     fun openChatById(conversationId: Long) {
+        // Daftar chat sudah memegang metadata + pratinjau plaintext: buka
+        // seketika, jangan tunggu round-trip /conversations/show.
+        val local = conversations.value.firstOrNull { it.id == conversationId }
+        if (local != null) {
+            openChat(local)
+            return
+        }
         viewModelScope.launch {
             try {
                 openChat(repository.conversationDetail(conversationId))
@@ -2221,7 +2843,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val pins = repository.pins(conversation.id).map { pin ->
-                    pin.copy(message = dec(pin.message) ?: pin.message.copy(body = SessionCrypto.PLACEHOLDER_BROKEN))
+                    val preview = previewMessageFor(pin.message)
+                        ?: pin.message.copy(body = E2eeManager.PLACEHOLDER_SYNC)
+                    pin.copy(message = preview)
                 }
                 chat.value = chat.value.copy(pins = pins)
             } catch (e: Exception) {
@@ -2236,7 +2860,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val pins = repository.pinMessage(conversation.id, message.id).map { pin ->
-                    pin.copy(message = dec(pin.message) ?: pin.message.copy(body = SessionCrypto.PLACEHOLDER_BROKEN))
+                    val preview = previewMessageFor(pin.message)
+                        ?: pin.message.copy(body = E2eeManager.PLACEHOLDER_SYNC)
+                    pin.copy(message = preview)
                 }
                 chat.value = chat.value.copy(pins = pins)
             } catch (e: Exception) {
@@ -2517,6 +3143,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 repository.clearHistory(conversationId)
                 runCatching { chatCache.deleteConversation(conversationId) }
+                chatRam.remove(conversationId)
                 if (chat.value.conversation?.id == conversationId) {
                     chat.value = chat.value.copy(messages = emptyList(), hasMore = false)
                 }
@@ -2556,16 +3183,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val page = repository.messages(conversation.id, beforeId = oldest, limit = 30)
-                val dec = decAll(page.messages)
+                val knownOlder = chat.value.messages.associateBy { it.id }
+                val dec = healOwnPlaceholders(decAll(page.messages), knownOlder)
+                rememberReadable(dec)
                 runCatching { chatCache.saveMessages(dec) }
-                dec.filter { it.id > 0 }.maxOfOrNull { it.id }?.let { ackInternal(conversation.id, it) }
                 val current = chat.value
+                if (current.conversation?.id != conversation.id) return@launch
+                // Server menang, tapi pesan terbaca TIDAK boleh ditimpa
+                // placeholder (itu sumber ikon kunci + "Pesan terkirim.").
+                val merged = mergeServerDelta(
+                    current.messages, dec, emptyList(),
+                ) { existing, incoming -> ChatCache.shouldKeepExisting(existing, incoming) }
+                val newIds = merged.map { it.id }.toSet() - current.messages.map { it.id }.toSet()
+                val maxId = merged.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0L
+                val syncId = safeSyncId(merged, maxId)
+                if (syncId > 0) ackInternal(conversation.id, syncId)
                 chat.value = current.copy(
-                    messages = (dec + current.messages)
-                        .distinctBy { it.id }
-                        .sortedBy { it.id },
+                    messages = merged,
                     loadingOlder = false,
-                    hasMore = page.hasMore,
+                    // Hentikan loop bila server tidak memberi kemajuan
+                    // (dec kosong / semua duplikat) walau flag server true.
+                    hasMore = page.hasMore && newIds.isNotEmpty(),
                 )
             } catch (e: Exception) {
                 // Offline: gali cache lokal dulu sebelum menyerah.
@@ -2598,23 +3236,36 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val page = repository.messages(conversation.id, afterId = afterId, limit = 50)
-                val dec = decAll(page.messages)
+                val knownPoll = chat.value.messages.associateBy { it.id }
+                val dec = healOwnPlaceholders(decAll(page.messages), knownPoll)
+                rememberReadable(dec)
                 val current = chat.value
-                if (current.conversation?.id != conversation.id || dec.isEmpty()) return@launch
+                if (current.conversation?.id != conversation.id) return@launch
+                if (dec.isEmpty()) {
+                    // Tak ada yang baru: tetap kirim ulang penanda agar
+                    // centang pengirim pulih bila tulis-buta sempat hilang.
+                    val syncId = safeSyncId(current.messages, afterId)
+                    resendMarkers(conversation.id, afterId, ackMaxId = syncId)
+                    return@launch
+                }
                 val extra = dec.filter { incoming ->
                     current.messages.none { it.id == incoming.id }
                 }
                 if (extra.isNotEmpty()) {
-                    val merged = (current.messages + extra).distinctBy { it.id }.sortedBy { it.id }
+                    val healed = healOwnPlaceholders(extra, current.messages.associateBy { it.id })
+                    val merged = mergeServerDelta(
+                        current.messages, healed, emptyList(),
+                    ) { existing, incoming -> ChatCache.shouldKeepExisting(existing, incoming) }
                     val capped = merged.capChatWindow()
                     chat.value = current.copy(
                         messages = capped,
                         hasMore = current.hasMore || capped.size < merged.size,
                     )
-                    runCatching { chatCache.saveMessages(extra) }
-                    extra.maxOfOrNull { it.id }?.let { runCatching { chatCache.saveCursor(conversation.id, it) } }
-                    extra.maxOfOrNull { it.id }?.let { ackInternal(conversation.id, it) }
-                    extra.lastOrNull()?.let { markReadInternal(conversation.id, it.id) }
+                    runCatching { chatCache.saveMessages(healed) }
+                    val newMax = capped.filter { it.id > 0 }.maxOfOrNull { it.id } ?: afterId
+                    val syncId = safeSyncId(capped, newMax)
+                    runCatching { chatCache.saveCursor(conversation.id, syncId) }
+                    resendMarkers(conversation.id, newMax, ackMaxId = syncId)
                     refreshConversations()
                 }
             } catch (_: Exception) {
@@ -2670,8 +3321,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Ack relay: pesan ≤ messageId sudah tersimpan di cache perangkat.
-     * Hanya dari chat yang DIBUKA (foreground); pesan realtime latar
-     * tidak di-ack agar badge unread server tetap akurat sampai dibuka.
+     * Foreground maupun background (badge unread tak terpengaruh ack —
+     * badge dihitung dari penanda baca, bukan ack).
      */
     private fun ackInternal(conversationId: Long, messageId: Long) {
         if (messageId <= 0) return
@@ -2680,6 +3331,73 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         ackUpTo[conversationId] = messageId
         blindWrite("message.ack", conversationId, messageId) {
             repository.ack(conversationId, messageId)
+        }
+    }
+
+    /** WS nyambung kembali: kejar pesan yang terlewat saat putus. */
+    private fun onRealtimeReconnect() {
+        if (sessionState.value.user == null) return
+        refreshConversations()
+        val convId = activeChatId ?: return
+        viewModelScope.launch {
+            val before = chat.value
+            if (before.conversation?.id != convId) return@launch
+            val maxId = before.messages.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0L
+            val page = runCatching {
+                repository.messages(convId, afterId = maxId, limit = 100)
+            }.getOrNull()
+            val st = chat.value
+            if (st.conversation?.id != convId) return@launch
+            val fresh = decAll(page?.messages.orEmpty())
+            if (fresh.isEmpty()) {
+                val syncId = safeSyncId(before.messages, maxId)
+                resendMarkers(convId, maxId, ackMaxId = syncId)
+                return@launch
+            }
+            runCatching { chatCache.saveMessages(fresh) }
+            val keepPending = st.messages.filter { it.pending }
+            val preCap = mergeServerDelta(
+                st.messages.filterNot { it.pending }, fresh, keepPending,
+            ) { existing, incoming -> ChatCache.shouldKeepExisting(existing, incoming) }
+            val merged = preCap.capChatWindow()
+            val newMax = merged.filter { it.id > 0 }.maxOfOrNull { it.id } ?: maxId
+            val syncId = safeSyncId(merged, newMax)
+            runCatching { chatCache.saveCursor(convId, syncId) }
+            chat.value = st.copy(
+                messages = merged,
+                typingName = null,
+                hasMore = st.hasMore || merged.size < preCap.size,
+            )
+            resendMarkers(convId, newMax, ackMaxId = syncId)
+            refreshConversations()
+            // Kunci mungkin pulih saat offline — coba placeholder sekali lagi.
+            retryPlaceholders(convId)
+        }
+    }
+
+    /**
+     * Kirim ulang penanda terakhir (idempotent): menutup tulis-buta yang
+     * hilang saat socket setengah-nyambung (send() true tapi tak diproses).
+     */
+    private fun resendMarkers(conversationId: Long, maxId: Long, ackMaxId: Long? = null) {
+        if (maxId <= 0) return
+        val readId = maxOf(readUpTo[conversationId] ?: 0L, maxId)
+        // Ack tidak boleh melewati placeholder mati (server akan menyapunya).
+        // ackMaxId eksplisit 0 = belum ada id aman: jangan majukan ack.
+        val safeAck = ackMaxId ?: maxId
+        val ackId = maxOf(ackUpTo[conversationId] ?: 0L, safeAck)
+        readUpTo[conversationId] = readId
+        ackUpTo[conversationId] = ackId
+        conversations.value = conversations.value.map {
+            if (it.id == conversationId) it.copy(unreadCount = 0) else it
+        }
+        blindWrite("message.read", conversationId, readId) {
+            repository.markRead(conversationId, readId)
+        }
+        if (ackId > 0) {
+            blindWrite("message.ack", conversationId, ackId) {
+                repository.ack(conversationId, ackId)
+            }
         }
     }
 
@@ -3608,6 +4326,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 repository.clearHistory(conversation.id)
                 runCatching { chatCache.deleteConversation(conversation.id) }
+                chatRam.remove(conversation.id)
                 refreshConversations()
                 message.value = "Riwayat dihapus untuk saya."
             } catch (e: Exception) {

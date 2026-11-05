@@ -168,16 +168,16 @@ enrich_all(UserId, Pairs) ->
 
 user_dto(Id) ->
     case nusa_mysql:query(
-           <<"SELECT id, username, display_name, avatar_url, bio, gender, last_seen_at FROM users WHERE id = ? AND is_active = 1">>,
+           <<"SELECT id, username, display_name, avatar_url, bio, gender, last_seen_at, is_online FROM users WHERE id = ? AND is_active = 1">>,
            [Id]) of
-        {ok, _, [[Uid, Username, Display, Avatar, Bio, Gender, LastSeen]]} ->
+        {ok, _, [[Uid, Username, Display, Avatar, Bio, Gender, LastSeen, IsOnline]]} ->
             #{<<"id">> => Uid,
               <<"username">> => str(Username),
               <<"display_name">> => str(or_else(Display, Username)),
               <<"avatar_url">> => str_or_null(Avatar),
               <<"bio">> => str_or_null(Bio),
               <<"gender">> => str_or_null(Gender),
-              <<"online">> => is_online(LastSeen),
+              <<"online">> => is_online_flag(IsOnline),
               <<"last_seen_at">> => str_or_null(LastSeen)};
         _ ->
             undefined
@@ -266,15 +266,12 @@ or_else(undefined, D) -> D;
 or_else(<<>>, D) -> D;
 or_else(V, _) -> V.
 
-is_online(null) -> false;
-is_online(undefined) -> false;
-is_online(LastSeen) when is_binary(LastSeen) ->
-    try
-        Ts = calendar:rfc3339_to_system_time(binary_to_list(LastSeen)),
-        (erlang:system_time(second) - Ts) < 90
-    catch _:_ -> false
-    end;
-is_online(_) -> false.
+%% Online = kolom `is_online' (ditulis transisi socket), bukan ambang
+%% last_seen: tanpa heartbeat, ambang waktu selalu basi.
+is_online_flag(1) -> true;
+is_online_flag(<<"1">>) -> true;
+is_online_flag(true) -> true;
+is_online_flag(_) -> false.
 
 cutoff_iso(Days) ->
     Sec = erlang:system_time(second) - Days * 86400,

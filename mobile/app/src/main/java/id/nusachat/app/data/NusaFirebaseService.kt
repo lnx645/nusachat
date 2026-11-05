@@ -84,12 +84,17 @@ class NusaFirebaseService : FirebaseMessagingService() {
                     )
                     val page = repo.messages(conversationId, limit = 10)
                     val raw = page.messages.firstOrNull { it.id == messageId } ?: return@withTimeoutOrNull null
-                    // SKDM (null) tidak pernah jadi notifikasi.
-                    sess.decryptOne(raw, session.user?.id ?: 0L)?.body?.takeIf { it.isNotBlank() }
+                    // WAJIB kering: decryptOne mengonsumsi kunci ratchet dan
+                    // akan membuat pesan tak-terbaca ("hilang") saat chat
+                    // dibuka. SKDM (null) tidak pernah jadi notifikasi.
+                    sess.previewPlaintext(raw, session.user?.id ?: 0L)?.takeIf { it.isNotBlank() }
                 }
             }
         }.getOrNull()
         if (plain.isNullOrBlank() || isCipherText(plain) || isEnvelope(plain)) return data
+        // Placeholder bukan isi pesan: notifikasi lebih baik generik daripada
+        // menampilkan "Pesan ini tidak tersedia".
+        if (E2eeManager.isDeadBody(plain) || plain == E2eeManager.PLACEHOLDER_SYNC) return data
         return data + ("body" to plain.take(180))
     }
 

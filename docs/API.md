@@ -127,7 +127,7 @@ Info aplikasi, fitur, batas, dan `ws_url`.
 | GET | `/users/show?id=5` | Profil pengguna lain |
 | POST | `/users/password` | Ganti password |
 | POST/DELETE | `/users/delete` | `password` → nonaktifkan + anonimkan + cabut relasi (username dipertahankan) |
-| POST | `/users/presence` | Kirim heartbeat/lokasi |
+| POST | `/users/presence` | Catat aktivitas/lokasi (bukan heartbeat) |
 | POST | `/users/device_key` | `device_id`, `public_key` (base64 kunci publik RSA perangkat) |
 | GET | `/users/device_keys?user_id=5` | — (daftar kunci publik perangkat user) |
 
@@ -144,7 +144,7 @@ Field `users/update`: `username` (unik, aturan register), `display_name`, `bio`,
 { "lat": -6.2, "lng": 106.816 }
 ```
 
-`users/presence` tanpa `lat`/`lng` hanya memperbarui `last_seen_at`.
+`users/presence` tanpa `lat`/`lng` hanya memperbarui `last_seen_at`. Sinyal `online` sendiri berasal dari koneksi WebSocket (kolom `users.is_online`, ditulis transisi connect/disconnect gateway), bukan dari endpoint ini — tidak ada heartbeat polling.
 
 ## Teman 🔒
 

@@ -109,6 +109,22 @@ class SettingsStore(context: Context) {
         }
     }
 
+    private val _backupAuto = MutableStateFlow(prefs.getBoolean(KEY_BACKUP_AUTO, false))
+    val backupAuto: StateFlow<Boolean> = _backupAuto.asStateFlow()
+
+    /** Backup otomatis harian ke Download/NusaChat (lokal, tanpa cloud). */
+    fun setBackupAuto(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_BACKUP_AUTO, enabled).apply()
+        _backupAuto.value = enabled
+    }
+
+    /** Pernah menampilkan prompt restore file lokal (sekali per install). */
+    fun backupPromptShown(): Boolean = prefs.getBoolean(KEY_BACKUP_PROMPT, false)
+
+    fun markBackupPromptShown() {
+        prefs.edit().putBoolean(KEY_BACKUP_PROMPT, true).apply()
+    }
+
     companion object {
         const val THEME_SYSTEM = "system"
         const val THEME_LIGHT = "light"
@@ -127,6 +143,8 @@ class SettingsStore(context: Context) {
         private const val KEY_NOTIF_MOMENT = "notif_moments"
         private const val KEY_NOTIF_SOUND = "notif_sound"
         private const val KEY_NOTIF_VIBRATE = "notif_vibrate"
+        private const val KEY_BACKUP_AUTO = "backup_auto"
+        private const val KEY_BACKUP_PROMPT = "backup_prompt_shown"
         private const val KEY_DRAFT = "draft:"
         private const val KEY_CALL_SEEN = "calls_seen_upto"
         private const val KEY_LANG = "language"

@@ -53,7 +53,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
+fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenBackup: () -> Unit = {}) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val s = t()
@@ -230,6 +230,29 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
             }
 
             SectionLabel(s.sectionStorage)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    painter = painterResource(id = NusaIcons.Database),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(22.dp),
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Cadangan lokal (.updb)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "File terenkripsi di HP Anda — tanpa server",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                NusaTextButton(onClick = onOpenBackup) { Text("Buka") }
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

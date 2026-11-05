@@ -241,13 +241,10 @@ class Users extends MY_Controller
     {
         $this->require_method(['POST']);
         $user = $this->require_auth();
-        $me = (int) $user['id'];
 
-        // Transisi offline -> online disiarkan via Erlang agar subtitle
-        // "x anggota, y online" terasa realtime (tanpa polling).
-        $prevSeen = $this->user_model->find($me)['last_seen_at'] ?? null;
-        $wasOnline = is_string($prevSeen) && (time() - (int) strtotime($prevSeen)) < 90;
-
+        // Endpoint ini hanya mencatat aktivitas/lokasi. Sinyal online
+        // dimiliki Erlang (transisi socket -> event `presence'): REST tak
+        // menyiarkan apa pun agar tak ada ghost-online tanpa offline.
         $lat = $this->param('lat');
         $lng = $this->param('lng');
         $hasLocation = $lat !== null && $lng !== null;
@@ -260,16 +257,6 @@ class Users extends MY_Controller
             $this->user_model->touch((int) $user['id'], $lat, $lng);
         } else {
             $this->user_model->touch((int) $user['id']);
-        }
-        if (!$wasOnline) {
-            $neighbors = $this->conversation_model->peerUserIds($me);
-            if ($neighbors) {
-                $this->realtime_model->push($neighbors, 'presence', [
-                    'user_id' => $me,
-                    'online' => true,
-                    'display_name' => $user['display_name'] ?? null,
-                ]);
-            }
         }
         $this->ok(['server_time' => now_iso()]);
     }

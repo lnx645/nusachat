@@ -31,10 +31,10 @@ init(Req, State) ->
 
 -spec websocket_init(map()) -> {reply, {text, binary()}, map()}.
 websocket_init(#{user_id := UserId} = State) ->
+    %% Register memicu transisi presence (is_online + siaran) di dalam
+    %% registry; tak ada tulis last_seen di sini (milik nusa_presence).
     nusa_registry:register(UserId, self()),
     Now = server_time(),
-    _ = nusa_mysql:query(
-          <<"UPDATE users SET last_seen_at = ? WHERE id = ?">>, [Now, UserId]),
     Connected = jsx:encode(#{<<"type">> => <<"connected">>,
                              <<"data">> => #{<<"user_id">> => UserId,
                                              <<"server_time">> => Now}}),

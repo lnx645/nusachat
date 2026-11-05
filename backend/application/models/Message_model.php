@@ -400,16 +400,50 @@ class Message_model extends CI_Model
         return true;
     }
 
+    /**
+     * Biru hanya bila SEMUA penerima sudah membaca. "Penerima" = snapshot
+     * message_recipients saat kirim (bukan anggota kini): anggota yang
+     * masuk belakangan tak memblokir pesan lama. 1-1 = perilaku lama.
+     */
     public function markReadUpTo(int $conversationId, int $readerId, int $messageId): void
     {
         $this->store->run(
-            'UPDATE messages SET status = ? WHERE conversation_id = ? AND sender_id <> ? AND id <= ? AND status <> ?',
+            'UPDATE messages SET status = ? WHERE conversation_id = ? AND sender_id <> ? AND id <= ? AND status <> ? ' .
+            'AND NOT EXISTS (SELECT 1 FROM message_recipients r ' .
+            'JOIN conversation_members cm ON cm.conversation_id = messages.conversation_id AND cm.user_id = r.user_id ' .
+            'WHERE r.message_id = messages.id AND r.user_id <> messages.sender_id AND cm.last_read_message_id < messages.id)',
             ['read', $conversationId, $readerId, $messageId, 'read']
         );
     }
 
-    public function markDelivered(int $conversationId, int $readerId): void
+    /**
+     * @return int[] id pesan (bukan milik reader, ≤ messageId) yang kini
+     *               berstatus read — dikirim sebagai `fully_read' agar
+     *               klien grup tak membirukan pesan yang baru dibaca satu
+     *               anggota.
+     */
+    public function readIdsUpTo(int $conversationId, int $readerId, int $messageId): array
     {
+        $rows = $this->store->all(
+            'SELECT id FROM messages WHERE conversation_id = ? AND sender_id <> ? AND id <= ? AND status = ?',
+            [$conversationId, $readerId, $messageId, 'read']
+        );
+        return array_map(static fn (array $r): int => (int) $r['id'], $rows);
+    }
+
+    /**
+     * @param int $maxId batasi sampai id ini (0 = semua); pesan yang belum
+     *                  diambil perangkat tak boleh terlanjur delivered.
+     */
+    public function markDelivered(int $conversationId, int $readerId, int $maxId = 0): void
+    {
+        if ($maxId > 0) {
+            $this->store->run(
+                'UPDATE messages SET status = ? WHERE conversation_id = ? AND sender_id <> ? AND id <= ? AND status = ?',
+                ['delivered', $conversationId, $readerId, $maxId, 'sent']
+            );
+            return;
+        }
         $this->store->run(
             'UPDATE messages SET status = ? WHERE conversation_id = ? AND sender_id <> ? AND status = ?',
             ['delivered', $conversationId, $readerId, 'sent']

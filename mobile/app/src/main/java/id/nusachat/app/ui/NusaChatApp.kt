@@ -68,6 +68,8 @@ import id.nusachat.app.ui.people.QrScanScreen
 import id.nusachat.app.ui.people.NearbyScreen
 import id.nusachat.app.ui.profile.EditProfileScreen
 import id.nusachat.app.ui.profile.MeScreen
+import id.nusachat.app.ui.profile.BackupRestorePrompt
+import id.nusachat.app.ui.profile.BackupScreen
 import id.nusachat.app.ui.profile.SettingsScreen
 import id.nusachat.app.ui.theme.NusaChatTheme
 import kotlinx.coroutines.delay
@@ -88,12 +90,14 @@ private fun rememberTabs(): List<TabItem> {
     }
 }
 
-private enum class Overlay { MOMENTS, NEARBY, FRIENDS, EDIT_PROFILE, HISTORY, STARRED, SETTINGS, SCAN }
+private enum class Overlay { MOMENTS, NEARBY, FRIENDS, EDIT_PROFILE, HISTORY, STARRED, SETTINGS, BACKUP, SCAN }
 
 @Composable
 fun NusaChatApp(vm: AppViewModel = viewModel()) {
     val session by vm.sessionState.collectAsStateWithLifecycle()
     val restore by vm.restore.collectAsStateWithLifecycle()
+    val backupPrompt by vm.localBackupPrompt.collectAsStateWithLifecycle()
+    val backupWorking by vm.backupWorking.collectAsStateWithLifecycle()
     val themeMode by vm.settings.themeMode.collectAsStateWithLifecycle()
     val fontScale by vm.settings.fontScale.collectAsStateWithLifecycle()
     val language by vm.settings.language.collectAsStateWithLifecycle()
@@ -115,6 +119,20 @@ fun NusaChatApp(vm: AppViewModel = viewModel()) {
                 !session.checked -> SplashScreen()
                 session.user == null -> AuthScreen(vm)
                 restore != null -> RestoreScreen(state = restore!!, onSkip = vm::skipRestore)
+                // Install baru + file .updb ada di Download/NusaChat: tawarkan restore.
+                backupPrompt != null -> BackupRestorePrompt(
+                    entryName = backupPrompt!!.name,
+                    entryDetail = android.text.format.Formatter.formatShortFileSize(
+                        LocalContext.current, backupPrompt!!.size
+                    ),
+                    working = backupWorking,
+                    onRestore = { key ->
+                        vm.restoreLocalEntry(backupPrompt!!, key) { n ->
+                            if (n > 0) vm.dismissBackupPrompt()
+                        }
+                    },
+                    onSkip = vm::dismissBackupPrompt,
+                )
                 else -> MainShell(vm, session.user!!)
             }
         }
@@ -394,7 +412,15 @@ private fun MainShell(vm: AppViewModel, user: User) {
             }
             overlay == Overlay.SETTINGS -> {
                 BackHandler { overlay = null }
-                SettingsScreen(vm = vm, onBack = { overlay = null })
+                SettingsScreen(
+                    vm = vm,
+                    onBack = { overlay = null },
+                    onOpenBackup = { overlay = Overlay.BACKUP },
+                )
+            }
+            overlay == Overlay.BACKUP -> {
+                BackHandler { overlay = Overlay.SETTINGS }
+                BackupScreen(vm = vm, onBack = { overlay = Overlay.SETTINGS })
             }
             overlay == Overlay.SCAN -> {
                 QrScanScreen(

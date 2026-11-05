@@ -1,11 +1,17 @@
 package id.nusachat.app.data.voice
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
+import android.os.Build
 import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
@@ -61,6 +67,11 @@ class NusaVoiceEngine(private val context: Context) {
     @Volatile private var muted = false
     @Volatile private var pendingProfile = -1
     @Volatile private var lastProfileChange = 0L
+    @Volatile private var lastVoiceAt = 0L
+    private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
+    private var agc: AutomaticGainControl? = null
+    private var focusRequest: AudioFocusRequest? = null
 
     private var socket: DatagramSocket? = null
     private var params: NvpCallParams? = null
@@ -88,6 +99,8 @@ class NusaVoiceEngine(private val context: Context) {
         var everReceived = false
         var firstAudioAt = 0L
         @Volatile var lastActivity = SystemClock.elapsedRealtime()
+        /** Frame terakhir untuk PLC (diulang dengan decay saat paket hilang). */
+        @Volatile var lastPcm: ShortArray? = null
 
         /**
          * Decoder lazy: Opus menunggu CSD lawan (handshake `csd`); AMR-WB
@@ -174,10 +187,44 @@ class NusaVoiceEngine(private val context: Context) {
         params = p
         packet = NvpPacket(p.key, p.salt)
         profile = 0
+        lastVoiceAt = 0L
+        // Reset counter agar statistik call baru tidak tercampur call sebelumnya.
+        sentPackets.set(0); sentBytes.set(0)
+        recvPackets.set(0); recvBytes.set(0)
+        lostPackets.set(0); invalidPackets.set(0); plcFrames.set(0)
+        rttMs = 0L
+        // Socket dibuat di sini (bukan di sender) agar receiver tidak balapan
+        // dapat socket bekas yang sudah di-close.
+        runCatching { socket?.close() }
+        socket = runCatching { DatagramSocket() }.getOrNull()
+        if (socket == null) {
+            running.set(false)
+            Log.e(TAG, "socket UDP gagal dibuat")
+            return
+        }
         Log.i(TAG, "start call=${p.callId} slot=${p.slot} codec=${p.codec} relay=${p.relayHost}:${p.relayPort}")
         runCatching {
             val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             audio?.mode = AudioManager.MODE_IN_COMMUNICATION
+            // Minta fokus audio agar suara call tidak direbut notifikasi/musik.
+            if (Build.VERSION.SDK_INT >= 26) {
+                val attrs = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                    .setAudioAttributes(attrs)
+                    .setAcceptsDelayedFocusGain(false)
+                    .build()
+                focusRequest = req
+                audio?.requestAudioFocus(req)
+            } else {
+                @Suppress("DEPRECATION")
+                audio?.requestAudioFocus(
+                    null, AudioManager.STREAM_VOICE_CALL,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
+                )
+            }
         }
         senderThread = Thread({ senderLoop(p) }, "nvp-sender").also { it.start() }
         receiverThread = Thread({ receiverLoop(p) }, "nvp-receiver").also { it.start() }
@@ -186,14 +233,28 @@ class NusaVoiceEngine(private val context: Context) {
     fun stop() {
         if (!running.compareAndSet(true, false)) return
         runCatching { socket?.close() }
+        socket = null
         senderThread?.join(2000)
         receiverThread?.join(2000)
         senderThread = null
         receiverThread = null
         chains.values.forEach { runCatching { it.release() } }
         chains.clear()
+        runCatching { aec?.release() }
+        runCatching { ns?.release() }
+        runCatching { agc?.release() }
+        aec = null
+        ns = null
+        agc = null
         runCatching {
             val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            if (Build.VERSION.SDK_INT >= 26) {
+                focusRequest?.let { audio?.abandonAudioFocusRequest(it) }
+            } else {
+                @Suppress("DEPRECATION")
+                audio?.abandonAudioFocus(null)
+            }
+            focusRequest = null
             audio?.mode = AudioManager.MODE_NORMAL
             audio?.isSpeakerphoneOn = false
         }
@@ -206,7 +267,10 @@ class NusaVoiceEngine(private val context: Context) {
         var record: AudioRecord? = null
         var encoder: NvpEncoder? = null
         try {
-            val sock = DatagramSocket().also { socket = it }
+            val sock = socket ?: run {
+                Log.e(TAG, "socket belum siap")
+                return
+            }
             val relay = InetAddress.getByName(p.relayHost)
             val minBuf = AudioRecord.getMinBufferSize(
                 NvpCodecs.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
@@ -221,6 +285,23 @@ class NusaVoiceEngine(private val context: Context) {
                 Log.e(TAG, "AudioRecord init gagal")
                 return
             }
+            // Hanya AEC yang dipaksa; NS/AGC dimatikan — di HP murah
+            // keduanya sering bikin kresek/musical-noise. VOICE_COMMUNICATION
+            // sudah ada NS/AGC software bawaan.
+            runCatching {
+                if (AcousticEchoCanceler.isAvailable()) {
+                    aec = AcousticEchoCanceler.create(record.audioSessionId)?.also {
+                        runCatching { it.enabled = true }
+                    }
+                    Log.i(TAG, "AEC enabled=${aec?.enabled}")
+                } else {
+                    Log.w(TAG, "AEC tidak tersedia di perangkat ini")
+                }
+            }
+            runCatching { ns?.release() }
+            runCatching { agc?.release() }
+            ns = null
+            agc = null
             record.startRecording()
             var seq = (Math.random() * 65536).toInt()
             var ts = (Math.random() * 4294967296L).toLong()
@@ -235,6 +316,7 @@ class NusaVoiceEngine(private val context: Context) {
             var lastFeedbackAt = 0L
             var lastPingAt = 0L
             var csdSent = 0
+            var lastCsdAt = 0L
             val tick = ShortArray(NvpCodecs.TICK_SAMPLES)
             while (running.get()) {
                 // Terapkan adaptasi profil (dari feedback penerima lawan).
@@ -254,31 +336,40 @@ class NusaVoiceEngine(private val context: Context) {
                 }
                 val read = record.read(tick, 0, tick.size)
                 if (read <= 0) continue
+                // Bila read parsial, nolkan sisa agar tidak bawa sampel basi
+                // (sumber kresek). Lalu gate lembut: sunyi dilemahkan 0,25
+                // bukan dibuang — hiss turun tapi jitter tetap stabil.
+                if (read < tick.size) java.util.Arrays.fill(tick, read, tick.size, 0)
                 val now = System.currentTimeMillis()
-                // VAD energi; mute/sunyi = DTX (kirim keepalive saja).
-                if (muted || !isVoice(tick)) {
+                // Mute = jangan kirim audio (kirim keepalive agar NAT tetap buka).
+                if (muted) {
                     blobs.clear()
-                    if (now - lastKeepaliveAt > 10_000) {
+                    if (now - lastKeepaliveAt > 2_500) {
                         sendRaw(sock, relay, packet!!.keepalive(p.callId, p.slot, p.token, seq, ts))
                         lastKeepaliveAt = now
                     }
                     continue
                 }
+                softNoiseGate(tick)
+                // Tanpa gate VAD: selalu kirim agar suara pelan tidak terpotong
+                // dan jitter tetap stabil (DTX lama bikin PLC melonjak + patah).
                 val enc = encoder ?: continue
-                val blob = enc.encode(tick.copyOf(read), now * 1000)
+                val blob = enc.encode(tick.copyOf(), now * 1000)
                 if (blob != null) blobs.add(blob)
-                // Handshake CSD: kirim 3x di awal agar tahan loss (Opus saja;
-                // AMR-WB tak punya codecConfig → dilewati).
-                if (csdSent < 3) {
+                // Handshake CSD: kirim 3x di awal + ulang tiap 2 dtk agar tahan
+                // loss (lawan join belakangan tetap dapat). AMR-WB tak punya
+                // codecConfig → dilewati.
+                if (p.codec == Nvp.CODEC_OPUS) {
                     val cfg = enc.codecConfig
-                    if (cfg != null) {
+                    if (cfg != null && (csdSent < 3 || now - lastCsdAt > 2_000)) {
                         val b64 = Base64.encodeToString(cfg, Base64.NO_WRAP)
                         sendControl(
                             sock, relay,
                             JSONObject().put("t", "csd").put("csd", b64)
                                 .toString().toByteArray(),
                         )
-                        csdSent++
+                        if (csdSent < 3) csdSent++
+                        lastCsdAt = now
                     }
                 }
                 if (blobs.size < ticksPerPacket) continue
@@ -331,11 +422,27 @@ class NusaVoiceEngine(private val context: Context) {
         }
     }
 
-    private fun isVoice(tick: ShortArray): Boolean {
+    private fun isVoice(tick: ShortArray, now: Long): Boolean {
         var sum = 0L
         for (s in tick) sum += s * s
         val rms = kotlin.math.sqrt(sum.toDouble() / tick.size)
-        return rms > VAD_THRESHOLD
+        if (rms > VAD_THRESHOLD) {
+            lastVoiceAt = now
+            return true
+        }
+        // Hangover: tahan 400ms setelah suara terakhir agar ujung kata
+        // tidak terpotong dan paket tidak putus-sambung.
+        return now - lastVoiceAt < VAD_HANGOVER_MS
+    }
+
+    private fun softNoiseGate(tick: ShortArray) {
+        var sum = 0L
+        for (s in tick) sum += s * s
+        val rms = kotlin.math.sqrt(sum.toDouble() / tick.size)
+        // Sunyi (<250) dilemahkan agar hiss tidak ikut dikirim penuh.
+        if (rms < 250.0) {
+            for (i in tick.indices) tick[i] = (tick[i] * 0.25f).toInt().toShort()
+        }
     }
 
     private fun bundleBlobs(blobs: List<ByteArray>): ByteArray {
@@ -387,20 +494,40 @@ class NusaVoiceEngine(private val context: Context) {
             var waits = 0
             while (running.get() && socket == null && waits++ < 100) Thread.sleep(50)
             val sock = socket ?: return
-            sock.soTimeout = 200
+            // Tick 20 ms (lihat NvpPlayout): timeout terima = satu tick agar
+            // tiap iterasi memainkan frame yang jatuh tempo, bukan 200 ms+.
+            sock.soTimeout = NvpPlayout.TICK_MS.toInt()
             val minBuf = AudioTrack.getMinBufferSize(
                 NvpCodecs.SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
             )
-            track = AudioTrack(
-                AudioManager.STREAM_VOICE_CALL, NvpCodecs.SAMPLE_RATE,
-                AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                minBuf * 2, AudioTrack.MODE_STREAM,
-            )
+            track = if (Build.VERSION.SDK_INT >= 21) {
+                val attrs = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                val fmt = AudioFormat.Builder()
+                    .setSampleRate(NvpCodecs.SAMPLE_RATE)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+                AudioTrack(
+                    attrs, fmt, minBuf * 4,
+                    AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                AudioTrack(
+                    AudioManager.STREAM_VOICE_CALL, NvpCodecs.SAMPLE_RATE,
+                    AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
+                    minBuf * 4, AudioTrack.MODE_STREAM,
+                )
+            }
             track.play()
             val buf = ByteArray(2048)
             val datagram = DatagramPacket(buf, buf.size)
             val mix = ShortArray(NvpCodecs.TICK_SAMPLES)
+            var lastTick = SystemClock.elapsedRealtime()
             while (running.get()) {
                 while (running.get()) {
                     try {
@@ -419,27 +546,57 @@ class NusaVoiceEngine(private val context: Context) {
                         chains.remove(slot)?.release()
                     }
                 }
-                // Satu tick main 20 ms: mix semua slot.
-                java.util.Arrays.fill(mix, 0)
-                var active = false
-                for (chain in chains.values) {
-                    val frame = chain.jitter.pop()
-                    if (frame == null) {
-                        if (chain.everReceived) plcFrames.incrementAndGet()
-                        continue
+                // Tick main 20 ms (lihat NvpPlayout): pop rutin atau antrean
+                // basi semua. Kejar ketinggalan dibatasi (catch-up burst).
+                val now = SystemClock.elapsedRealtime()
+                val due = NvpPlayout.framesDue(now - lastTick)
+                if (due <= 0) {
+                    // Jangan busy-spin: hemat CPU agar tidak ganggu audio.
+                    Thread.sleep(5)
+                    continue
+                }
+                lastTick = now
+                var wroteAny = false
+                repeat(due) {
+                    // Satu tick main 20 ms: mix semua slot. Paket hilang =
+                    // ulangi frame terakhir dengan decay (PLC), bukan sunyi
+                    // mendadak — mengurangi patah-patah.
+                    java.util.Arrays.fill(mix, 0)
+                    var active = false
+                    for (chain in chains.values) {
+                        val frame = chain.jitter.pop()
+                        val pcm: ShortArray? = if (frame != null) {
+                            chain.lastPcm = frame.payload
+                            frame.payload
+                        } else {
+                            val prev = chain.lastPcm
+                            if (chain.everReceived && prev != null) {
+                                plcFrames.incrementAndGet()
+                                // Decay 0.9 agar tidak berdengung saat loss panjang.
+                                ShortArray(prev.size) { i -> (prev[i] * 0.9f).toInt().toShort() }.also {
+                                    chain.lastPcm = it
+                                }
+                            } else {
+                                if (chain.everReceived) plcFrames.incrementAndGet()
+                                null
+                            }
+                        }
+                        if (pcm == null) continue
+                        active = true
+                        for (i in mix.indices) {
+                            // Headroom 0,9 + hard-clip agar tidak kresek saat keras.
+                            val mixed = (mix[i] + (pcm.getOrElse(i) { 0 })) * 0.9f
+                            mix[i] = mixed.toInt().coerceIn(
+                                Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt(),
+                            ).toShort()
+                        }
                     }
-                    active = true
-                    val pcm = frame.payload
-                    for (i in mix.indices) {
-                        val mixed = mix[i] + (pcm.getOrElse(i) { 0 })
-                        mix[i] = mixed.coerceIn(
-                            Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt(),
-                        ).toShort()
+                    if (active || chains.isNotEmpty()) {
+                        runCatching { track.write(mix, 0, mix.size) }
+                        wroteAny = true
                     }
                 }
-                if (active || chains.isNotEmpty()) {
-                    runCatching { track.write(mix, 0, mix.size) }
-                } else {
+                if (!wroteAny && chains.isEmpty()) {
                     Thread.sleep(20)
                 }
             }
@@ -554,7 +711,8 @@ class NusaVoiceEngine(private val context: Context) {
     companion object {
         private const val TAG = "NusaVoice"
         private const val MAX_SLOTS = 8
-        private const val VAD_THRESHOLD = 400.0
+        private const val VAD_THRESHOLD = 180.0
+        private const val VAD_HANGOVER_MS = 400L
         private const val CSD_WAIT_MS = 2000L
     }
 }

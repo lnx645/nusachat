@@ -114,14 +114,37 @@ tampil "[Pesan terkirim]". Diverifikasi: vektor interop JVM +
 dekrip silang implementasi independen (lampiran tes: `EnvelopeV2Test`,
 `CryptoVectorsTest` kasus `envelope*`).
 
-## Backup (ringkas; detail diquip Fase 4)
+## Backup lokal .updb (tanpa server, device-centric murni)
 
-Kunci backup acak 256-bit dibuat di HP. Mode kunci 64 digit:
-tampil sebagai 64 digit desimal (`SHA-256(digit)` = kunci), server tak
-pernah lihat. Mode passphrase: Argon2id → KEK → bungkus kunci backup
-(AES-GCM). Blob = header versi + ciphertext dump Room (+media).
-Tanpa HSM: mode passphrase tahan sekuat passphrase (jujur, bukan
-setara WA di titik ini).
+Server NusaChat adalah relay sementara (TTL 30 hari, disapu 24 jam setelah
+semua ack). Storage permanen = Room di HP. Tanpa backup, install ulang /
+hapus data = riwayat + kunci E2EE hilang dan tak bisa pulih dari relay
+(forward secrecy v2 memang tak bisa pulih — sama seperti Signal).
+
+Solusi ala WhatsApp tapi tanpa cloud: scheduler harian (`BackupWorker`,
+WorkManager 24 jam, baterai/storage cukup) mengenkripsi chat ke folder tetap
+`Download/NusaChat/` (MediaStore, tanpa izin; API 24–28 fallback File API):
+`nusachat-backup-latest.updb` ditimpa tiap jalan + arsip harian
+`nusachat-backup-YYYYMMDD-HHmm.updb` (7 terakhir). Kunci disimpan terenkripsi
+di HP (`BackupKeys`, EncryptedSharedPreferences + Keystore) agar scheduler
+jalan mandiri; user mencatatnya sekali. Tanpa file + kunci, tak bisa pulih.
+
+- Kunci dibuat sekali di HP, tak pernah naik ke mana pun. Mode 64 digit:
+  64 digit acak → kunci = `SHA-256(digit ASCII)`. Mode passphrase:
+  PBKDF2-HMAC-SHA256(passphrase, salt 16B, 200k) → KEK → bungkus kunci
+  backup acak 32B (AES-GCM). (Argon2id ideal tapi butuh lib native.)
+- Isi = JSON {conversations, messages (plaintext hasil dekrip), e2ee_keys
+  legacy} dienkripsi AES-256-GCM(kunci backup). Media biner tak ikut
+  (hemat); yang disimpan URL + caption — URL upload persisten di server.
+- Install baru + cache kosong + file valid ditemukan → prompt restore otomatis
+  (cukup masukkan kunci). Pindah HP = salin file manual (USB/Drive) + restore.
+  Tombol Bagikan/salin tetap ada untuk pindah manual via SAF.
+- Kode: `data/ChatBackup.kt` (kripto + format), `data/local/BackupFiles.kt`
+  (folder tetap + nama file), `data/BackupKeys.kt` (kunci tersimpan),
+  `data/BackupWorker.kt` (jadwal), `ui/profile/BackupScreen.kt`,
+  `AppViewModel.backupNow()/restoreLocalEntry()/setBackupAuto()`.
+  Uji: `ChatBackupTest.kt` (round-trip digits/pass, kunci salah gagal),
+  `BackupNamesTest.kt` (format + prune arsip).
 
 ## Pemulihan reinstall (bug Nov-2026, sudah diperbaiki)
 

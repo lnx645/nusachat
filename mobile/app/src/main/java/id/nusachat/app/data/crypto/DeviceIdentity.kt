@@ -142,6 +142,9 @@ class DeviceIdentity(context: Context) {
         return priv
     }
 
+    /** Baca privkey one-time TANPA menghapus (untuk preview kering). */
+    fun peekOtpk(keyId: Int): String? = prefs.getString(KEY_OTPK + keyId, null)
+
     /** Hapus semua (logout / reset). Sesi di [CryptoStore] ikut dibuang. */
     fun wipeAll() {
         prefs.edit().clear().apply()

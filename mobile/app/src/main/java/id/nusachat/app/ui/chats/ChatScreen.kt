@@ -342,13 +342,19 @@ fun ChatScreen(
         return lastVisible >= info.totalItemsCount - 2
     }
 
-    LaunchedEffect(state.messages.size, state.typingName) {
+    LaunchedEffect(state.messages.size, state.typingName, state.keySyncing) {
         if (state.messages.isEmpty()) return@LaunchedEffect
         val latest = state.messages.lastOrNull()
         val latestId = latest?.id ?: 0L
         val grewAtEnd = latestId != lastSeenId
         lastSeenId = latestId
         if (!initialSnapDone) {
+            if (state.keySyncing) {
+                // Masih cache / delta jaringan belum termuat: snap ke bawah
+                // cache saja. initialUnread bisa menunjuk pesan yang belum ada.
+                snapToBottom()
+                return@LaunchedEffect
+            }
             initialSnapDone = true
             // Lompat ke pesan belum dibaca pertama bila ada (dan termuat).
             val unread = state.initialUnread

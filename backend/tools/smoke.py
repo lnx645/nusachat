@@ -282,6 +282,12 @@ def main():
         dewi = login("dewi")
         _, me_budi = request("GET", "/users/me", token=budi)
         budi_id = me_budi["data"]["user"]["id"]
+        # Online = socket WS hidup; REST saja (tanpa socket) tetap offline.
+        status, payload = request("GET", "/conversations", token=nusa)
+        convs = payload.get("data", {}).get("conversations", []) if payload.get("ok") else []
+        budi_conv = next((c for c in convs if c.get("peer", {}).get("username") == "budi"), None)
+        check("peer offline without socket", budi_conv is not None and budi_conv["peer"].get("online") is False,
+              f"peer={budi_conv['peer'] if budi_conv else None}")
         status, payload = request("POST", "/conversations/create_group", {"title": "Smoke Group", "member_ids": [2]}, token=nusa)
         check("create group", status == 201, f"status={status} {payload}")
         group_id = payload.get("data", {}).get("conversation", {}).get("id")
@@ -296,6 +302,20 @@ def main():
             invite_token = payload.get("data", {}).get("invite_token", invite_token)
             status, payload = request("POST", "/conversations/join", {"token": "nusachat://group/" + invite_token}, token=budi)
             check("join via link", status == 201 and payload["data"]["status"] == "joined", f"status={status} {payload}")
+
+            # Centang grup: 1 pembaca -> delivered; semua penerima -> read.
+            status, payload = request("POST", "/conversations/send", {"id": group_id, "type": "text", "body": f"GrupRead-{suffix}"}, token=nusa)
+            grp_msg = payload.get("data", {}).get("message", {}).get("id")
+            status, payload = request("POST", "/conversations/read", {"id": group_id, "message_id": grp_msg}, token=sari)
+            status, payload = request("GET", f"/conversations/messages?id={group_id}&after_id={grp_msg - 1}", token=nusa)
+            got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+            st = next((m.get("status") for m in got if m["id"] == grp_msg), None)
+            check("group read waits for all", st == "delivered", f"status={st}")
+            status, payload = request("POST", "/conversations/read", {"id": group_id, "message_id": grp_msg}, token=budi)
+            status, payload = request("GET", f"/conversations/messages?id={group_id}&after_id={grp_msg - 1}", token=nusa)
+            got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+            st = next((m.get("status") for m in got if m["id"] == grp_msg), None)
+            check("group read all", st == "read", f"status={st}")
 
             status, payload = request("POST", "/conversations/update_group_settings", {"id": group_id, "approve_new_members": True}, token=nusa)
             check("enable approval", status == 200 and payload["data"]["settings"]["approve_new_members"] is True, f"status={status} {payload}")
@@ -591,6 +611,14 @@ def main():
         check("mark unread", status == 200 and payload["data"]["unread_count"] >= 1, f"status={status} {payload}")
         status, payload = request("POST", "/conversations/read", {"id": new_conv, "message_id": probe_id}, token=nusa)
         check("read again cleanup", status == 200, f"status={status} {payload}")
+        # Tandai-belum-dibaca tak boleh melompat MAJU: pesan berikutnya
+        # harus tetap menaikkan badge.
+        status, payload = request("POST", "/conversations/mark_unread", {"id": new_conv, "message_id": 999999999}, token=nusa)
+        status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": f"SetelahMark-{suffix}"}, token=new_token)
+        status, payload = request("GET", f"/conversations/show?id={new_conv}", token=nusa)
+        check("mark unread never jumps forward",
+              status == 200 and payload["data"]["conversation"]["unread_count"] >= 1,
+              f"status={status} {payload}")
         status, payload = request("GET", f"/conversations/search_all?q={probe}", token=nusa)
         found = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
         check("search all chats", status == 200 and any(m["id"] == probe_id and m["conversation_id"] == new_conv for m in found), f"status={status} {payload}")
@@ -631,6 +659,10 @@ def main():
         status, payload = request("GET", f"/conversations/messages?id={new_conv}&after_id={ack_msg - 1}", token=new_token)
         got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
         check("relay fetch", status == 200 and any(m["id"] == ack_msg for m in got), f"status={status} {payload}")
+        status, payload = request("GET", f"/conversations/messages?id={new_conv}&after_id={ack_msg - 1}", token=nusa)
+        got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+        st = next((m.get("status") for m in got if m["id"] == ack_msg), None)
+        check("fetch marks delivered", st == "delivered", f"status={st}")
         status, payload = request("POST", "/conversations/ack", {"id": new_conv, "message_id": ack_msg}, token=new_token)
         check("relay ack", status == 200 and payload.get("ok"), f"status={status} {payload}")
         status, payload = request("GET", f"/conversations/messages?id={new_conv}&after_id={ack_msg - 1}", token=nusa)
@@ -643,6 +675,11 @@ def main():
             check("relay grace 24h", exp_dt <= datetime.now(timezone.utc) + timedelta(hours=24, minutes=5), f"expires_at={exp}")
         status, payload = request("POST", "/conversations/read", {"id": new_conv, "message_id": ack_msg}, token=nusa)
         check("read after ack", status == 200, f"status={status} {payload}")
+        status, payload = request("POST", "/conversations/read", {"id": new_conv, "message_id": ack_msg}, token=new_token)
+        status, payload = request("GET", f"/conversations/messages?id={new_conv}&after_id={ack_msg - 1}", token=nusa)
+        got = payload.get("data", {}).get("messages", []) if payload.get("ok") else []
+        st = next((m.get("status") for m in got if m["id"] == ack_msg), None)
+        check("peer read marks read", st == "read", f"status={st}")
         status, payload = request("POST", "/conversations/send", {"id": new_conv, "type": "text", "body": f"Balas-{suffix}", "reply_to_id": ack_msg}, token=new_token)
         check("reply after ack", status == 201, f"status={status} {payload}")
         status, payload = request("POST", "/conversations/ack", {"id": new_conv, "message_id": 999999999}, token=nusa)

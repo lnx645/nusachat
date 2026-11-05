@@ -24,7 +24,9 @@ class ChatCache(context: Context) {
     private fun dao() = ChatDatabase.get(app).chatDao()
 
     suspend fun saveMessages(messages: List<Message>): Unit = withContext(Dispatchers.IO) {
-        val rows = messages.filter { it.id != 0L }
+        // Permanen tak-terbaca langsung dibuang: habis install ulang chat
+        // terlihat kosong & fresh, tanpa tulisan "tidak tersedia".
+        val rows = messages.filter { it.id != 0L && !isDeadForDisplay(it) }
         if (rows.isEmpty()) return@withContext
         // Hasil dekrip gagal (placeholder/cipher) tak boleh menimpa cache
         // terbaca — cegah trauma reinstall menular ke cache bagus.
@@ -46,19 +48,136 @@ class ChatCache(context: Context) {
         runCatching { dao().totalCount() }.getOrDefault(0)
     }
 
+    /** Seluruh pesan cache (plaintext hasil dekrip) untuk backup terenkripsi. */
+    suspend fun exportAll(limit: Int = 20000): List<Message> = withContext(Dispatchers.IO) {
+        val out = mutableListOf<Message>()
+        var offset = 0
+        val page = 1000
+        while (out.size < limit) {
+            val rows = runCatching { dao().allPaged(page, offset) }.getOrDefault(emptyList())
+            if (rows.isEmpty()) break
+            // Backup hanya isi bermakna: placeholder (mati/HEAL) tak ikut.
+            rows.mapNotNull { it.toMessage() }.filter { isReadableForCache(it) }.forEach { out.add(it) }
+            if (rows.size < page) break
+            offset += page
+        }
+        out.take(limit)
+    }
+
+    /**
+     * Sapu satu kali: hapus baris placeholder permanen peninggalan versi lama
+     * (habis install ulang terlihat kosong & fresh). Dipanggil saat login.
+     * @return jumlah baris terhapus.
+     */
+    suspend fun pruneDead(limit: Int = 20000): Int = withContext(Dispatchers.IO) {
+        val dead = mutableListOf<Long>()
+        var offset = 0
+        val page = 1000
+        while (dead.size + offset < limit) {
+            val rows = runCatching { dao().allPaged(page, offset) }.getOrDefault(emptyList())
+            if (rows.isEmpty()) break
+            rows.mapNotNull { it.toMessage() }.filter { isDeadForDisplay(it) }.forEach { dead.add(it.id) }
+            if (rows.size < page) break
+            offset += page
+        }
+        if (dead.isEmpty()) return@withContext 0
+        dead.distinct().chunked(500).forEach { runCatching { dao().deleteByIds(it) } }
+        dead.size
+    }
+
+    /** Tulis hasil restore backup (overwrite per id). */
+    suspend fun importAll(messages: List<Message>): Int = withContext(Dispatchers.IO) {
+        if (messages.isEmpty()) return@withContext 0
+        var n = 0
+        messages.chunked(500).forEach { chunk ->
+            val rows = chunk.filter { it.id != 0L }.map { it.toRow() }
+            if (rows.isNotEmpty()) {
+                dao().upsertAll(rows)
+                n += rows.size
+                chunk.filter { it.id > 0 }.groupBy { it.conversationId }
+                    .forEach { (conv, list) ->
+                        list.maxOfOrNull { it.id }?.let { saveCursor(conv, it) }
+                    }
+            }
+        }
+        n
+    }
+
     suspend fun saveMessage(message: Message): Unit = withContext(Dispatchers.IO) {
-        if (message.id != 0L) dao().upsert(message.toRow())
+        if (message.id != 0L && !isDeadForDisplay(message)) dao().upsert(message.toRow())
+    }
+
+    /**
+     * Plaintext cache berdasarkan id. Dipakai pratinjau (daftar chat, pin)
+     * agar TIDAK mendekrip ulang ciphertext yang kunci ratchet-nya sudah
+     * terpakai — dekrip kedua selalu gagal (kunci sekali pakai).
+     */
+    suspend fun byIds(ids: List<Long>): List<Message> = withContext(Dispatchers.IO) {
+        val clean = ids.filter { it > 0 }.distinct()
+        if (clean.isEmpty()) return@withContext emptyList()
+        dao().byIds(clean).mapNotNull { it.toMessage() }
+    }
+
+    /** Naikkan status pesan milikku ≤ messageId (monotonik, anti balik). */
+    suspend fun markOwnUpTo(conversationId: Long, myId: Long, messageId: Long, status: String): Unit =
+        withContext(Dispatchers.IO) {
+            val mine = ownIdsUpTo(conversationId, myId, messageId)
+            if (mine.isEmpty()) return@withContext
+            runCatching {
+                when (status) {
+                    "read" -> dao().markRead(mine)
+                    "delivered" -> dao().markDelivered(mine)
+                }
+            }
+        }
+
+    /**
+     * Terapkan event read ke cache: [readIds] biru, milikku lain ≤ messageId
+     * minimal abu (dibaca = diterima). Null = server lama: birukan semua.
+     */
+    suspend fun markReadUpTo(
+        conversationId: Long,
+        myId: Long,
+        messageId: Long,
+        readIds: Set<Long>?,
+    ): Unit = withContext(Dispatchers.IO) {
+        if (readIds == null) {
+            markOwnUpTo(conversationId, myId, messageId, "read")
+            return@withContext
+        }
+        val mine = ownIdsUpTo(conversationId, myId, messageId)
+        if (mine.isEmpty()) return@withContext
+        val (blue, grey) = mine.partition { it in readIds }
+        runCatching {
+            if (blue.isNotEmpty()) dao().markRead(blue)
+            if (grey.isNotEmpty()) dao().markDelivered(grey)
+        }
+    }
+
+    /** Id pesan milikku ≤ messageId (pengirim dibaca dari payload JSON). */
+    private suspend fun ownIdsUpTo(conversationId: Long, myId: Long, messageId: Long): List<Long> {
+        if (messageId <= 0) return emptyList()
+        val rows = runCatching { dao().upTo(conversationId, messageId) }.getOrDefault(emptyList())
+        if (rows.isEmpty()) return emptyList()
+        return rows.mapNotNull { row ->
+            val senderId = runCatching {
+                JSONObject(row.payload).optJSONObject("sender")?.optLong("id")
+            }.getOrNull()
+            if (senderId == myId) row.id else null
+        }
     }
 
     /** Pesan terbaru dari cache (urut naik seperti tampilan). */
     suspend fun recent(conversationId: Long, limit: Int = 40): List<Message> =
         withContext(Dispatchers.IO) {
-            dao().recent(conversationId, limit).mapNotNull { it.toMessage() }.sortedBy { it.id }
+            dao().recent(conversationId, limit).mapNotNull { it.toMessage() }
+                .filterNot { isDeadForDisplay(it) }.sortedBy { it.id }
         }
 
     suspend fun older(conversationId: Long, beforeId: Long, limit: Int = 30): List<Message> =
         withContext(Dispatchers.IO) {
-            dao().older(conversationId, beforeId, limit).mapNotNull { it.toMessage() }.sortedBy { it.id }
+            dao().older(conversationId, beforeId, limit).mapNotNull { it.toMessage() }
+                .filterNot { isDeadForDisplay(it) }.sortedBy { it.id }
         }
 
     /** Antre kirim offline di semua percakapan. */
@@ -98,6 +217,15 @@ class ChatCache(context: Context) {
     }
 
     companion object {
+        /**
+         * Permanen tak-terbaca (kunci hilang/rantai v2 mati): jangan tampil
+         * atau simpan. Beda dengan SYNC ("membutuhkan waktu") yang bisa heal.
+         */
+        fun isDeadForDisplay(m: Message): Boolean {
+            if (m.type != "text" || m.body == null) return false
+            return id.nusachat.app.data.E2eeManager.isDeadBody(m.body)
+        }
+
         /** Baris layak simpan tanpa syarat (terbaca / non-teks). */
         fun isReadableForCache(m: Message): Boolean {
             if (m.type != "text" || m.body == null) return true

@@ -419,6 +419,14 @@ class Conversation_model extends CI_Model
             );
             $target = max(0, $lastId - 1);
         }
+        // Hanya boleh mundur: tanpa min(), "tandai belum dibaca" melompat
+        // MAJU melewati pesan yang belum dibaca (badge hilang + penanda
+        // baca korup) setiap target > posisi kini.
+        $current = (int) $this->store->value(
+            'SELECT last_read_message_id FROM conversation_members WHERE conversation_id = ? AND user_id = ?',
+            [$conversationId, $userId]
+        );
+        $target = min($target, $current);
         $this->store->update(
             'conversation_members',
             ['last_read_message_id' => $target],

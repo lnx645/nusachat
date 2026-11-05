@@ -12,11 +12,11 @@
 %%% docs/ARCHITECTURE.md ("Hibrida REST + WS").
 %%%
 %%% Semantik = cermin endpoint REST (Conversations::ack/read/typing):
-%%% cek anggota → tulis MySQL → fan-out event ke anggota LAIN yang
+%%% cek anggota → tulis MySQL (termasuk kolom status: delivered/read
+%%% persisten, bukan cuma event) → fan-out event ke anggota LAIN yang
 %%% online. Event dikirim LANGSUNG ke socket (tanpa baris
-%%% realtime_events): offline tak butuh ketiganya — status baca/ack
-%%% dipulihkan dari penanda persisten (last_read, recipients) saat
-%%% fetch berikut, typing memang efemeral.
+%%% realtime_events): offline tak butuh ketiganya — status pulih dari
+%%% kolom persisten saat fetch berikut, typing memang efemeral.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(nusa_client_events).
@@ -95,11 +95,12 @@ run(UserId, {ack, ConvId, MsgId}) ->
 run(UserId, {read, ConvId, MsgId}) ->
     case is_member(ConvId, UserId) of
         true ->
-            mark_read(ConvId, UserId, MsgId),
+            FullyRead = mark_read(ConvId, UserId, MsgId),
             emit_except(ConvId, UserId, <<"read">>,
                         #{<<"conversation_id">> => ConvId,
                           <<"user_id">> => UserId,
-                          <<"message_id">> => MsgId});
+                          <<"message_id">> => MsgId,
+                          <<"fully_read">> => FullyRead});
         false ->
             ok
     end;
@@ -146,7 +147,9 @@ display_name(UserId) ->
         _ -> <<>>
     end.
 
-%% Cermin Message_model::ackUpTo. Balikan: id pesan yang full-ack.
+%% Cermin Message_model::ackUpTo + markDelivered. Balikan: id pesan
+%% yang full-ack. Status `delivered' WAJIB persisten di sini: tanpa
+%% ini centang 2 abu hanya event sesaat lalu balik 1 saat fetch.
 -spec ack_up_to(integer(), integer(), integer()) -> [integer()].
 ack_up_to(ConvId, UserId, MsgId) ->
     Now = nusa_fanout:cutoff_seconds_back(0),
@@ -154,6 +157,10 @@ ack_up_to(ConvId, UserId, MsgId) ->
           <<"UPDATE message_recipients SET acked_at = ? WHERE user_id = ? AND acked_at IS NULL "
             "AND message_id IN (SELECT id FROM messages WHERE conversation_id = ? AND id <= ?)">>,
           [Now, UserId, ConvId, MsgId]),
+    _ = nusa_mysql:query(
+          <<"UPDATE messages SET status = ? WHERE conversation_id = ? AND sender_id <> ? "
+            "AND id <= ? AND status = ?">>,
+          [<<"delivered">>, ConvId, UserId, MsgId, <<"sent">>]),
     FullyAcked =
         case nusa_mysql:query(
                <<"SELECT m.id FROM messages m WHERE m.conversation_id = ? AND m.id <= ? "
@@ -177,18 +184,38 @@ ack_up_to(ConvId, UserId, MsgId) ->
     end,
     FullyAcked.
 
--spec mark_read(integer(), integer(), integer()) -> ok.
+%% Balikan: id pesan yang kini `read' (cermin readIdsUpTo PHP).
+-spec mark_read(integer(), integer(), integer()) -> [integer()].
 mark_read(ConvId, UserId, MsgId) ->
     %% Atomik (lebih ketat dari baca-dulu PHP: tak ada race antar device).
     _ = nusa_mysql:query(
           <<"UPDATE conversation_members SET last_read_message_id = ? "
             "WHERE conversation_id = ? AND user_id = ? AND last_read_message_id < ?">>,
           [MsgId, ConvId, UserId, MsgId]),
+    %% Dibaca = pasti sudah diterima: naikkan dulu sent -> delivered.
     _ = nusa_mysql:query(
           <<"UPDATE messages SET status = ? WHERE conversation_id = ? AND sender_id <> ? "
-            "AND id <= ? AND status <> ?">>,
+            "AND id <= ? AND status = ?">>,
+          [<<"delivered">>, ConvId, UserId, MsgId, <<"sent">>]),
+    %% Biru hanya bila SEMUA penerima (snapshot recipients, bukan anggota
+    %% kini: anggota baru tak memblokir pesan lama) sudah membaca.
+    %% 1-1 = perilaku lama (satu-satunya peer).
+    _ = nusa_mysql:query(
+          <<"UPDATE messages SET status = ? WHERE conversation_id = ? AND sender_id <> ? "
+            "AND id <= ? AND status <> ? "
+            "AND NOT EXISTS (SELECT 1 FROM message_recipients r "
+            "JOIN conversation_members cm ON cm.conversation_id = messages.conversation_id "
+            "AND cm.user_id = r.user_id "
+            "WHERE r.message_id = messages.id AND r.user_id <> messages.sender_id "
+            "AND cm.last_read_message_id < messages.id)">>,
           [<<"read">>, ConvId, UserId, MsgId, <<"read">>]),
-    ok.
+    case nusa_mysql:query(
+           <<"SELECT id FROM messages WHERE conversation_id = ? AND sender_id <> ? "
+             "AND id <= ? AND status = ?">>,
+           [ConvId, UserId, MsgId, <<"read">>]) of
+        {ok, _, Rows} -> [to_int(Id) || [Id] <- Rows];
+        _ -> []
+    end.
 
 %% -------------------------------------------------------------- emit
 
